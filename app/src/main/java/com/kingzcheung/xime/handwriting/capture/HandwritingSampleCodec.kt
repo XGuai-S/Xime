@@ -2,8 +2,6 @@ package com.kingzcheung.xime.handwriting.capture
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.nio.charset.Charset
 
 /**
  * HandwritingSample <-> JSON 编解码。

@@ -7,18 +7,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.twotone.DataObject
 import androidx.compose.material.icons.twotone.Storage
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -53,22 +48,8 @@ fun DictionaryHubContent(
     // 从子页面返回时重新统计：导入过码表、新增过短语后数量会变
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.load() }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("词库管理") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { innerPadding ->
+    SettingsScreenScaffold(title = "词库管理", onBack = onBack, containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
+
         Column(
             modifier = Modifier
                 .fillMaxSize()

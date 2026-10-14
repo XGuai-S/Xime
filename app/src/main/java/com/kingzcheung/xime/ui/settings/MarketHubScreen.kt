@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
@@ -52,18 +51,14 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.PrimaryTabRow
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
@@ -90,13 +85,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kingzcheung.xime.model.ModelCategory
 import com.kingzcheung.xime.model.ModelDownloadState
-import com.kingzcheung.xime.model.ModelInfo
 import com.kingzcheung.xime.model.ModelVersion
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
 import com.kingzcheung.xime.settings.MarketPlugin
 import com.kingzcheung.xime.settings.MarketLayoutItem
-import com.kingzcheung.xime.settings.MarketScheme
 import com.kingzcheung.xime.settings.MarketSchemeItem
 import com.kingzcheung.xime.settings.MarketPluginItem
 import com.kingzcheung.xime.settings.MarketUpdateChecker
@@ -104,7 +97,6 @@ import com.kingzcheung.xime.settings.PluginVersion
 import com.kingzcheung.xime.settings.SchemeVersion
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.viewmodel.ModelManagementUiState
-import com.kingzcheung.xime.viewmodel.LayoutMarketUiState
 import com.kingzcheung.xime.viewmodel.LayoutMarketViewModel
 import com.kingzcheung.xime.viewmodel.ModelManagementViewModel
 import com.kingzcheung.xime.viewmodel.ModelItemState
@@ -112,6 +104,8 @@ import com.kingzcheung.xime.viewmodel.PluginMarketUiState
 import com.kingzcheung.xime.viewmodel.PluginMarketViewModel
 import com.kingzcheung.xime.viewmodel.SchemaMarketUiState
 import com.kingzcheung.xime.viewmodel.SchemaMarketViewModel
+import com.kingzcheung.xime.settings.formatByteSize
+import com.kingzcheung.xime.settings.parseMegabyteTextToBytes
 
 /**
  * 扩展商店：商店式统一入口。
@@ -142,29 +136,18 @@ fun MarketHubContent(
     // 四个 Tab 的更新角标与设置主页入口角标同源（MarketUpdateChecker 分市场计数）
     val marketUpdates by MarketUpdateChecker.summary.collectAsStateWithLifecycle()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("扩展商店") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    if (tabIndex == 0 || tabIndex == 1) {
-                        TextButton(
-                            onClick = if (tabIndex == 0) onNavigateToLocal else onNavigateToModelLocal,
-                        ) {
-                            Text("本地管理", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            )
+    SettingsScreenScaffold(
+        title = "扩展商店",
+        onBack = onBack,
+        containerColor = MaterialTheme.colorScheme.background,
+        actions = {
+            if (tabIndex == 0 || tabIndex == 1) {
+                TextButton(
+                    onClick = if (tabIndex == 0) onNavigateToLocal else onNavigateToModelLocal,
+                ) {
+                    Text("本地管理", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         },
     ) { padding ->
         Column(
@@ -358,8 +341,7 @@ private fun SchemesMarketTab(
                                     val totalBytes = item.scheme.versions
                                         .firstOrNull { it.version == uiState.selectedVersions[item.scheme.id] }
                                         ?.downloadUrls?.sumOf { dl ->
-                                            dl.size?.removeSuffix(" MB")?.trim()?.toDoubleOrNull()
-                                                ?.let { (it * 1024.0 * 1024.0).toLong() } ?: 0L
+                                            parseMegabyteTextToBytes(dl.size)
                                         } ?: 0L
                                     if (totalBytes > 0) {
                                         if (item.scheme.author.isNotEmpty()) append("  ·  ")
@@ -580,7 +562,7 @@ private fun ModelsMarketTab(
                                 metaLine = buildString {
                                     append(modelCategoryLabel(item.model.category))
                                     val sizeLabel = if (item.isDownloaded && item.diskSize > 0) {
-                                        modelFormatSize(item.diskSize)
+                                        formatByteSize(item.diskSize)
                                     } else {
                                         item.model.size.ifEmpty { null }?.let { "约 $it" }
                                     }
@@ -1231,22 +1213,8 @@ fun MarketSchemeDetailContent(
 
     val item = uiState.schemes.firstOrNull { it.scheme.id == schemeId }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("方案详情") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            )
-        },
-    ) { padding ->
+    SettingsScreenScaffold(title = "方案详情", onBack = onBack, containerColor = MaterialTheme.colorScheme.background) { padding ->
+
         when {
             uiState.isLoading && item == null -> MarketCenterBox {
                 CircularProgressIndicator()
@@ -1543,8 +1511,7 @@ private fun SchemeVersionCard(
                 )
             }
             val totalBytes = version.downloadUrls.sumOf { dl ->
-                dl.size?.removeSuffix(" MB")?.trim()?.toDoubleOrNull()
-                    ?.let { (it * 1024.0 * 1024.0).toLong() } ?: 0L
+                parseMegabyteTextToBytes(dl.size)
             }
             if (totalBytes > 0) {
                 Text(
@@ -1579,22 +1546,8 @@ fun MarketModelDetailContent(
 
     val item = uiState.models.firstOrNull { it.model.id == modelId }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("模型详情") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            )
-        },
-    ) { padding ->
+    SettingsScreenScaffold(title = "模型详情", onBack = onBack, containerColor = MaterialTheme.colorScheme.background) { padding ->
+
         when {
             uiState.isLoading && item == null -> MarketCenterBox {
                 CircularProgressIndicator()
@@ -1980,14 +1933,6 @@ internal fun modelCategoryLabel(category: ModelCategory): String = when (categor
     ModelCategory.OTHER -> "其他"
 }
 
-internal fun modelFormatSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-        else -> "${"%.1f".format(bytes.toDouble() / (1024 * 1024))} MB"
-    }
-}
-
 /* ---------------------------- 插件详情页 ---------------------------- */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2040,22 +1985,8 @@ fun PluginMarketDetailContent(
     }
     val displayItem = item ?: localItem
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("插件详情") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            )
-        },
-    ) { padding ->
+    SettingsScreenScaffold(title = "插件详情", onBack = onBack, containerColor = MaterialTheme.colorScheme.background) { padding ->
+
         when {
             uiState.isLoading && displayItem == null -> MarketCenterBox {
                 CircularProgressIndicator()
@@ -2459,7 +2390,7 @@ private fun LayoutsMarketTab(
             onDismissRequest = { confirmApply = null },
             title = { Text("应用布局") },
             text = {
-                Text("将覆盖当前的 xime.custom.yaml，且不保留备份。是否继续应用「${target.layout.name.ifBlank { target.layout.id }}」？")
+                Text("将覆盖当前的 xime.yaml，且不保留备份。是否继续应用「${target.layout.name.ifBlank { target.layout.id }}」？")
             },
             confirmButton = {
                 TextButton(onClick = {

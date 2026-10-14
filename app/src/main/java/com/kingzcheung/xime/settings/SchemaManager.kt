@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.settings
+﻿package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.net.Uri
@@ -19,12 +19,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
-import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.InputStreamReader
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -871,11 +869,21 @@ object SchemaManager {
         customFile.writeText(sb.toString())
     }
 
+    /**
+     * 把 [input] 全量写入 [target]（不存在则创建）。
+     *
+     * 合并自本文件内 9 处逐字相同的 `input.use { target.outputStream().use { it.copyTo(..) } }`
+     * 样板：调用方各自负责 [input] 的关闭，本函数只负责打开并关闭目标输出流。
+     */
+    private fun copyStreamTo(input: java.io.InputStream, target: File) {
+        target.outputStream().use { output -> input.copyTo(output) }
+    }
+
     /** 复制 app 固定的 assets/default.custom.yaml 模板（assets 根与 rime 目录同名，与 RimeConfigHelper 同步的是同一份）。 */
     private fun copyBuiltinDefaultCustom(context: Context, target: File): Boolean {
         return try {
             context.assets.open(CUSTOM_YAML).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+                copyStreamTo(input, target)
             }
             true
         } catch (e: Exception) {
@@ -995,7 +1003,7 @@ object SchemaManager {
                 fontsDir.mkdirs()
                 val target = File(fontsDir, name)
                 inputStream.use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
+                    copyStreamTo(input, target)
                 }
                 FileLogger.i(TAG, "Imported $name -> rime/fonts/")
                 ImportResult(true)
@@ -1010,7 +1018,7 @@ object SchemaManager {
                 themesDir.mkdirs()
                 val target = File(themesDir, name)
                 inputStream.use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
+                    copyStreamTo(input, target)
                 }
                 FileLogger.i(TAG, "Imported $name -> rime/themes/")
                 ImportResult(true)
@@ -1026,7 +1034,7 @@ object SchemaManager {
                 pkgDir.mkdirs()
                 val archiveFile = File(pkgDir, name)
                 inputStream.use { input ->
-                    archiveFile.outputStream().use { output -> input.copyTo(output) }
+                    copyStreamTo(input, archiveFile)
                 }
                 FileLogger.i(TAG, "Imported $name -> $importId (not installed yet)")
                 ImportResult(true)
@@ -1036,72 +1044,95 @@ object SchemaManager {
                 ImportResult(false)
             }
         } else {
-            // 非压缩包：直接放入 rime/ 目录，不经过 market
-            val rimeDir = getRimeDir(context)
-            try {
-                rimeDir.mkdirs()
-                // 受清单追踪的文件先暂存算 sha：与已安装方案同名不同内容时拒绝导入（不落盘，
-                // 避免静默覆盖市场方案文件）；同内容视为共享依赖放行；重新导入同一文件视为重装放行。
-                val tracked = shouldTrackImportedFile(name)
-                var stagedFile: File? = null
-                if (tracked) {
-                    val staged = File.createTempFile("import_stage_", ".tmp", context.cacheDir)
-                    inputStream.use { input ->
-                        staged.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    val sha = fileSha256(staged)
-                    if (sha != null) {
-                        val conflicts = SchemaManifestManager.detectConflicts(
-                            context, manifestPackageIdFor(name), listOf(name), mapOf(name to sha),
-                        )
-                        if (conflicts.isNotEmpty()) {
-                            FileLogger.w(
-                                TAG,
-                                "Import rejected, $name conflicts with: ${conflicts.flatMap { it.claimedBy }}",
-                            )
-                            staged.delete()
-                            return@withContext ImportResult(false, conflicts = conflicts)
-                        }
-                    }
-                    stagedFile = staged
-                }
-                try {
-                    val target = File(rimeDir, name)
-                    val source: java.io.InputStream = stagedFile?.inputStream() ?: inputStream
-                    source.use { input ->
-                        target.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    // 如果是 .schema.yaml 文件，自动启用
-                    if (autoEnable && name.endsWith(".schema.yaml")) {
-                        val schemaId = name.removeSuffix(".schema.yaml")
-                        val enabled = getEnabledSchemas(context).toMutableList()
-                        if (schemaId !in enabled) {
-                            enabled.add(schemaId)
-                            setEnabledSchemas(context, enabled)
-                        }
-                    }
-                    if (tracked) {
-                        SchemaManifestManager.createManifest(
-                            context = context,
-                            schemeId = manifestPackageIdFor(name),
-                            displayName = name,
-                            version = "",
-                            fromMarket = false,
-                            extractedFiles = listOf(name),
-                        )
-                    }
-                    FileLogger.i(TAG, "Imported $name -> rime/ (direct${if (tracked) ", tracked" else ""})")
-                    ImportResult(true, installedDirect = true)
-                } finally {
-                    stagedFile?.delete()
-                }
-            } catch (e: Exception) {
-                FileLogger.e(TAG, "Failed to import $name directly", e)
-                ImportResult(false)
-            }
+            importIntoRimeDir(context, name, inputStream, autoEnable)
         }
     }
 
+
+    /**
+     * saveImportedFile 的直装分支：非压缩包直接落入 rime/（不经 market）。
+     * 受清单追踪的文件先暂存算 sha 并做冲突检测，避免静默覆盖市场方案。
+     */
+    private suspend fun importIntoRimeDir(
+        context: Context,
+        name: String,
+        inputStream: java.io.InputStream,
+        autoEnable: Boolean,
+    ): ImportResult {
+    // 非压缩包：直接放入 rime/ 目录，不经过 market
+    val rimeDir = getRimeDir(context)
+    try {
+        rimeDir.mkdirs()
+        // 受清单追踪的文件先暂存算 sha：与已安装方案同名不同内容时拒绝导入（不落盘，
+        // 避免静默覆盖市场方案文件）；同内容视为共享依赖放行；重新导入同一文件视为重装放行。
+        val tracked = shouldTrackImportedFile(name)
+        var stagedFile: File? = null
+        if (tracked) {
+            val staged = File.createTempFile("import_stage_", ".tmp", context.cacheDir)
+            inputStream.use { input ->
+                copyStreamTo(input, staged)
+            }
+            val sha = fileSha256(staged)
+            if (sha != null) {
+                val conflicts = SchemaManifestManager.detectConflicts(
+                    context, manifestPackageIdFor(name), listOf(name), mapOf(name to sha),
+                )
+                if (conflicts.isNotEmpty()) {
+                    FileLogger.w(
+                        TAG,
+                        "Import rejected, $name conflicts with: ${conflicts.flatMap { it.claimedBy }}",
+                    )
+                    staged.delete()
+                    return ImportResult(false, conflicts = conflicts)
+                }
+            }
+            stagedFile = staged
+        }
+        try {
+            val target = File(rimeDir, name)
+            val source: java.io.InputStream = stagedFile?.inputStream() ?: inputStream
+            if (name == UserConfigDir.UNIFIED_CONFIG_FILE ||
+                name == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE ||
+                name == UserConfigDir.CUSTOM_CONFIG_FILE
+            ) {
+                // 用户配置的唯一真源在可见目录 /storage/emulated/0/Xime/xime.yaml（读取优先级最高）。
+                // 只写 rime/ 会被可见目录里的旧配置静默覆盖，故此处改走统一写入通道。
+                val text = source.use { it.readBytes().toString(Charsets.UTF_8) }
+                UserConfigDir.writeCustomConfig(context, text)
+            } else {
+                source.use { input ->
+                    copyStreamTo(input, target)
+                }
+            }
+            // 如果是 .schema.yaml 文件，自动启用
+            if (autoEnable && name.endsWith(".schema.yaml")) {
+                val schemaId = name.removeSuffix(".schema.yaml")
+                val enabled = getEnabledSchemas(context).toMutableList()
+                if (schemaId !in enabled) {
+                    enabled.add(schemaId)
+                    setEnabledSchemas(context, enabled)
+                }
+            }
+            if (tracked) {
+                SchemaManifestManager.createManifest(
+                    context = context,
+                    schemeId = manifestPackageIdFor(name),
+                    displayName = name,
+                    version = "",
+                    fromMarket = false,
+                    extractedFiles = listOf(name),
+                )
+            }
+            FileLogger.i(TAG, "Imported $name -> rime/ (direct${if (tracked) ", tracked" else ""})")
+            return ImportResult(true, installedDirect = true)
+        } finally {
+            stagedFile?.delete()
+        }
+    } catch (e: Exception) {
+        FileLogger.e(TAG, "Failed to import $name directly", e)
+        return ImportResult(false)
+    }
+    }
     suspend fun importSchemaFile(context: Context, uri: Uri): ImportResult {
         return withContext(Dispatchers.IO) {
             val displayName = getFileName(context, uri) ?: return@withContext ImportResult(false)
@@ -1122,7 +1153,7 @@ object SchemaManager {
         val tempFile = File.createTempFile("import_", ".zip", targetDir)
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                tempFile.outputStream().use { output -> input.copyTo(output) }
+                copyStreamTo(input, tempFile)
             } ?: return emptyList()
             val files = listArchiveTargetFiles(tempFile)
             importZipFromFile(tempFile, targetDir)
@@ -1256,7 +1287,7 @@ object SchemaManager {
                     Log.e(TAG, "Download failed: ${response.code} $url")
                     return@withContext DownloadResult(false)
                 }
-                val body = response.body ?: return@withContext DownloadResult(false)
+                val body = response.body
                 val totalBytes = body.contentLength()
                 var downloadedBytes = 0L
                 val md = if (!expectedSha256.isNullOrBlank()) MessageDigest.getInstance("SHA-256") else null
@@ -1363,7 +1394,7 @@ object SchemaManager {
                         Log.e(TAG, "Download failed: ${response.code} $url")
                         return@withContext ImportResult(false)
                     }
-                    val body = response.body ?: return@withContext ImportResult(false)
+                    val body = response.body
                     val totalBytes = body.contentLength()
                     var downloadedBytes = 0L
                     val md = MessageDigest.getInstance("SHA-256")
@@ -1409,7 +1440,7 @@ object SchemaManager {
             // 保存到临时文件，以便两趟处理（检测共同根目录 + 解压）
             val tempFile = File.createTempFile("rime_import_", ".zip", targetDir)
             try {
-                tempFile.outputStream().use { output -> inputStream.copyTo(output) }
+                copyStreamTo(inputStream, tempFile)
                 importZipFromFile(tempFile, targetDir)
             } finally {
                 tempFile.delete()
@@ -1470,7 +1501,7 @@ object SchemaManager {
             // 落临时文件后走文件版（统一 gunzip + zip-slip/受保护文件 防护）
             val tempFile = File.createTempFile("rime_import_", ".tar.gz", targetDir)
             try {
-                tempFile.outputStream().use { output -> inputStream.copyTo(output) }
+                copyStreamTo(inputStream, tempFile)
                 importTarGzFromFile(tempFile, targetDir)
             } finally {
                 tempFile.delete()

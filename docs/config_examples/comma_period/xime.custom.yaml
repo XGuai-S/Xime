@@ -13,7 +13,8 @@ metadata:
 # 说明：
 #   - rows 为「整段覆盖」：写了 rows 就需给出完整行。
 #   - comma 是内置功能键；period 不是功能键，作为普通按键使用，需在 keys 中定义。
-#   - width 控制列宽占比；这里给 comma / period 设 0.8，与内置逗号键宽度一致。
+#   - width 控制列宽占比；这里给 comma / period 设 1.1，与内置控制行侧键宽度一致
+#     （内置比例：四个侧键等宽 1.1、空格 2.5，中英键盘一致）。
 keyboard:
   # ── 中文键盘 ──
   qwerty:
@@ -24,8 +25,8 @@ keyboard:
         - [shift, z, x, c, v, b, n, m, delete]
         - [mode_change, comma, space, period, earth, enter]
     keys:
-      comma: { width: 0.8, tap: { label: "，", value: "," } }
-      period: { width: 0.8, tap: { label: "。", value: "." } }
+      comma: { width: 1.1, tap: { label: "，", value: "," } }
+      period: { width: 1.1, tap: { label: "。", value: "." } }
 
   # ── 英文键盘 ──
   qwerty_en:
@@ -36,5 +37,5 @@ keyboard:
         - [shift, z, x, c, v, b, n, m, delete]
         - [mode_change, comma, space, period, earth, enter]
     keys:
-      comma: { width: 0.8, tap: { label: ",", value: "," } }
-      period: { width: 0.8, tap: { label: ".", value: "." } }
+      comma: { width: 1.1, tap: { label: ",", value: "," } }
+      period: { width: 1.1, tap: { label: ".", value: "." } }

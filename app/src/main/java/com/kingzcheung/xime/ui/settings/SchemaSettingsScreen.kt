@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,8 +21,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -47,12 +46,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -78,10 +75,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.kingzcheung.xime.settings.ConfigDirOpener
+import com.kingzcheung.xime.settings.ConfigDirTarget
+import com.kingzcheung.xime.settings.LaunchOutcome
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SchemaMeta
 import com.kingzcheung.xime.settings.SettingsPreferences
-import com.kingzcheung.xime.viewmodel.LocalPackageItem
+import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.viewmodel.SchemaLocalViewModel
 import com.kingzcheung.xime.viewmodel.SchemaSettingsViewModel
 
@@ -91,6 +91,8 @@ fun SchemaSettingsContent(
     onBack: () -> Unit,
     onNavigateToMarket: () -> Unit = {},
     onNavigateToRimeFileBrowser: () -> Unit = {},
+    /** 通用文件管理器（私有 rime 根目录起）；[onNavigateToRimeFileBrowser] 则直达配置目录。 */
+    onNavigateToFileManager: () -> Unit = onNavigateToRimeFileBrowser,
     onNavigateToSchemaDictBrowser: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -99,6 +101,8 @@ fun SchemaSettingsContent(
     val localViewModel: SchemaLocalViewModel = viewModel()
     val localUiState by localViewModel.uiState.collectAsStateWithLifecycle()
     var tabIndex by remember { mutableStateOf(0) }
+    // 「用其他应用打开配置目录」的搜索结果：非空时弹出选择器
+    var configDirTargets by remember { mutableStateOf<List<ConfigDirTarget>?>(null) }
     // F6: 从方案市场/导入返回时自动重扫描，新装方案立即出现
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refresh(); localViewModel.loadLocalPackages() }
     // 切 tab 时刷新对应列表，保持数据一致
@@ -516,7 +520,7 @@ fun SchemaSettingsContent(
                                 text = { Text("文件管理器") },
                                 onClick = {
                                     showMenu = false
-                                    onNavigateToRimeFileBrowser()
+                                    onNavigateToFileManager()
                                 },
                                 leadingIcon = {
                                     Icon(Icons.Default.FolderOpen, null,
@@ -539,7 +543,7 @@ fun SchemaSettingsContent(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            TabRow(selectedTabIndex = tabIndex) {
+            PrimaryTabRow(selectedTabIndex = tabIndex) {
                 Tab(
                     selected = tabIndex == 0,
                     onClick = { tabIndex = 0 },
@@ -626,6 +630,41 @@ fun SchemaSettingsContent(
                                 onSelect = { viewModel.selectSchema(schema) },
                             )
                         }
+
+                        // 配置文件：从「主题与定制」页移来，与「部署方案」相邻——两者是同一件事的
+                        // 两半：用系统「文件」App 改完 xime.yaml，回到这里点一次部署才生效。
+                        item {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            SettingsSection(title = "配置文件") {
+                                SettingsItem(
+                                    icon = Icons.Default.FolderOpen,
+                                    title = "打开配置目录",
+                                    subtitle = when (UserConfigDir.releaseState) {
+                                        UserConfigDir.ReleaseState.SUCCESS ->
+                                            "${UserConfigDir.DISPLAY_PATH} · 直接打开 xime.yaml 所在目录"
+                                        UserConfigDir.ReleaseState.FAILED ->
+                                            "写入 ${UserConfigDir.DISPLAY_PATH} 被系统拒绝，已回退内置文件管理器"
+                                        UserConfigDir.ReleaseState.PERMISSION_REQUIRED ->
+                                            "需要「所有文件访问」权限才能写入 ${UserConfigDir.DISPLAY_PATH}"
+                                        UserConfigDir.ReleaseState.UNSUPPORTED ->
+                                            "内置文件管理器（系统版本过低）"
+                                        UserConfigDir.ReleaseState.NOT_ATTEMPTED -> UserConfigDir.DISPLAY_PATH
+                                    },
+                                    onClick = onNavigateToRimeFileBrowser,
+                                    showArrow = true,
+                                )
+                                // 打开方式选择：枚举手机上所有能打开该目录的应用
+                                // （系统「文件」+ 第三方管理器 + 系统文档树选择器兜底）
+                                SettingsItem(
+                                    icon = Icons.AutoMirrored.Filled.OpenInNew,
+                                    title = "用其他应用打开目录",
+                                    subtitle = "搜索手机上所有可用的打开方式（第三方文件管理器等）",
+                                    onClick = { configDirTargets = ConfigDirOpener.queryTargets(context) },
+                                    showArrow = true,
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                        }
                     }
 
                     Button(
@@ -661,7 +700,7 @@ fun SchemaSettingsContent(
                         ) {
                             item { Spacer(Modifier.height(4.dp)) }
                             items(packages, key = { it.packageId }) { item ->
-                                LocalPackageItemCard(
+                                LocalPackageCard(
                                     item = item,
                                     installing = localUiState.installingId == item.packageId,
                                     onInstall = { localViewModel.installPackage(item) },
@@ -683,6 +722,41 @@ fun SchemaSettingsContent(
                 }
             }
         }
+    }
+
+    // 「用其他应用打开配置目录」选择弹窗
+    configDirTargets?.let { targets ->
+        ConfigDirOpenDialog(
+            targets = targets,
+            onPick = { target ->
+                when (ConfigDirOpener.launch(context, target)) {
+                    LaunchOutcome.Located -> Unit
+                    // 只打开了应用却没定位：必须如实告知，否则用户以为跳转失败不了
+                    LaunchOutcome.OpenedOnly -> Toast.makeText(
+                        context,
+                        "${target.label} 不支持直接定位，已为你打开它；配置目录：${UserConfigDir.DISPLAY_PATH}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    LaunchOutcome.Failed ->
+                        Toast.makeText(context, "无法启动 ${target.label}", Toast.LENGTH_SHORT).show()
+                }
+                configDirTargets = null
+            },
+            onDismiss = { configDirTargets = null },
+            onCopyPath = {
+                // 兜底出口：不依赖任何第三方实现，任何管理器都能手动粘贴
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as? android.content.ClipboardManager
+                clipboard?.setPrimaryClip(
+                    android.content.ClipData.newPlainText(
+                        "配置目录路径",
+                        UserConfigDir.DISPLAY_PATH,
+                    ),
+                )
+                Toast.makeText(context, "已复制：${UserConfigDir.DISPLAY_PATH}", Toast.LENGTH_SHORT).show()
+                configDirTargets = null
+            },
+        )
     }
 }
 
@@ -770,110 +844,5 @@ private fun SchemaToggleItem(
                 onCheckedChange = { onToggle() }
             )
         }
-    }
-}
-
-@Composable
-private fun LocalPackageItemCard(
-    item: LocalPackageItem,
-    installing: Boolean,
-    onInstall: () -> Unit,
-    onDelete: () -> Unit,
-    onUninstall: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    item.displayName,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                Spacer(Modifier.width(8.dp))
-                val tagColor = when {
-                    item.installed -> MaterialTheme.colorScheme.primary
-                    item.downloaded -> MaterialTheme.colorScheme.outline
-                    else -> MaterialTheme.colorScheme.error
-                }
-                LocalPackageTag(
-                    if (item.installed) "已安装" else if (item.downloaded) "已下载" else "未知",
-                    tagColor,
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "ID: ${item.packageId}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            if (item.version.isNotEmpty() || item.fileCount > 0) {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    buildString {
-                        if (item.version.isNotEmpty()) append("版本: ${item.version}")
-                        if (item.fileCount > 0) {
-                            if (isNotEmpty()) append(" · ")
-                            append("${item.fileCount} 个文件")
-                        }
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                when {
-                    installing -> {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(6.dp))
-                            Text("安装中…", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                    item.installed -> {
-                        OutlinedButton(onClick = onUninstall) { Text("卸载") }
-                    }
-                    item.downloaded -> OutlinedButton(onClick = onInstall) { Text("安装") }
-                }
-                Spacer(Modifier.weight(1f))
-                if (item.packageId != "builtin" && item.downloaded) {
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(36.dp),
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = "删除下载文件",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LocalPackageTag(text: String, color: androidx.compose.ui.graphics.Color) {
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = color.copy(alpha = 0.12f),
-    ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-        )
     }
 }

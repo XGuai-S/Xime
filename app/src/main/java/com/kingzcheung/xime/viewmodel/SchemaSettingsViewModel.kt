@@ -13,6 +13,7 @@ import com.kingzcheung.xime.settings.ImportManager
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.PersonalDictManager
 import com.kingzcheung.xime.settings.SchemaManifestManager
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import com.kingzcheung.xime.settings.SchemaMeta
@@ -217,6 +218,9 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
             _uiState.update { it.copy(isDeploying = true) }
             val success = withContext(Dispatchers.IO) {
                 PersonalDictManager.ensureSchemaPacks(context)
+                // 部署前把可见目录 `/storage/emulated/0/Xime/rime/` 里用户改过的方案与词库
+                // 写回 Rime 工作目录，否则本次部署读到的还是旧文件
+                RimeUserFileSync.sync(context)
                 KeysConfigHelper.loadConfig(context)
                 KeyboardThemes.reload(context)
                 val engine = RimeEngine.getInstance()

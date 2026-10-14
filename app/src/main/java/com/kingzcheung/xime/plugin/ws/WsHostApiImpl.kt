@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.plugin.ws
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.js.ws.NetworkPolicy
@@ -167,7 +166,7 @@ class WsHostApiImpl(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             val serverMsg = response?.let { r ->
-                val body = try { r.body?.string() ?: "" } catch (e: Exception) { "" }
+                val body = try { r.body.string() } catch (e: Exception) { "" }
                 val reason = extractServerError(body) ?: "HTTP ${r.code}"
                 "HTTP ${r.code}: $reason"
             } ?: ""

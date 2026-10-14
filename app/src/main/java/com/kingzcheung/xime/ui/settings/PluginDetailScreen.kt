@@ -4,16 +4,9 @@ import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -35,25 +28,8 @@ fun PluginSettingsContent(
     val pluginInfo = remember(pluginId) { ExtensionManager.getAllInstalledPlugins().find { it.id == pluginId } }
 
     if (pluginInfo == null) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("插件设置") },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回"
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        titleContentColor = MaterialTheme.colorScheme.onSurface
-                    )
-                )
-            }
-        ) {
+        SettingsScreenScaffold(title = "插件设置", onBack = onBack, containerColor = MaterialTheme.colorScheme.background) {
+
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -65,25 +41,8 @@ fun PluginSettingsContent(
     }
 
     if (pluginInstance == null) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text(pluginInfo.name) },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回"
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        titleContentColor = MaterialTheme.colorScheme.onSurface
-                    )
-                )
-            }
-        ) {
+        SettingsScreenScaffold(title = pluginInfo.name, onBack = onBack, containerColor = MaterialTheme.colorScheme.background) {
+
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -116,28 +75,11 @@ fun PluginSettingsContent(
         }
 
         hasCustomSettings -> {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = { Text(pluginInfo.name) },
-                        navigationIcon = {
-                            IconButton(onClick = onBack) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "返回"
-                                )
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        )
-                    )
-                }
-            ) {
+            SettingsScreenScaffold(title = pluginInfo.name, onBack = onBack, containerColor = MaterialTheme.colorScheme.background) {
+
                 LaunchedEffect(Unit) {
                     try {
-                        (pluginInstance as EmojiPlugin).openSettings(context)
+                        pluginInstance.openSettings(context)
                         onBack()
                     } catch (e: Exception) {
                         Toast.makeText(context, "无法打开插件设置: ${e.message}", Toast.LENGTH_LONG).show()
@@ -148,25 +90,8 @@ fun PluginSettingsContent(
         }
 
         else -> {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = { Text(pluginInfo.name) },
-                        navigationIcon = {
-                            IconButton(onClick = onBack) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "返回"
-                                )
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        )
-                    )
-                }
-            ) {
+            SettingsScreenScaffold(title = pluginInfo.name, onBack = onBack, containerColor = MaterialTheme.colorScheme.background) {
+
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center

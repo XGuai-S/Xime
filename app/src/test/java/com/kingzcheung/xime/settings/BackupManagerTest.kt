@@ -90,6 +90,70 @@ class BackupManagerTest {
         assertTrue(result.isFailure)
     }
 
+    // ---- 用户配置改走可见目录（Documents/Xime/）真源 ----
+
+    @Test
+    fun `restore routes user config to visible dir writer instead of rime dir`() {
+        val filesDir = tempDir.newFolder("files")
+        val configText = "keyboard:\n  qwerty: {}\n"
+        val bytes = zipOfText(mapOf("xime.custom.yaml" to configText))
+        var written: String? = null
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            bytes,
+            visibleConfigWriter = { text ->
+                written = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(configText, written)
+        // 不能再落到 rime/：那里会被可见目录里的旧配置静默覆盖
+        assertTrue(!File(filesDir, "rime/xime.custom.yaml").exists())
+    }
+
+    @Test
+    fun `restore falls back to rime dir when visible writer fails`() {
+        val filesDir = tempDir.newFolder("files")
+        val configText = "keyboard:\n  qwerty: {}\n"
+        val bytes = zipOfText(mapOf("xime.custom.yaml" to configText))
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            bytes,
+            visibleConfigWriter = { false }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(configText, File(filesDir, "rime/xime.custom.yaml").readText())
+    }
+
+    @Test
+    fun `restore normalizes dot-slash prefixed user config`() {
+        val filesDir = tempDir.newFolder("files")
+        val configText = "keyboard:\n  qwerty: {}\n"
+        val bytes = zipOfText(mapOf("./xime.custom.yaml" to configText))
+        var written: String? = null
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            bytes,
+            visibleConfigWriter = { text ->
+                written = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(configText, written)
+        assertTrue(!File(filesDir, "rime/xime.custom.yaml").exists())
+    }
+
     // ---- META 元数据条目 ----
 
     @Test
@@ -177,5 +241,64 @@ class BackupManagerTest {
         val result = restore(filesDir, bytes)
 
         assertTrue(result.isFailure)
+    }
+
+    // ---- 候选排序词频表（candidate_order.txt，备份范围配置 backup.candidate_order） ----
+
+    @Test
+    fun `restore routes candidate order to candidateOrderWriter not rime dir`() {
+        val filesDir = tempDir.newFolder("files")
+        val orderText = "你\tni\t100\n"
+        val bytes = zipOfText(mapOf("candidate_order.txt" to orderText))
+        var written: String? = null
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            bytes,
+            candidateOrderWriter = { text ->
+                written = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(orderText, written)
+        // 不能再落到 rime/：那里会被可见目录里的旧词频表遮蔽
+        assertTrue(!File(filesDir, "rime/candidate_order.txt").exists())
+    }
+
+    @Test
+    fun `restore falls back to private dir when candidate order writer fails or absent`() {
+        val filesDir = tempDir.newFolder("files")
+        val orderText = "你\tni\t100\n"
+
+        // writer 返回 false → 回退私有目录 filesDir/candidate_order.txt
+        val failResult = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            zipOfText(mapOf("candidate_order.txt" to orderText)),
+            candidateOrderWriter = { false }
+        )
+        assertTrue(failResult.isSuccess)
+        assertEquals(orderText, File(filesDir, "candidate_order.txt").readText())
+
+        // writer 缺省（纯 JVM 默认）→ 同样回退私有目录
+        File(filesDir, "candidate_order.txt").delete()
+        val absentResult = restore(filesDir, zipOfText(mapOf("candidate_order.txt" to orderText)))
+        assertTrue(absentResult.isSuccess)
+        assertEquals(orderText, File(filesDir, "candidate_order.txt").readText())
+    }
+
+    @Test
+    fun `restore keeps candidate order inside filesDir even on missing rime dir`() {
+        val filesDir = tempDir.newFolder("files")
+        val bytes = zipOfText(mapOf("candidate_order.txt" to "词\tci\t10\n"))
+
+        val result = restore(filesDir, bytes)
+
+        assertTrue(result.isSuccess)
+        assertEquals("词\tci\t10\n", File(filesDir, "candidate_order.txt").readText())
+        assertTrue(!File(filesDir, "rime/candidate_order.txt").exists())
     }
 }

@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.ui.settings
+﻿package com.kingzcheung.xime.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -312,18 +312,19 @@ private fun ThemeKeyboardPreview(
                         )
                     }
 
-                    // Row 4: ?123 , 空格 中/En 确定
+                    // Row 4: 123 ，空格 中/En 确定
+                    // 宽度与 xime.yaml 控制行同比例：四个侧键等宽、空格 2.7 倍
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        PreviewKey("?123", specialKeyColor, specialTextColor, 1.2f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
-                        PreviewKey("，", keyColor, textColor, 0.8f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
-                        PreviewKey("空格", keyColor, textColor, 3f, fontSize = 9.sp,extraModifier = Modifier.padding(0.5.dp, 2.dp))
-                        PreviewKey("中/En", specialKeyColor, specialTextColor, 0.8f, fontSize = 8.sp,extraModifier = Modifier.padding(0.5.dp, 2.dp))
-                        PreviewKey("确定", specialKeyColor, specialTextColor, 1.2f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
+                        PreviewKey("123", specialKeyColor, specialTextColor, 1f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
+                        PreviewKey("，", keyColor, textColor, 1f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
+                        PreviewKey("空格", keyColor, textColor, 2.7f, fontSize = 9.sp,extraModifier = Modifier.padding(0.5.dp, 2.dp))
+                        PreviewKey("中/En", specialKeyColor, specialTextColor, 1f, fontSize = 8.sp,extraModifier = Modifier.padding(0.5.dp, 2.dp))
+                        PreviewKey("确定", specialKeyColor, specialTextColor, 1f,extraModifier = Modifier.padding(0.5.dp, 2.dp))
                     }
                 }
             }

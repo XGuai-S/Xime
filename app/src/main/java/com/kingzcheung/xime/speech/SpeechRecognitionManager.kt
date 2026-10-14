@@ -386,7 +386,7 @@ class SpeechRecognitionManager(private val context: Context) {
 
         val backend = plugin.createBackend(context.applicationContext)
         val pluginName = ExtensionManager.getAllInstalledPlugins()
-            .firstOrNull { it.id == selected?.first }?.name ?: selected?.first ?: "语音识别"
+            .firstOrNull { it.id == selected.first }?.name ?: selected.first
         return PluginAsrBackendAdapter(pluginName, backend)
     }
 

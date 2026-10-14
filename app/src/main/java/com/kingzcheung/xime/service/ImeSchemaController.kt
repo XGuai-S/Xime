@@ -2,7 +2,6 @@ package com.kingzcheung.xime.service
 
 import android.content.Intent
 import android.os.SystemClock
-import android.util.Log
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 import android.widget.Toast
@@ -11,6 +10,7 @@ import com.kingzcheung.xime.ui.keyboard.FloatingCardGeometry
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SchemaConfigHelper
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.rime.RimeConfigHelper
 import com.kingzcheung.xime.settings.SettingsPreferences
@@ -45,6 +45,11 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 KeysConfigHelper.loadConfig(service)
                 // 重新加载配色方案（用户可能在 xime.custom.yaml 中修改了 color_schemes）
                 KeyboardThemes.reload(service)
+
+                // 部署前把可见目录 `/storage/emulated/0/Xime/rime/` 里用户改过的方案与词库
+                // 写回 Rime 工作目录。没有这一步，用户改完点「部署方案」读到的仍是旧文件。
+                // 注意：本类有三个部署入口（reloadConfig / deploy / deploySchema），都要同步。
+                RimeUserFileSync.sync(service)
                 
                 val userDataDir = File(service.filesDir, "rime")
                 
@@ -95,6 +100,8 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
     
     private fun deploySchema() {
         try {
+            // 同 reloadConfig：部署前先把可见目录里的用户修改写回工作目录
+            RimeUserFileSync.sync(service)
             service.rimeEngine.deploy()
             // 部署后记录 hash 与完成标记，避免下次启动再次全量编译
             RimeConfigHelper.storeDeploymentHash(service)
@@ -310,7 +317,12 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             KeyboardThemes.reload(service)
             
             service.notifyDeploymentStatus(true, "正在部署...")
-            
+
+            // 部署前把用户在可见目录 `/storage/emulated/0/Xime/rime/` 里的修改写回 Rime
+            // 工作目录。没有这一步，用户改完点部署，部署读到的仍是旧文件——
+            // 表现为「改了没生效」，比不能改更让人困惑。
+            RimeUserFileSync.sync(service)
+
             val success = service.rimeEngine.deploy()
             
             withContext(Dispatchers.Main) {
@@ -343,10 +355,10 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
         val isLandscape = service.resources.configuration.screenWidthDp > service.resources.configuration.screenHeightDp
         SettingsPreferences.setFloatingMode(service, enabled, isLandscape)
         val loadedX = SettingsPreferences.getFloatingOffsetX(service, isLandscape)
-        val screenW = service.resources.configuration.screenWidthDp
-        val screenH = service.resources.configuration.screenHeightDp
-        val portraitWidth = minOf(screenW, screenH)
-        val halfMargin = FloatingCardGeometry.halfMarginDp(screenW, portraitWidth)
+        val halfMargin = FloatingCardGeometry.halfMarginDpForConfig(
+            service.resources.configuration.screenWidthDp,
+            service.resources.configuration.screenHeightDp,
+        )
         val clampedX = loadedX.coerceIn(-halfMargin, halfMargin)
         service.uiState.value = service.uiState.value.copy(
             isFloatingMode = enabled,

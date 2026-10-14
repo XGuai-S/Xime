@@ -96,10 +96,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 只在本地有 keystore.properties 时才使用签名配置
-            // GitHub Actions 使用自己的签名方式
-            if (keystorePropertiesFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
+            // 有 keystore.properties 时使用 release 密钥（CI 通过 secrets 注入，走这条）；
+            // 本地没有该文件时回退到 debug 密钥，保证 assembleRelease 产物可直接安装，
+            // 否则 AGP 会产出未签名 APK（apksigner 报 DOES NOT VERIFY），无法安装。
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }
@@ -132,6 +135,30 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+        }
+        resources {
+            // 剔除依赖带入、但本应用从不读取的资源（合计约 3.3MB）。
+            // 这些都不是代码依赖，删除不会影响功能，只是把没人用的体积还给用户：
+            //
+            // 1. `tables/Transcoder_*.bin`（约 2.9MB）：字符集转码映射表，随 Sora 编辑器的
+            //    language-textmate 传递进来。本应用只用它做 YAML 语法高亮，YAML 本身是
+            //    UTF-8，永不触发 Big5/GBK/日文/韩文转码；代码中没有任何 Transcoder 引用。
+            // 2. `src/org/eclipse/jdt/**`（约 41KB）：org.eclipse.jdt.annotation 的 .java
+            //    源码。注解库只需 class 文件，源码进 APK 属于上游打包疏漏。
+            // 3. `org/apache/commons/codec/language/bm/**`（约 234KB）：Apache Commons Codec
+            //    的语音编码规则表，仅 DoubleMetaphone/ColognePhonetic 等语言编码器加载。
+            //    okhttp 只用 Codec 做 Base64/Hex，不碰语言编码器。
+            excludes += setOf(
+                "tables/**",
+                "src/**",
+                "org/apache/commons/codec/language/**",
+                // 构建元数据，运行时无用（Kotlin 反射不读它）
+                "kotlin-tooling-metadata.json",
+                "DebugProbesKt.bin",
+                "META-INF/INDEX.LIST",
+                // 依赖元数据块，F-Droid 可复现构建不需要（见下方 dependenciesInfo）
+                "META-INF/DEPENDENCIES",
+            )
         }
     }
     ndkVersion = "29.0.14206865"

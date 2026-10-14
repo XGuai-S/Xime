@@ -1,5 +1,6 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
+import com.kingzcheung.xime.keyboard.MainType
 import com.kingzcheung.xime.settings.KeysConfigHelper
 
 /**
@@ -26,7 +27,7 @@ sealed class KeyboardLayoutState {
     /** 符号键盘 */
     data object Symbol : KeyboardLayoutState()
 
-    /** 常用符号键盘（?123 进入的符号+数字混合键盘） */
+    /** 常用符号键盘（长按控制行 123 键进入的符号+数字混合键盘） */
     data object CommonSymbol : KeyboardLayoutState()
 
     /** 笔画键盘（stroke schema 专用 T9 九宫格布局） */
@@ -99,6 +100,24 @@ fun initialKeyboardLayoutState(
     isT9Schema(schemaId) -> KeyboardLayoutState.T9Pinyin
     else -> KeyboardLayoutState.Chinese
 }
+
+/**
+ * 由布局状态推导对应的视图状态（[KeyboardViewModel.dispatch] 的唯一映射出口）。
+ *
+ * 原先该映射在 dispatch 内以 `when (kb) { ... }` 复制了 5 份，各自漂移风险高；
+ * 收敛到此处后新增布局状态只需改一处。[fallback] 用于调用方对未列举状态
+ * 指定兜底（默认中文全键盘）。
+ */
+fun KeyboardLayoutState.toViewState(fallback: KeyboardViewState = KeyboardViewState.ChineseFull): KeyboardViewState =
+    when (this) {
+        is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
+        is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
+        is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
+        is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
+        KeyboardLayoutState.Number -> KeyboardViewState.NumberPanel(MainType.FULL)
+        KeyboardLayoutState.CommonSymbol -> KeyboardViewState.CommonSymbolPanel(MainType.FULL)
+        else -> fallback
+    }
 
 /**
  * 判断是否为九键（T9）方案：仅认 keyboard.t9.schemas 绑定声明

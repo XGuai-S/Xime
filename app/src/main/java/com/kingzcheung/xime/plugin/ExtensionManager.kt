@@ -118,7 +118,7 @@ object ExtensionManager {
         if (!iconFile.exists()) {
             // Lua 插件资源在 resources/ 目录（path 指向入口脚本，其父目录为插件目录）
             val resourceFile = pluginInfo.path
-                ?.let { File(it).parentFile }
+                .let { File(it).parentFile }
                 ?.let { File(it, "resources/$iconName") }
             if (resourceFile != null && resourceFile.exists()) {
                 try {

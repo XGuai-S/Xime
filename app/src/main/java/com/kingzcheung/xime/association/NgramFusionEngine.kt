@@ -1,9 +1,6 @@
 package com.kingzcheung.xime.association
 
 import android.content.Context
-import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 class NgramFusionEngine(private val context: Context) {
     companion object {

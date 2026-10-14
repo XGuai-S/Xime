@@ -10,10 +10,6 @@ import com.kingzcheung.xime.plugin.core.js.ws.NetworkPolicy
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
 import com.kingzcheung.xime.plugin.core.security.PluginErrorLog
 import com.kingzcheung.xime.settings.SettingsPreferences
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -148,7 +144,7 @@ class SseHostApiImpl(
                         return
                     }
                     val message = if (response != null && !response.isSuccessful) {
-                        val body = runCatching { response.body?.string()?.take(300) }.getOrNull()
+                        val body = runCatching { response.body.string().take(300) }.getOrNull()
                         "HTTP ${response.code}" + (if (body.isNullOrBlank()) "" else ": $body")
                     } else {
                         t?.message ?: "连接失败"

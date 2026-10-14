@@ -2,4 +2,22 @@
 <paths>
     <cache-path name="emoji_cache" path="emoji_cache/" />
     <files-path name="files" path="." />
+    <!--
+      用户可见配置目录 /storage/emulated/0/Xime/ 的锚点文件。
+
+      「用其他应用打开配置目录」需要把目录里的文件交给 MT 管理器这类第三方 App。
+      真机日志（2026-10-14）证实：直接发 externalstorage DocumentsProvider 的
+      `content://` URI 会被拒——`MANAGE_EXTERNAL_STORAGE` 只授权 File API，
+      不包含 DocumentsProvider 的 URI 访问权（报“UID ... does not have permission”）。
+      FileProvider 是自己进程里的 provider，可以合法地把文件授权给接收方，
+      因此用它把锚点文件转成可授权的 `content://` URI。
+    -->
+    <external-path name="xime_config" path="Xime/" />
+    <!--
+      日志导出汇总文件：必须显式声明，否则 FileProvider.getUriForFile 会抛
+      IllegalArgumentException（Failed to find configured root），导致「导出全部日志」
+      永远走不到系统分享面板。放在 cache 下而非 files：汇总文件是一次性产物，
+      cache 可被系统在空间紧张时回收，不必长期占用用户数据区。
+    -->
+    <cache-path name="log_export" path="log_export/" />
 </paths>

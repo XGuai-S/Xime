@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.settings
+﻿package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.util.Log
@@ -80,9 +80,7 @@ object XimeIndexSource {
 
     /** 下载总量：索引精确字节数（sizeBytes）优先，缺省回退 size 字符串估算（KB/MB 文本）。 */
     private val DownloadItem.resolvedSizeBytes: Long
-        get() = sizeBytes ?: size?.removeSuffix(" MB")?.trim()?.toDoubleOrNull()
-            ?.let { (it * 1024.0 * 1024.0).toLong() } ?: 0L
-
+        get() = sizeBytes ?: parseMegabyteTextToBytes(size)
     private fun buildMirrors(userUrls: List<String>): List<String> = userUrls
 
     private fun ensureConfigured(context: Context) {
@@ -204,7 +202,7 @@ object XimeIndexSource {
                 if (!response.isSuccessful) {
                     return@withContext InstallResult(false, failureReason = "下载失败（HTTP ${response.code}）")
                 }
-                val body = response.body ?: return@withContext InstallResult(false, failureReason = "下载失败")
+                val body = response.body
                 val totalBytes = body.contentLength()
                 val md = if (!dl.sha256.isNullOrBlank()) {
                     java.security.MessageDigest.getInstance("SHA-256")
@@ -357,9 +355,9 @@ object XimeIndexSource {
             Log.w(TAG, "raw layout missing keyboard section")
             return null
         }
-        val rimeDir = File(context.filesDir, "rime")
-        if (!rimeDir.exists()) rimeDir.mkdirs()
-        File(rimeDir, "xime.custom.yaml").writeText(text)
+        // 统一写入：可见目录 Documents/Xime/ 读取优先级最高，成功时以它为准并清掉私有副本
+        // （单一真源）；可见目录不可用时退回私有目录，避免布局配置丢失。
+        UserConfigDir.writeCustomConfig(context, text)
         return listOf("xime.custom.yaml")
     }
 
@@ -384,11 +382,23 @@ object XimeIndexSource {
             val rimeDir = File(context.filesDir, "rime")
             val rimeCanonical = rimeDir.canonicalFile
             var ok = true
-            val targets = (files + "xime.custom.yaml").distinct()
+            val targets = (
+                files + UserConfigDir.CUSTOM_CONFIG_FILE + UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE
+                ).distinct()
             for (rel in targets) {
                 val target = File(rimeDir, rel).canonicalFile
                 val within = target.path.startsWith(rimeCanonical.path + File.separator)
                 if (within && target.exists() && !target.delete()) ok = false
+            }
+            // 可见目录里的统一配置读取优先级更高，必须一并删除，否则「恢复默认」不生效。
+            for (name in listOf(
+                UserConfigDir.UNIFIED_CONFIG_FILE,
+                UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE,
+                UserConfigDir.CUSTOM_CONFIG_FILE,
+            )) {
+                if (UserConfigDir.exists(context, name) && !UserConfigDir.delete(context, name)) {
+                    ok = false
+                }
             }
             ok
         }
@@ -404,7 +414,7 @@ object XimeIndexSource {
             if (!response.isSuccessful) {
                 DownloadOutcome(false, "下载失败（HTTP ${response.code}）")
             } else {
-                val body = response.body ?: return DownloadOutcome(false, "下载失败")
+                val body = response.body
                 val md = java.security.MessageDigest.getInstance("SHA-256")
                 val totalBytes = body.contentLength()
                 var downloadedBytes = 0L
@@ -436,7 +446,7 @@ object XimeIndexSource {
         DownloadOutcome(false, "下载失败：${e.message}")
     }
 
-    /** 解压布局包到 rime 用户目录：仅接受根级 xime.custom.yaml 与 themes/、fonts/ 下文件。 */
+    /** 解压布局包到 rime 用户目录：仅接受根级配置（xime.txt / xime.custom.yaml）与 themes/、fonts/ 下文件。 */
     private fun extractLayoutZip(context: Context, zipFile: File): List<String>? {
         val rimeDir = File(context.filesDir, "rime")
         if (!rimeDir.exists()) rimeDir.mkdirs()
@@ -449,15 +459,18 @@ object XimeIndexSource {
                 val name = entry.name
                 if (!entry.isDirectory && !isAppleDoubleName(name)) {
                     val rel = name.removePrefix("./").trimStart('/')
-                    val allowed = rel == "xime.custom.yaml" ||
-                        rel.startsWith("themes/") || rel.startsWith("fonts/")
+                    // 布局包既可以带新的统一配置 xime.yaml，也可以带旧名 xime.txt / xime.custom.yaml
+                    val isConfig = rel == UserConfigDir.UNIFIED_CONFIG_FILE ||
+                        rel == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE ||
+                        rel == UserConfigDir.CUSTOM_CONFIG_FILE
+                    val allowed = isConfig || rel.startsWith("themes/") || rel.startsWith("fonts/")
                     if (allowed) {
                         val target = File(rimeDir, rel).canonicalFile
                         if (target.path.startsWith(rimeCanonical.path + File.separator)) {
                             target.parentFile?.mkdirs()
                             target.outputStream().use { out -> zis.copyTo(out) }
                             written.add(rel)
-                            if (rel == "xime.custom.yaml") hasCustom = true
+                            if (isConfig) hasCustom = true
                         } else {
                             Log.w(TAG, "skip zip-slip layout entry: $name")
                         }
@@ -466,6 +479,21 @@ object XimeIndexSource {
                 zis.closeEntry()
                 entry = zis.nextEntry
             }
+        }
+        // 解压出来的配置要落到「真源」位置：可见目录可用时以它为准并清掉私有副本，
+        // 否则 zip 形态的布局包会被可见目录里的旧配置静默覆盖。
+        if (hasCustom) {
+            val text = listOf(
+                UserConfigDir.UNIFIED_CONFIG_FILE,
+                UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE,
+                UserConfigDir.CUSTOM_CONFIG_FILE,
+            )
+                .asSequence()
+                .mapNotNull { name ->
+                    runCatching { File(rimeDir, name).readText().trimStart('\uFEFF') }.getOrNull()
+                }
+                .firstOrNull()
+            text?.let { UserConfigDir.writeCustomConfig(context, it) }
         }
         return if (hasCustom) written else null
     }
@@ -479,7 +507,7 @@ object XimeIndexSource {
     private fun fetchTextSingle(base: String, repoPath: String): String? {        return try {
             client.newCall(Request.Builder().url(base + repoPath).build()).execute().use { resp ->
                 if (resp.isSuccessful) {
-                    resp.body?.string()?.takeIf { it.isNotBlank() }
+                    resp.body.string().takeIf { it.isNotBlank() }
                 } else null
             }
         } catch (e: Exception) {

@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.settings
+﻿package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.util.Log
@@ -7,9 +7,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
-import java.security.DigestInputStream
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -109,24 +106,6 @@ object SchemaManifestManager {
         }
     }
 
-    // ── SHA256 helper ──
-
-    private fun fileSha256(file: File): String? {
-        return try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            FileInputStream(file).use { input ->
-                DigestInputStream(input, digest).use { dis ->
-                    val buffer = ByteArray(8192)
-                    while (dis.read(buffer) != -1) { }
-                }
-            }
-            digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-        } catch (e: Exception) {
-            Log.w(TAG, "sha256 failed for ${file.name}", e)
-            null
-        }
-    }
-
     // ── Conflict Detection ──
 
     /**
@@ -188,7 +167,7 @@ object SchemaManifestManager {
             for (fileName in extractedFiles) {
                 val file = File(rimeDir, fileName)
                 if (!file.exists()) continue
-                val sha256 = fileSha256(file) ?: continue
+                val sha256 = SchemaManager.fileSha256(file) ?: continue
                 fileEntries.put(fileName, JSONObject().apply {
                     put("sha256", sha256)
                     put("size", file.length())
@@ -504,7 +483,7 @@ object SchemaManifestManager {
                     for (fn in allFilesInRime) {
                         val file = File(rimeDir, fn)
                         if (!file.exists()) continue
-                        val sha256 = fileSha256(file) ?: continue
+                        val sha256 = SchemaManager.fileSha256(file) ?: continue
                         fileEntries.put(fn, JSONObject().apply {
                             put("sha256", sha256)
                             put("size", file.length())
@@ -563,6 +542,9 @@ object SchemaManifestManager {
         if (relPath == "installation.yaml") return true
         if (relPath == "custom_phrase.txt") return true
         if (relPath == "xime.custom.yaml") return true
+        // 统一配置（完整快照）同样是用户数据，卸载市场方案时不能删（含旧名 xime.txt）
+        if (relPath == UserConfigDir.UNIFIED_CONFIG_FILE) return true
+        if (relPath == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE) return true
         // themes/ 存放用户导入或自定义的背景图片，不应被清单追踪
         if (relPath.startsWith("themes/")) return true
         return false

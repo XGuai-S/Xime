@@ -1,6 +1,5 @@
 package com.kingzcheung.xime.calculator
 
-import net.objecthunter.exp4j.ExpressionBuilder
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -127,21 +126,10 @@ class CalculatorEngine {
     /**
      * 完整表达式计算，支持混合运算、括号、优先级。
      * 使用 exp4j 引擎，适合 `2+3*4`、`(10+5)/3`、`2^10` 等。
+     *
+     * 实现已抽到 [ExpressionEvaluator]（大写金额模式的算式复用同一处求值），行为不变。
      */
-    fun evaluate(expression: String): String? {
-        // 过滤连续运算符等 exp4j 容忍但非法输入
-        if (expression.matches(Regex(".*[+\\-*/]{2,}.*")) &&
-            !expression.matches(Regex(".*[eE].*"))) return null
-        return try {
-            val raw = ExpressionBuilder(expression).build().evaluate()
-            if (raw.isInfinite() || raw.isNaN()) return null
-            // 四舍五入到 10 位消除浮点误差
-            val bd = BigDecimal(raw).setScale(10, RoundingMode.HALF_UP).stripTrailingZeros()
-            bd.toPlainString()
-        } catch (_: Exception) {
-            null
-        }
-    }
+    fun evaluate(expression: String): String? = ExpressionEvaluator.evaluate(expression)
 
     /** 用 exp4j 评估完整原始输入，尊重运算符优先级。 */
     private fun computeResult(): String? =

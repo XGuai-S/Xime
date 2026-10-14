@@ -4,7 +4,6 @@ import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,15 +15,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.twotone.OpenInNew
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.twotone.BugReport
 import androidx.compose.material.icons.twotone.Code
@@ -37,13 +33,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -136,14 +128,12 @@ fun AboutContent(
     onNavigateToPrivacy: () -> Unit,
     onNavigateToLicenses: () -> Unit,
     onNavigateToLogViewer: () -> Unit = {},
+    onNavigateToLogSettings: () -> Unit = {},
     onNavigateToDeveloper: () -> Unit = {},
     onNavigateToStorageSpace: () -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
-    var verboseLoggingEnabled by remember {
-        mutableStateOf(SettingsPreferences.isVerboseLoggingEnabled(context))
-    }
     // 彩蛋入口：1.5 秒内连点"设备信息"卡片 7 次解锁"开发者选项"（平时隐藏，
     // 页内收纳手写数据采集 / 插件开发模式等开发者功能）
     var captureTapCount by remember { mutableStateOf(0) }
@@ -161,26 +151,7 @@ fun AboutContent(
         }
     }
     
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            TopAppBar(
-                title = { Text("关于") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { paddingValues ->
+    SettingsScreenScaffold(title = "关于", onBack = onBack) { paddingValues ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -408,20 +379,14 @@ fun AboutContent(
                                 thickness = 0.5.dp,
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                             )
+                            // 日志开关不再是 Debug 专属：正式包里也有「设置 → 数据与同步 → 日志」，
+                            // 这里只作开发期的快捷入口，避免两处开关语义分叉。
                             SettingsItem(
                                 icon = Icons.TwoTone.BugReport,
-                                title = "调试日志",
-                                onClick = {},
-                                trailing = {
-                                    Switch(
-                                        checked = verboseLoggingEnabled,
-                                        onCheckedChange = { enabled ->
-                                            verboseLoggingEnabled = enabled
-                                            SettingsPreferences.setVerboseLoggingEnabled(context, enabled)
-                                            FileLogger.setVerboseLoggingEnabled(enabled)
-                                        }
-                                    )
-                                }
+                                title = "日志",
+                                subtitle = "记录开关、查看与导出日志",
+                                onClick = onNavigateToLogSettings,
+                                showArrow = true
                             )
                         }
                     }
@@ -519,26 +484,7 @@ private fun InfoRow(label: String, value: String) {
 fun PrivacyPolicyContent(
     onBack: () -> Unit
 ) {
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            TopAppBar(
-                title = { Text("隐私策略") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { paddingValues ->
+    SettingsScreenScaffold(title = "隐私策略", onBack = onBack) { paddingValues ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -629,26 +575,7 @@ fun LicensesContent(
 ) {
     val uriHandler = LocalUriHandler.current
     
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            TopAppBar(
-                title = { Text("开源许可证") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { paddingValues ->
+    SettingsScreenScaffold(title = "开源许可证", onBack = onBack) { paddingValues ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()

@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.ui.settings
+﻿package com.kingzcheung.xime.ui.settings
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -15,7 +15,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -30,12 +29,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -181,26 +177,8 @@ fun PluginConfigFormScreen(
             saveButton()
         }
     } else {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.surface,
-            topBar = {
-                TopAppBar(
-                    title = { Text(pluginName) },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回"
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        titleContentColor = MaterialTheme.colorScheme.onSurface
-                    ),
-                )
-            }
-        ) { padding ->
+        SettingsScreenScaffold(title = pluginName, onBack = onBack) { padding ->
+
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -464,7 +442,7 @@ private fun UiNodeEditor(
                     buttonBusy = true
                     scope.launch {
                         val error = withContext(Dispatchers.IO) {
-                            runCatching { plugin.onAction(action.toString()) }.getOrNull()
+                            runCatching { plugin.onAction(action) }.getOrNull()
                         }
                         buttonBusy = false
                         if (error.isNullOrBlank()) {

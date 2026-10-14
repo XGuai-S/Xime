@@ -55,11 +55,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Fill
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
@@ -67,6 +64,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -81,7 +79,6 @@ import com.kingzcheung.xime.R
 import com.kingzcheung.xime.clipboard.ClipboardItem
 import com.kingzcheung.xime.keyboard.KeyboardPage
 import com.kingzcheung.xime.keyboard.OverlayRoute
-import com.kingzcheung.xime.keyboard.PanelType
 import com.kingzcheung.xime.keyboard.ToolbarAction
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.speech.RecognitionState
@@ -106,6 +103,11 @@ data class CandidateBarCallbacks(
     val onHideKeyboard: (() -> Unit)? = null,
     val onShowMoreCandidates: (() -> Unit)? = null,
     val onClearAssociation: (() -> Unit)? = null,
+    /**
+     * 编码态（有编码/候选词）右侧「清空」按键：清空候选词列表，并同步删除输入框中
+     * 已嵌入的首码（走 `clear_composition` 链路，见 ImeKeyRouter.clearInputStateForKeys）。
+     */
+    val onClearInput: (() -> Unit)? = null,
     val onInputTextClick: (() -> Unit)? = null,
     val onAssociationSelect: ((Int) -> Unit)? = null,
     // 长按候选：抛事件给宿主（键盘视图内弹确认覆盖层，不弹独立窗口——
@@ -115,11 +117,41 @@ data class CandidateBarCallbacks(
     val onVoiceStop: (() -> Unit)? = null
 )
 
+/**
+ * 候选栏右侧「清空」按键是否显示。
+ *
+ * 三个条件同时满足才显示：`keyboard.candidates.show_clear_button` 未关闭（[enabled]）、
+ * 处于编码态（中文/英文候选态）、宿主提供了清空回调。
+ *
+ * 纯联想态（[CandidateBarState.AssociationOnly]）、剪贴板展示态、计算器态没有可清空的编码，
+ * 不显示该键——否则会出现一个点了没反应的按钮。
+ */
+internal fun shouldShowCandidateClearButton(
+    state: CandidateBarState,
+    hasClearInputCallback: Boolean,
+    enabled: Boolean,
+): Boolean = enabled && hasClearInputCallback &&
+    (state is CandidateBarState.ChineseCandidates || state is CandidateBarState.EnglishCandidates)
+
+/**
+ * 候选栏顶部「编码气泡」是否显示。
+ *
+ * 编码已经在系统输入框里时不重复画气泡；反之（编码显示在候选栏，或者「候选首词」
+ * 占用输入框、编码让位）必须靠气泡显示，否则编码两处都看不到。
+ */
+internal fun shouldShowPreeditBubble(
+    showInputTextRow: Boolean,
+    hasPreeditText: Boolean,
+    codeInInputBox: Boolean,
+): Boolean = showInputTextRow && hasPreeditText && !codeInInputBox
+
 @Composable
 fun CandidateBar(
     state: CandidateBarState,
     page: KeyboardPage = KeyboardPage.Main(com.kingzcheung.xime.keyboard.MainType.FULL),
     candidatePageExpanded: Boolean = false,
+    /** `keyboard.candidates.show_clear_button`：false 时不显示编码态「清空」按键。 */
+    clearInputButtonEnabled: Boolean = true,
     toolbarActions: List<ToolbarAction> = emptyList(),
     visuals: CandidateBarVisuals,
     callbacks: CandidateBarCallbacks,
@@ -150,8 +182,9 @@ fun CandidateBar(
     )
     val iconButtonTint = MaterialTheme.colorScheme.onSurfaceVariant
     val showComments = SettingsPreferences.showCandidateComments(context)
-    val inputTextLocation = SettingsPreferences.getInputTextLocation(context)
-    val showInputBoxStyle = inputTextLocation == SettingsPreferences.INPUT_TEXT_INPUT_BOX
+    // 编码已经在输入框里时不再重复画气泡；反之（编码显示在候选栏，或「候选首词」占用输入框、
+    // 编码让位）必须靠候选栏气泡显示，否则编码两处都看不到。
+    val codeInInputBox = SettingsPreferences.isCodeInInputBox(context)
     val candidateTextSize = SettingsPreferences.getCandidateTextSize(context)
     val candidateFontFamily = AppFonts.candidateFontFamily
     val commentFontFamily = AppFonts.commentFontFamily
@@ -163,11 +196,19 @@ fun CandidateBar(
 
     val screenWidthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val rowPaddingPx = with(density) { 16.dp.toPx() }
+    // 编码态右侧「清空」按键：仅中文/英文编码态出现（纯联想、剪贴板、计算器态无编码可清）
+    val showClearInputButton = shouldShowCandidateClearButton(
+        state,
+        callbacks.onClearInput != null,
+        clearInputButtonEnabled,
+    )
     val rightSidePx = with(density) {
         val moreBtn = if (callbacks.onShowMoreCandidates != null) 38.dp.toPx() else 0f
         val clearBtn = if (callbacks.onClearAssociation != null) 38.dp.toPx() else 0f
+        // 编码清空键与「更多候选」可同排出现，宽度需相加；其余情形两者互斥，取较大者即可
+        val clearInputBtn = if (showClearInputButton) 38.dp.toPx() else 0f
         val hideBtn = if (callbacks.onHideKeyboard != null) 28.dp.toPx() else 0f
-        rowPaddingPx + maxOf(moreBtn, clearBtn) + hideBtn + 8.dp.toPx()
+        rowPaddingPx + maxOf(moreBtn, clearBtn) + clearInputBtn + hideBtn + 8.dp.toPx()
     }
 
     // 候选行滚动状态：需在 state 分支前声明——ChineseCandidates 的 hasAnyMore
@@ -266,6 +307,16 @@ fun CandidateBar(
             showLeftIcon = false
             displayImages = emptyList()
         }
+        is CandidateBarState.CapitalAmount -> {
+            // 与 Calculator 同形：两个候选都渲染、都可点选（第一个高亮）。
+            // 点选由 selectCandidate 分辨并走「回显替换」，不会重复上屏金额。
+            displayCandidates = s.candidates.take(20)
+            displayComments = emptyList()
+            displayAssociation = emptyList()
+            hasAnyMore = false
+            showLeftIcon = false
+            displayImages = emptyList()
+        }
     }
     showInputTextRow = when (page) {
         is KeyboardPage.Overlay -> page.route !is OverlayRoute.Clipboard
@@ -285,7 +336,11 @@ fun CandidateBar(
     var preeditBubbleCaret by remember(state) {
         mutableStateOf((state as? CandidateBarState.ChineseCandidates)?.preeditCaretPos ?: -1)
     }
-    val showPreeditBubble = showInputTextRow && preeditBubbleText.isNotEmpty() && !showInputBoxStyle
+    val showPreeditBubble = shouldShowPreeditBubble(
+        showInputTextRow = showInputTextRow,
+        hasPreeditText = preeditBubbleText.isNotEmpty(),
+        codeInInputBox = codeInInputBox,
+    )
 
     Column(
         modifier = modifier
@@ -611,7 +666,10 @@ fun CandidateBar(
                         }
                     }
                 }
-                displayAssociation.isNotEmpty() && callbacks.onClearAssociation != null -> {
+                // 编码态下不显示联想专用「清空」：编码清空键已一并清掉联想候选
+                // （clearInputStateForKeys 会清 associationCandidates），
+                // 两个同名「清空」并排会让用户无法判断各自清的是什么。
+                !showClearInputButton && displayAssociation.isNotEmpty() && callbacks.onClearAssociation != null -> {
                     val clearInteractionSource = remember { MutableInteractionSource() }
                     val isClearPressed by clearInteractionSource.collectIsPressedAsState()
 
@@ -677,6 +735,39 @@ fun CandidateBar(
                             modifier = Modifier.size(22.dp)
                         )
                     }
+                }
+            }
+
+            // 编码态「清空」按键：清空候选词列表，并同步删除输入框中已嵌入的首码。
+            // 置于右侧按钮组最右端（「更多候选」箭头仍紧邻候选列表，位置不变）。
+            if (showClearInputButton) {
+                val clearInputInteractionSource = remember { MutableInteractionSource() }
+                val isClearInputPressed by clearInputInteractionSource.collectIsPressedAsState()
+
+                Spacer(modifier = Modifier.width(4.dp))
+                Box(
+                    modifier = Modifier
+                        .width(30.dp)
+                        .height(24.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isClearInputPressed) (if (visuals.isDarkTheme) Color.White.copy(alpha = 0.15f) else Color.Black.copy(
+                                alpha = 0.1f
+                            ))
+                            else Color.Transparent
+                        )
+                        .clickable(
+                            interactionSource = clearInputInteractionSource,
+                            indication = null,
+                            onClick = { callbacks.onClearInput?.invoke() }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "清空",
+                        color = if (isClearInputPressed) visuals.textColor.copy(alpha = 0.6f) else visuals.textColor,
+                        fontSize = 11.sp
+                    )
                 }
             }
         }

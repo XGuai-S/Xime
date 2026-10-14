@@ -50,7 +50,6 @@ import com.kingzcheung.xime.settings.SchemaInfo
 import com.kingzcheung.xime.settings.BackgroundConfig
 import com.kingzcheung.xime.ui.theme.XimeTheme
 import com.kingzcheung.xime.settings.KeysConfigHelper
-import com.kingzcheung.xime.settings.KeyboardColorsConfig
 import com.kingzcheung.xime.ui.theme.KeyboardColorScheme
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import com.kingzcheung.xime.ui.theme.keyboardBackground

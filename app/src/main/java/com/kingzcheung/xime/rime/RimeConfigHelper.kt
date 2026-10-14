@@ -3,16 +3,11 @@ package com.kingzcheung.xime.rime
 import com.kingzcheung.xime.util.FileLogger
 import android.content.Context
 import android.util.Log
-import com.kingzcheung.xime.BuildConfig
 import com.kingzcheung.xime.settings.PersonalDictManager
-import com.kingzcheung.xime.settings.SchemaConfigHelper
-import com.kingzcheung.xime.settings.SchemaManifestManager
 import com.kingzcheung.xime.settings.MarketVersionStore
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SettingsPreferences
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException

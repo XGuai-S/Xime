@@ -3,7 +3,6 @@ package com.kingzcheung.xime.rime
 import com.kingzcheung.xime.util.FileLogger
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -376,7 +375,7 @@ class T9InputController(
 
     /** 单次退格：processKey → flush → 撤销计数 → 取全量结果 → Main 刷新 + 回调。 */
     private suspend fun processDelete(callback: (DeleteResult) -> Unit) {
-        val result = rimeEngine.processKey(0xff08, 0)
+        val result = rimeEngine.processKey(RimeKeyCodes.BACKSPACE, 0)
         rimeEngine.t9FlushRimeInput()
         val undoneCount = rimeEngine.t9GetAndConsumeUndoneRightCommitCount()
         val data = fetchAll()

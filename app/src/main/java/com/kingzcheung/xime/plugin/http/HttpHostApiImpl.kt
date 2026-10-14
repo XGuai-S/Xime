@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.plugin.http
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.PluginNetworkAuthHelper
@@ -144,7 +143,7 @@ class HttpHostApiImpl(
     private fun toHttpResponse(response: Response): HttpResponse {
         val headers = HashMap<String, String>()
         response.headers.forEach { (k, v) -> headers[k] = v }
-        val bytes = response.body?.bytes() ?: ByteArray(0)
+        val bytes = response.body.bytes()
         return HttpResponse(
             status = response.code,
             headers = headers,

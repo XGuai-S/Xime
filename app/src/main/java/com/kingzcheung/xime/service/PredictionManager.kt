@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import com.kingzcheung.xime.association.AssociationManager
 import com.kingzcheung.xime.association.AssociationService
-import com.kingzcheung.xime.BuildConfig
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
@@ -26,6 +25,15 @@ class PredictionManager(
     
     private var _lastCommittedText = ""
     val lastCommittedText: String get() = _lastCommittedText
+
+    /**
+     * 最近一次**单次**上屏的文本（区别于 [lastCommittedText] 的滚动上下文缓冲区）。
+     *
+     * 「重复上一次上屏」只能重复这一笔，不能把前文一起再打一遍：旧实现直接重提
+    ，后者是最近 25 字的累积上下文，换行键上滑会把整段历史重复上屏。
+     */
+    private var _lastCommitChunk = ""
+    val lastCommitChunk: String get() = _lastCommitChunk
 
     /**
      * 预测请求代际号：退格/清空等改变上下文的操作调用 [invalidatePendingPredictions]，
@@ -53,14 +61,26 @@ class PredictionManager(
     fun appendCommittedText(text: String) {
         _lastCommittedText = (_lastCommittedText + text).takeLast(MAX_CONTEXT_LENGTH)
     }
+
+    /** 记录一次单次上屏（供「重复上一次输入」使用）。 */
+    fun appendCommittedChunk(text: String) {
+        if (text.isNotEmpty()) _lastCommitChunk = text
+    }
     
     fun clearCommittedText() {
         _lastCommittedText = ""
+        // 换会话（切换编辑框/新输入）后旧编辑框的上屏内容不再可重复，一并作废
+        _lastCommitChunk = ""
     }
     
     fun deleteLastChar() {
         if (_lastCommittedText.isNotEmpty()) {
             _lastCommittedText = _lastCommittedText.dropLast(1)
+        }
+        // 用户删掉了刚才上屏的最后一个字：待重复的这笔内容也要同步缩短，
+        // 否则换行键上滑会把用户已经删掉的字又打出来。
+        if (_lastCommitChunk.isNotEmpty()) {
+            _lastCommitChunk = _lastCommitChunk.dropLast(1)
         }
     }
     

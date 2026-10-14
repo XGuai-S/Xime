@@ -28,10 +28,13 @@ object SettingsRoutes {
     const val Privacy = "privacy"
     const val Licenses = "licenses"
     const val LogViewer = "log_viewer"
+    const val LogSettings = "log_settings"
     const val HandwritingCapture = "handwriting_capture"
     const val Clipboard = "clipboard"
     const val ClipboardSync = "clipboard_sync"
     const val Backup = "backup"
     const val SchemaDictBrowser = "schema_dict_browser"
     const val RimeFileBrowser = "rime_file_browser"
+    /** 直接落在用户可见配置目录的浏览入口（区别于通用「文件管理器」）。 */
+    const val UserConfigBrowser = "user_config_browser"
 }

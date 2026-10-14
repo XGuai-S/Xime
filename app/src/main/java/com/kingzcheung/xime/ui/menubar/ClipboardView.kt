@@ -40,7 +40,6 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.twotone.Image
 import androidx.compose.material.icons.twotone.Sync
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -76,7 +75,6 @@ import com.kingzcheung.xime.ui.rememberClipboardImageRequest
 import com.kingzcheung.xime.ui.keyboard.WIDE_CONTAINER_WIDTH
 import com.kingzcheung.xime.viewmodel.KeyboardViewModel
 import java.io.File
-import kotlin.math.max
 
 @Composable
 fun ClipboardView(

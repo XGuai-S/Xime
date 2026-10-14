@@ -16,6 +16,20 @@ xime_index:
     - "https://index.ximei.me/"
     - "https://raw.githubusercontent.com/ximeiorg/xime-index/refs/heads/main/"
 
+logging:
+  # 日志记录级别。默认 error：只记录崩溃与 ERROR/WARN，日常使用推荐。
+  # 需要排查问题时调低门槛（越往下越详细、也越占空间）：
+  #   off     关闭文件日志（仅 logcat 可见）
+  #   error   崩溃与错误（默认）
+  #   warn    额外记录警告，含可恢复的异常
+  #   info    额外记录主要流程节点
+  #   debug   记录详细过程，用于定位具体问题
+  #   verbose 记录每一次按键与候选，最占空间
+  #
+  # 注意：在「设置 → 数据与同步 → 日志」里手动选过级别后，以界面选择为准；
+  # 想改回由本文件控制，在该页面点「在 xime.yaml 中配置」清除界面覆盖值。
+  level: error
+
 style:
   # 浅色/深色模式的配色，deep 为降级后备
   # 可选值：内置主题 id、color_schemes 中定义的 id、或 dynamic（Material You 动态配色，随壁纸取色，仅 Android 12+ 生效）
@@ -437,6 +451,56 @@ keyboard:
     candidate_font: ""
     comment_font: ""
 
+  # ── 候选词操作（可选，不设置则使用内置默认值）──
+  # show_clear_button: 编码状态下在候选栏右侧显示「清空」按键。
+  #                    点击后清空候选词列表；若首码已嵌入输入框（设置里开启该模式），
+  #                    同步删除首码。默认 true。
+  # shortcuts:         标点键直选候选：存在候选词时，按下的标点键直接选中第 N 个候选，
+  #                    0 = 首选（第 1 个）。默认 逗号 → 1（第 2 个 / 次选），
+  #                    句号 → 2（第 3 个 / 三选）。
+  #                    候选数不足该下标时，该键退回原本的标点输入行为。
+  #                    键名可用 comma / period；设成 0 即让该键选首选。
+  candidates:
+    show_clear_button: true
+    shortcuts:
+      comma: 1
+      period: 2
+
+  # ── 手势灵敏度（可选，不设置则使用内置默认值）──
+  # long_press_ms: 长按判定时间（毫秒，默认 300）。数值越小长按越灵敏。
+  #   空格键：按住**不动**超过该时间才进入语音输入；只要手指位移超过系统
+  #   touch slop（约 8dp）就立刻取消长按并改判为滑动，所以左右滑动移动光标
+  #   绝不会误开语音——语音只由长按触发，滑动手势不触发语音。
+  #   其余带长按气泡的键（如 123 长按出符号面板、字母键长按出大写/变音）
+  #   共用同一个判定时间，改这里即整体生效。
+  #   若觉得长按太容易误触（想打空格却开了语音），把数值调大即可（如 400/500）。
+  gestures:
+    long_press_ms: 300
+
+  # ── 组合键（可选）──
+  # 输入触发码（完整相等，如 orq）后，候选栏直接给出**求值后**的候选，点选即上屏。
+  # 候选写成模板：{变量:格式} 会在输入时按当前时刻求值，与 Rime 词库无关。
+  # 变量：
+  #   {time:格式}      当前日期时间，格式用 Java SimpleDateFormat 字母
+  #   {time+N:格式}    以今天为基准偏移 N 天（-N 为过去）
+  #   {jq}            当天节气名；当天不是节气时给「无节气」
+  #   {jq+}           下一个节气与日期（如 立冬 11月7日）；当天是节气时就是当天那个
+  #   {nl}            当天农历月日（如 九月初五）
+  #   {nl+}           农历 + 公历数字年（二〇二六年九月初五）
+  #   {nl#}           农历 + 干支纪年（丙午年九月初五）
+  # 命令项（不产生文本，而是执行内置命令）：
+  #   { command: reload, label: 重新部署 }
+  # 用户可在 xime.yaml 里增删改；同名触发码覆盖内置，写成空列表 [] 即禁用。
+  combos:
+    orq: ["{time:yyyy年M月d日}", "{time:yyyy-MM-dd}"]
+    omt: ["{time+1:yyyy年M月d日}", "{time+1:yyyy-MM-dd}"]
+    oht: ["{time+2:yyyy年M月d日}", "{time+2:yyyy-MM-dd}"]
+    onl: ["{nl}", "{nl#}", "{nl+}"]
+    ouj: ["{time:HH:mm}", "{time:H点m分}"]
+    ojq: ["{jq}", "{jq+}"]
+    oiz:
+      - { command: reload, label: "重新部署" }
+
   qwerty:
     # ── 按键布局模式（仅 26 键键盘支持；九键/笔画等其余键盘固定 standard，配置不生效）──
     # standard: 默认布局（主文字居中，下滑提示在底部）
@@ -448,7 +512,7 @@ keyboard:
         - [a, s, d, f, g, h, j, k, l]
         - [shift, z, x, c, v, b, n, m, delete]
         # 第四行（控制行）：位置/是否出现由本 rows 决定，行为在下方 keys.<id> 配置
-        - [mode_change, comma, space, earth, enter]
+        - [mode_change, comma, space, period, enter]
     keys:
       # ── 第一行 ──
       # long_press 顺序：小写 → 大写 → 带变音符号的相似字母
@@ -483,20 +547,25 @@ keyboard:
       b: { tap: "b", swipe_up: { label: "！", value: "!" }, swipe_down: { label: "子耳了也阝卩㔾凵", action: "none", display: "bubble" }, long_press: { display: "bubble", values: ["b", "B"] } }
       n: { tap: "n", swipe_up: { label: "％", value: "%" }, swipe_down: { label: "已己巳心忄羽乙𠃜", action: "none", display: "bubble" }, long_press: { display: "bubble", values: ["n", "N", "ñ"] } }
       m: { tap: "m", swipe_up: { label: "＃", value: "#" }, swipe_down: { label: "山由贝冂冎几", action: "none", display: "bubble" }, long_press: { display: "bubble", values: ["m", "M"] } }
-      # shift：单击切单击态、双击锁定大写；命令值走键盘按键路由（shift_single / shift_caps）
+      # shift：单击切单击态、双击锁定大写、长按进入编辑面板（单击改为抬手触发，长按不会顺带切大小写）；
+      # 命令值走键盘按键路由（shift_single / shift_caps）
       shift: { width: 1.4, tap: { action: command, value: shift_single }, double_tap: { action: command, value: shift_caps } }
-      # delete：单击删除、长按重复删、上滑清空、下滑撤回、左右滑清空输入
-      delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: command, value: clear_composition }, swipe_right: { action: command, value: clear_composition } }
+      # delete：单击删除、长按重复删、上滑清空、下滑撤回、左滑按住快速删除（滑动幅度越大越快，抬手即停）、右滑清空输入
+      delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: repeat_delete, label: "快速删除" }, swipe_right: { action: command, value: clear_composition } }
       # ── 第四行功能键（位置/是否出现由上方 layout.rows 第四行决定；行为在此定义）──
-      # ?123：单击切面板，长按弹出「数字 / 常用符号」（命令值走键盘按键路由）
-      mode_change: { width: 1.2, tap: { action: command, value: mode_change }, long_press: { display: bubble, values: [ { label: number, action: command, value: mode_change_number }, { label: common_symbol, action: command, value: mode_change_common_symbol } ] } }
-      # 空格键：单击上屏空格；长按进入语音输入（含麦克风权限校验）
+      # 控制行宽度比：四个侧键等宽 1.1、空格 2.5（末行 5 键；含数字行时即第五行），中英键盘一致
+      # 123：单击直达九键数字键盘，长按切符号面板（命令值走键盘按键路由）
+      mode_change: { width: 1.1, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
+      # 空格键：单击上屏空格；长按语音输入；上下滑切换中/英文（Rime 官方 ascii_mode 开关）；左右滑移动光标
       # 长按若想改为「重复空格」：long_press: { values: [ { action: repeat_space, value: 5 } ] }
-      space: { width: 3, tap: { action: space }, long_press: { values: [ { action: voice } ] } }
+      space: { width: 2.5, tap: { action: space }, long_press: { values: [ { action: voice } ] }, swipe_up: { action: toggle_ascii, label: "中/英" }, swipe_down: { action: toggle_ascii, label: "中/英" }, swipe_left: { action: cursor_left, value: 1, label: "左移光标" }, swipe_right: { action: cursor_right, value: 1, label: "右移光标" } }
       # 回车键
-      enter: { width: 1.2, tap: { action: enter } }
+      # 回车键：上滑重复上一次上屏内容（action: repeat 走「重复上一次输入」同一实现）
+      enter: { width: 1.1, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
       #  逗号键，label 为中文显示，value 为英文显示+提交值
-      comma: { tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
+      comma: { width: 1.1, tap: { label: "，", value: "," }, swipe_up: { label: "？", value: "?" } , long_press: { display: "bubble", values: [ ",","."] }}
+      # 句号键（Rime 官方 punctuator 中 "." 的提交值）。label 中文显示、value 英文显示+提交值
+      period: { width: 1.1, tap: { label: "。", value: "." }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
       # 中/英切换键，label 为按键显示文字
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
     
@@ -545,19 +614,21 @@ keyboard:
       b: { tap: "b", swipe_up: "!", long_press: { display: "bubble", values: ["b", "B"] } }
       n: { tap: "n", swipe_up: "%", long_press: { display: "bubble", values: ["n", "N"] } }
       m: { tap: "m", swipe_up: "#", long_press: { display: "bubble", values: ["m", "M"] } }
-      # shift：单击切单击态、双击锁定大写（命令值走键盘按键路由）
+      # shift：单击切单击态、双击锁定大写、长按进入编辑面板（命令值走键盘按键路由）
       shift: { width: 1.4, tap: { action: command, value: shift_single }, double_tap: { action: command, value: shift_caps } }
-      # delete：单击删除、长按重复删、上滑清空、下滑撤回、左右滑清空输入
-      delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: command, value: clear_composition }, swipe_right: { action: command, value: clear_composition } }
-      # ?123：单击切面板，长按弹出「数字 / 常用符号」
-      mode_change: { width: 1.2, tap: { action: command, value: mode_change }, long_press: { display: bubble, values: [ { label: number, action: command, value: mode_change_number }, { label: common_symbol, action: command, value: mode_change_common_symbol } ] } }
-      # 空格键：单击上屏空格；长按进入语音输入（含麦克风权限校验）
+      # delete：单击删除、长按重复删、上滑清空、下滑撤回、左滑按住快速删除（滑动幅度越大越快，抬手即停）、右滑清空输入
+      delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: repeat_delete, label: "快速删除" }, swipe_right: { action: command, value: clear_composition } }
+      # 123：单击直达九键数字键盘，长按切符号面板（宽度比同中文键盘：侧键 1.1、空格 2.5）
+      mode_change: { width: 1.1, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
+      # 空格键：单击上屏空格；长按语音输入；上下滑切换中/英文；左右滑移动光标
       # 长按若想改为「重复空格」：long_press: { values: [ { action: repeat_space, value: 5 } ] }
-      space: { width: 3, tap: { action: space }, long_press: { values: [ { action: voice } ] } }
+      space: { width: 2.5, tap: { action: space }, long_press: { values: [ { action: voice } ] }, swipe_up: { action: toggle_ascii, label: "中/英" }, swipe_down: { action: toggle_ascii, label: "中/英" }, swipe_left: { action: cursor_left, value: 1, label: "左移光标" }, swipe_right: { action: cursor_right, value: 1, label: "右移光标" } }
       # 回车键
-      enter: { width: 1.2, tap: { action: enter } }
+      # 回车键：上滑重复上一次上屏内容（与中文键盘同语义）
+      enter: { width: 1.1, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
       #  逗号键，label 为中文显示，value 为英文显示+提交值
-      comma: { tap: { label: ".", value: "." }, swipe_up: { label: ",", value: "," } }
+      comma: { width: 1.1, tap: { label: ".", value: "." }, swipe_up: { label: ",", value: "," } }
+      period: { width: 1.1, tap: { label: ".", value: "." } }
       # 中/英切换键，label 为按键显示文字
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
 
@@ -597,7 +668,7 @@ keyboard:
       cv: { tap: { label: "cv", value: "c" }, swipe_up: "、", long_press: { display: "bubble", values: ["c", "v", "C", "V"] } }
       bn: { tap: { label: "bn", value: "b" }, swipe_up: "!", long_press: { display: "bubble", values: ["b", "n", "B", "N"] } }
       m:  { tap: { label: "m", value: "m" }, swipe_up: "#", long_press: { display: "bubble", values: ["m", "M"] } }
-      comma: { tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
+      comma: { width: 1.1, tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
 
   # 拼音 17 键：we/rt/yu/op、sd/fg/jk、xc/bn（对应方案 pinyin_17jian）
@@ -628,7 +699,7 @@ keyboard:
       v:  { tap: { label: "v", value: "v" }, swipe_up: "?", long_press: { display: "bubble", values: ["v", "V"] } }
       bn: { tap: { label: "bn", value: "b" }, swipe_up: "!", long_press: { display: "bubble", values: ["b", "n", "B", "N"] } }
       m:  { tap: { label: "m", value: "m" }, swipe_up: "#", long_press: { display: "bubble", values: ["m", "M"] } }
-      comma: { tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
+      comma: { width: 1.1, tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
 
   # 拼音 18 键：we/rt/io、sd/fg/jk、xc/bn（对应方案 pinyin_18jian）
@@ -660,7 +731,7 @@ keyboard:
       v:  { tap: { label: "v", value: "v" }, swipe_up: "?", long_press: { display: "bubble", values: ["v", "V"] } }
       bn: { tap: { label: "bn", value: "b" }, swipe_up: "!", long_press: { display: "bubble", values: ["b", "n", "B", "N"] } }
       m:  { tap: { label: "m", value: "m" }, swipe_up: "#", long_press: { display: "bubble", values: ["m", "M"] } }
-      comma: { tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
+      comma: { width: 1.1, tap: { label: "，", value: "," }, swipe_up: { label: "。", value: "." } , long_press: { display: "bubble", values: [ ",","."] }}
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
 
   # 九键（T9）键盘配置
@@ -773,3 +844,11 @@ keyboard:
   # handwriting.schemas 追加即可，无需改代码。
   handwriting:
     schemas: [handwriting]
+
+backup:
+  # 备份范围：哪些内容需要随备份一起打包（本地导出 / 云备份共用）。
+  # 备份包里始终包含 rime 配置、设置与插件配置；这里的开关决定是否额外携带用户数据。
+  #   candidate_order  候选排序词频表（candidate_order.txt，与 xime.yaml 同级），
+  #                     即你手动拖拽出来的候选顺序。默认开启：换机或恢复后顺序不丢。
+  #                     关闭后备份包不含排序表，恢复后候选顺序回到引擎默认。
+  candidate_order: true

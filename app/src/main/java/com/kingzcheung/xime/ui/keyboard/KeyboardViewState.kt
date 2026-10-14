@@ -1,8 +1,7 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import com.kingzcheung.xime.keyboard.MainType
 import com.kingzcheung.xime.keyboard.OverlayRoute
-import com.kingzcheung.xime.keyboard.PanelType
 
 /**
  * 统一键盘视图状态 — 替代原有的 [KeyboardPage] + [KeyboardLayoutState] 双轴管理。
@@ -105,7 +104,7 @@ sealed interface KeyboardDispatchAction {
 
     // ── 外部事件 ──
 
-    /** ?123 切换（按当前 modeChangeTarget 走） */
+    /** 123 键切换（按当前 modeChangeTarget 走） */
     data class ModeChange(val targetIsNumber: Boolean, val isAsciiMode: Boolean) : KeyboardDispatchAction
 
     /** ASCII 模式由外部（Rime）改变 */

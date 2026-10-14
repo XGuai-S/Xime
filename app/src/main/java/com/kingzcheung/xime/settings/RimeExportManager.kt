@@ -88,13 +88,34 @@ object RimeExportManager {
 
             val bos = java.io.ByteArrayOutputStream()
             ZipOutputStream(bos).use { zos ->
+                // 可见目录 /storage/emulated/0/Xime/ 里的统一配置才是生效的那份（读取优先级最高），
+                // 单独取出来写入，并让 rime/ 下的旧副本跳过，避免包里出现两份互相矛盾的配置。
+                val visibleCustom = UserConfigDir.readText(context, UserConfigDir.UNIFIED_CONFIG_FILE)
+                val legacyNames = setOf(
+                    UserConfigDir.UNIFIED_CONFIG_FILE,
+                    UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE,
+                    UserConfigDir.CUSTOM_CONFIG_FILE
+                )
                 rimeDir.walkTopDown().forEach { file ->
                     if (file.isDirectory) return@forEach
                     val relativePath = file.relativeTo(rimeDir).path.replace('\\', '/')
+                    if (relativePath in legacyNames && visibleCustom != null) {
+                        return@forEach
+                    }
                     if (!shouldInclude(relativePath, mode)) return@forEach
                     zos.putNextEntry(ZipEntry(relativePath))
                     file.inputStream().use { it.copyTo(zos) }
                     zos.closeEntry()
+                }
+                if (visibleCustom != null) {
+                    zos.putNextEntry(ZipEntry(UserConfigDir.UNIFIED_CONFIG_FILE))
+                    zos.write(visibleCustom.toByteArray(Charsets.UTF_8))
+                    zos.closeEntry()
+                }
+                // 备份范围按 xime.yaml `backup` 段配置：候选排序词频表（candidate_order.txt，
+                // 与 xime.yaml 同级）。默认开启，换机/恢复后手动排序不丢。
+                if (KeysConfigHelper.loadBackupConfig(context).candidateOrder) {
+                    packCandidateOrder(context, zos)
                 }
                 BackupManager.collectMetaEntries(context, mode).forEach { (entryName, bytes) ->
                     zos.putNextEntry(ZipEntry(entryName))
@@ -186,6 +207,25 @@ object RimeExportManager {
             }
         }
         return null
+    }
+
+    /**
+     * 把候选排序词频表写入备份包（包根 `candidate_order.txt`，与 xime.yaml 同级语义）。
+     *
+     * 读取顺序与 [com.kingzcheung.xime.service.CandidateOrderStore.load] 一致：
+     * 优先可见目录（用户可直接查看/备份的那份），缺失时回退私有目录（老版本遗留/未授权
+     * 时的回退副本）。两处都没有则跳过，不报错。
+     */
+    private fun packCandidateOrder(context: Context, zos: ZipOutputStream) {
+        val text = UserConfigDir.readText(context, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME)
+            ?: runCatching {
+                File(context.filesDir, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME)
+                    .takeIf { it.isFile }?.readText()
+            }.getOrNull()
+        if (text == null || text.isBlank()) return
+        zos.putNextEntry(ZipEntry(com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME))
+        zos.write(text.toByteArray(Charsets.UTF_8))
+        zos.closeEntry()
     }
 
     private fun shouldInclude(relativePath: String, mode: ExportMode): Boolean {

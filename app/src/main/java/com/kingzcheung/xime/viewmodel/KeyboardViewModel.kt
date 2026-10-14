@@ -29,6 +29,7 @@ import com.kingzcheung.xime.ui.keyboard.KeyboardLayoutAction
 import com.kingzcheung.xime.ui.keyboard.KeyboardViewState
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
 import com.kingzcheung.xime.ui.keyboard.initialKeyboardLayoutState
+import com.kingzcheung.xime.ui.keyboard.toViewState
 import com.kingzcheung.xime.util.FileLogger
 
 enum class ShiftMode { OFF, SINGLE, CAPS }
@@ -86,6 +87,9 @@ data class KeyboardUiState(
     val floatingOffsetX: Int = 0,
     val floatingOffsetY: Int = 0,
     val t9ResetSignal: Long = 0L,
+    /** 大写金额模式「结束本次输入」信号：候选栏点选后自增，键盘据此退出模式并作废累积。
+     *  与 [t9ResetSignal] 同一套单向信号，避免键盘与服务各持一份模式状态。 */
+    val capitalAmountExitSignal: Long = 0L,
     val swipeCancelEpoch: Long = 0L,
     val t9RightCandidateSelectedCount: Long = 0L,
     val t9SelectedCandidatePinyin: String = "",
@@ -234,45 +238,9 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                     else -> Triple(current, _page.value, _keyboardState.value)
                 }
             }
-            is KeyboardDispatchAction.ModeChange -> {
-                val target = if (action.targetIsNumber) KeyboardLayoutAction.SwitchToNumber
-                    else KeyboardLayoutAction.SwitchToCommonSymbol
-                val newKb = initialKeyboardLayoutState(isAsciiMode, schemaId).transition(target, isAsciiMode, schemaId)
-                val newVs: KeyboardViewState = when (newKb) {
-                    KeyboardLayoutState.Number -> KeyboardViewState.NumberPanel(MainType.FULL)
-                    KeyboardLayoutState.CommonSymbol -> KeyboardViewState.CommonSymbolPanel(MainType.FULL)
-                    else -> when (newKb) {
-                        is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
-                        is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
-                        is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
-                        is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
-                        else -> current
-                    }
-                }
-                val newPage = if (newKb is KeyboardLayoutState.Number || newKb is KeyboardLayoutState.CommonSymbol)
-                    KeyboardPage.Panel(
-                        if (newKb is KeyboardLayoutState.Number) PanelType.NUMBER else PanelType.COMMON_SYMBOL,
-                        MainType.FULL
-                    )
-                else KeyboardPage.Main(MainType.FULL)
-                Triple(newVs, newPage, newKb)
-            }
-            is KeyboardDispatchAction.ShowNumber -> {
-                val returnTo = when (current) {
-                    is KeyboardViewState.NumberPanel -> current.returnTo
-                    is KeyboardViewState.CommonSymbolPanel -> current.returnTo
-                    else -> MainType.FULL
-                }
-                Triple(KeyboardViewState.NumberPanel(returnTo), KeyboardPage.Panel(PanelType.NUMBER, returnTo), KeyboardLayoutState.Number)
-            }
-            is KeyboardDispatchAction.ShowCommonSymbol -> {
-                val returnTo = when (current) {
-                    is KeyboardViewState.NumberPanel -> current.returnTo
-                    is KeyboardViewState.CommonSymbolPanel -> current.returnTo
-                    else -> MainType.FULL
-                }
-                Triple(KeyboardViewState.CommonSymbolPanel(returnTo), KeyboardPage.Panel(PanelType.COMMON_SYMBOL, returnTo), KeyboardLayoutState.CommonSymbol)
-            }
+            is KeyboardDispatchAction.ModeChange -> resolveModeChange(action, current, isAsciiMode, schemaId)
+            is KeyboardDispatchAction.ShowNumber -> resolveShowNumber(current)
+            is KeyboardDispatchAction.ShowCommonSymbol -> resolveShowCommonSymbol(current)
             is KeyboardDispatchAction.ExitPanel -> {
                 when (current) {
                     is KeyboardViewState.NumberPanel, is KeyboardViewState.CommonSymbolPanel -> {
@@ -281,13 +249,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                         val (vs, kb) = when (returnTo) {
                             MainType.FULL -> {
                                 val kb = initialKeyboardLayoutState(isAsciiMode, schemaId)
-                                val vs = when (kb) {
-                                    is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
-                                    is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
-                                    is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
-                                    is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
-                                    else -> KeyboardViewState.ChineseFull
-                                }
+                                val vs = kb.toViewState()
                                 vs to kb
                             }
                             MainType.HANDWRITING -> KeyboardViewState.Handwriting to KeyboardLayoutState.Chinese
@@ -308,28 +270,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
             is KeyboardDispatchAction.SwitchToHandwriting -> {
                 Triple(KeyboardViewState.Handwriting, KeyboardPage.Main(MainType.HANDWRITING), KeyboardLayoutState.Chinese)
             }
-            is KeyboardDispatchAction.AsciiModeChanged -> {
-                if (current is KeyboardViewState.Overlay) {
-                    FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (overlay)")
-                    Triple(current, _page.value, _keyboardState.value)
-                } else if (current is KeyboardViewState.NumberPanel || current is KeyboardViewState.CommonSymbolPanel) {
-                    FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (panel)")
-                    Triple(current, _page.value, _keyboardState.value)
-                } else if (!action.isAsciiMode && isHandwritingSchema(action.schemaId)) {
-                    Triple(KeyboardViewState.Handwriting, KeyboardPage.Main(MainType.HANDWRITING), KeyboardLayoutState.Chinese)
-                } else {
-                    val kb = initialKeyboardLayoutState(action.isAsciiMode, action.schemaId)
-                    val vs = when (kb) {
-                        is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
-                        is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
-                        is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
-                        is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
-                        else -> KeyboardViewState.ChineseFull
-                    }
-                    FileLogger.d("XimeKeyboard", "AsciiModeChanged dispatch: current=$current, ascii=${action.isAsciiMode}, schemaId=${action.schemaId}, -> $vs / $kb")
-                    Triple(vs, KeyboardPage.Main(MainType.FULL), kb)
-                }
-            }
+            is KeyboardDispatchAction.AsciiModeChanged -> resolveAsciiModeChanged(action, current)
             is KeyboardDispatchAction.InputSessionStarted -> {
                 val currentPage = _page.value
                 // 面板（数字/符号）不应被新会话事件重置，否则输入一个数字后键盘会切回全键盘
@@ -343,13 +284,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                     Triple(_viewState.value, currentPage, _keyboardState.value)
                 } else {
                     val kb = initialKeyboardLayoutState(action.isAsciiMode, action.schemaId)
-                    val vs = when (kb) {
-                        is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
-                        is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
-                        is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
-                        is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
-                        else -> KeyboardViewState.ChineseFull
-                    }
+                    val vs = kb.toViewState()
                     Triple(vs, KeyboardPage.Main(MainType.FULL), kb)
                 }
             }
@@ -390,6 +325,63 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         }
         _keyboardState.value = newKbState
         _syncViewState()
+    }
+
+
+    /** ModeChange 分支：resolveModeChange 的迁移目标。正文自 dispatch 逐字搬出，仅整体缩进减 8 空格。 */
+    private fun resolveModeChange(action: KeyboardDispatchAction.ModeChange, current: KeyboardViewState, isAsciiMode: Boolean, schemaId: String): Triple<KeyboardViewState, KeyboardPage, KeyboardLayoutState> {
+        val target = if (action.targetIsNumber) KeyboardLayoutAction.SwitchToNumber
+            else KeyboardLayoutAction.SwitchToCommonSymbol
+        val newKb = initialKeyboardLayoutState(isAsciiMode, schemaId).transition(target, isAsciiMode, schemaId)
+        val newVs: KeyboardViewState = newKb.toViewState(fallback = current)
+        val newPage = if (newKb is KeyboardLayoutState.Number || newKb is KeyboardLayoutState.CommonSymbol)
+            KeyboardPage.Panel(
+                if (newKb is KeyboardLayoutState.Number) PanelType.NUMBER else PanelType.COMMON_SYMBOL,
+                MainType.FULL
+            )
+        else KeyboardPage.Main(MainType.FULL)
+        return Triple(newVs, newPage, newKb)
+    }
+
+    /**
+     * 当前视图状态对应的面板返回目标：数字/符号面板各自记住来处，
+     * 其余状态一律回到主键盘。原在 ShowNumber / ShowCommonSymbol 两分支中重复，
+     * 收敛为单一出口。
+     */
+    private fun KeyboardViewState.panelReturnTo(): MainType = when (this) {
+        is KeyboardViewState.NumberPanel -> returnTo
+        is KeyboardViewState.CommonSymbolPanel -> returnTo
+        else -> MainType.FULL
+    }
+
+    /** ShowNumber 分支：resolveShowNumber 的迁移目标。正文自 dispatch 逐字搬出，仅整体缩进减 8 空格。 */
+    private fun resolveShowNumber(current: KeyboardViewState): Triple<KeyboardViewState, KeyboardPage, KeyboardLayoutState> {
+        val returnTo = current.panelReturnTo()
+        return Triple(KeyboardViewState.NumberPanel(returnTo), KeyboardPage.Panel(PanelType.NUMBER, returnTo), KeyboardLayoutState.Number)
+    }
+
+    /** ShowCommonSymbol 分支：resolveShowCommonSymbol 的迁移目标。正文自 dispatch 逐字搬出，仅整体缩进减 8 空格。 */
+    private fun resolveShowCommonSymbol(current: KeyboardViewState): Triple<KeyboardViewState, KeyboardPage, KeyboardLayoutState> {
+        val returnTo = current.panelReturnTo()
+        return Triple(KeyboardViewState.CommonSymbolPanel(returnTo), KeyboardPage.Panel(PanelType.COMMON_SYMBOL, returnTo), KeyboardLayoutState.CommonSymbol)
+    }
+
+    /** AsciiModeChanged 分支：resolveAsciiModeChanged 的迁移目标。正文自 dispatch 逐字搬出，仅整体缩进减 8 空格。 */
+    private fun resolveAsciiModeChanged(action: KeyboardDispatchAction.AsciiModeChanged, current: KeyboardViewState): Triple<KeyboardViewState, KeyboardPage, KeyboardLayoutState> {
+        return if (current is KeyboardViewState.Overlay) {
+            FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (overlay)")
+            Triple(current, _page.value, _keyboardState.value)
+        } else if (current is KeyboardViewState.NumberPanel || current is KeyboardViewState.CommonSymbolPanel) {
+            FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (panel)")
+            Triple(current, _page.value, _keyboardState.value)
+        } else if (!action.isAsciiMode && isHandwritingSchema(action.schemaId)) {
+            Triple(KeyboardViewState.Handwriting, KeyboardPage.Main(MainType.HANDWRITING), KeyboardLayoutState.Chinese)
+        } else {
+            val kb = initialKeyboardLayoutState(action.isAsciiMode, action.schemaId)
+            val vs = kb.toViewState()
+            FileLogger.d("XimeKeyboard", "AsciiModeChanged dispatch: current=$current, ascii=${action.isAsciiMode}, schemaId=${action.schemaId}, -> $vs / $kb")
+            Triple(vs, KeyboardPage.Main(MainType.FULL), kb)
+        }
     }
 
     fun toggleShift() {
@@ -469,15 +461,7 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
                 com.kingzcheung.xime.keyboard.PanelType.COMMON_SYMBOL -> KeyboardViewState.CommonSymbolPanel(p.returnTo)
             }
             is KeyboardPage.Main -> when (p.type) {
-                com.kingzcheung.xime.keyboard.MainType.FULL -> when (kb) {
-                    is KeyboardLayoutState.Chinese -> KeyboardViewState.ChineseFull
-                    is KeyboardLayoutState.English -> KeyboardViewState.EnglishFull
-                    is KeyboardLayoutState.T9Pinyin -> KeyboardViewState.T9PinyinFull
-                    is KeyboardLayoutState.Stroke -> KeyboardViewState.StrokeFull
-                    is KeyboardLayoutState.Number -> KeyboardViewState.NumberPanel(com.kingzcheung.xime.keyboard.MainType.FULL)
-                    is KeyboardLayoutState.CommonSymbol -> KeyboardViewState.CommonSymbolPanel(com.kingzcheung.xime.keyboard.MainType.FULL)
-                    else -> KeyboardViewState.ChineseFull
-                }
+                com.kingzcheung.xime.keyboard.MainType.FULL -> kb.toViewState()
                 com.kingzcheung.xime.keyboard.MainType.HANDWRITING -> KeyboardViewState.Handwriting
                 com.kingzcheung.xime.keyboard.MainType.STROKE -> KeyboardViewState.StrokeFull
                 com.kingzcheung.xime.keyboard.MainType.VOICE -> KeyboardViewState.Voice

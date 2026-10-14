@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -31,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kingzcheung.xime.handwriting.HandwritingEngine
 import com.kingzcheung.xime.handwriting.HandwritingStrokeFx
+import com.kingzcheung.xime.handwriting.HW_FADE_OUT_MS
 import com.kingzcheung.xime.handwriting.HW_RECOGNIZE_WINDOW_LIMIT
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
@@ -108,7 +108,7 @@ fun HandwritingKeyboardLayout(
      */
     fun scheduleGone(target: Int) {
         scope.launch {
-            delay(450L)
+            delay(HW_FADE_OUT_MS)
             if (gonePrefix < target) {
                 gonePrefix = target.coerceAtMost(fadingPrefix)
                 dragVersion++

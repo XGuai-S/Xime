@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.association
 
 import android.content.Context
-import android.util.Log
 import com.kingzcheung.xime.util.FileLogger
 import java.io.File
 

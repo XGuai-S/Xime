@@ -157,7 +157,7 @@ fun KeyboardLayoutScreen(
             }
 
             is KeyboardLayoutState.Number -> {
-                // 从全键盘（?123 在左下角）进入数字键盘时，返回键放到左下角与进入位置对齐；
+                // 从全键盘（123 键在左下角）进入数字键盘时，返回键放到左下角与进入位置对齐；
                 // 九键/笔画/手写进入时保持「符号键在最左下角」的九键习惯
                 val lastMainLayout by viewModel.lastMainLayout.collectAsStateWithLifecycle()
                 NumberKeyboardLayout(
@@ -179,6 +179,9 @@ fun KeyboardLayoutScreen(
                     specialKeyTextColor = specialKeyTextColor,
                     backKeyOnLeft = lastMainLayout is KeyboardLayoutState.Chinese ||
                         lastMainLayout is KeyboardLayoutState.English,
+                    onReplaceCommittedText = callbacks.onReplaceCommittedText,
+                    onCapitalAmountDisplay = callbacks.onCapitalAmountDisplay,
+                    capitalAmountExitSignal = uiState.capitalAmountExitSignal,
                 )
             }
 

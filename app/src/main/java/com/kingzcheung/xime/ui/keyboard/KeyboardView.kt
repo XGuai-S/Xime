@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -20,11 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,7 +39,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -52,9 +47,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.kingzcheung.xime.handwriting.HandwritingCandidate
 import com.kingzcheung.xime.keyboard.KeyboardPage
 import com.kingzcheung.xime.rime.RimeEngine
 import com.kingzcheung.xime.keyboard.MainType
@@ -69,6 +62,7 @@ import com.kingzcheung.xime.service.CandidateState
 import com.kingzcheung.xime.service.ExpandedCandidatePager
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.ui.menubar.CandidateReorderView
 import com.kingzcheung.xime.ui.menubar.ClipboardView
 import com.kingzcheung.xime.ui.menubar.SchemaListView
 import com.kingzcheung.xime.ui.menubar.ToolbarCustomizeView
@@ -222,6 +216,8 @@ fun KeyboardView(
     val kbColors = KeysConfigHelper.getKeyboardColors()
     val kbShadow = KeysConfigHelper.getKeyboardShadow()
     val kbKey = KeysConfigHelper.getKeyboardKeyConfig()
+    // 候选栏行为（清空按键显隐等），见 xime.yaml keyboard.candidates
+    val kbCandidates = KeysConfigHelper.getKeyboardCandidates()
     val longToColor: (Long) -> androidx.compose.ui.graphics.Color = { if (it > 0xFFFFFF) androidx.compose.ui.graphics.Color(it) else androidx.compose.ui.graphics.Color(0xFF000000 or it) }
     val keyboardBgColor = KeyboardThemes.getKeyboardBackgroundColor(state.themeId, state.isDarkTheme)
     val keyBgColor = KeyboardThemes.getKeyBgColorOverride(state.themeId, state.isDarkTheme)
@@ -251,7 +247,7 @@ fun KeyboardView(
     } ?: 0
     val screenW = LocalConfiguration.current.screenWidthDp
     val screenH = LocalConfiguration.current.screenHeightDp
-    val portraitScreenWidth = minOf(screenW, screenH)
+    val portraitScreenWidth = FloatingCardGeometry.portraitScreenWidthDp(screenW, screenH)
     val cardWidthDp = FloatingCardGeometry.cardWidthDp(portraitScreenWidth)
     val floatScaleFactor = if (state.isFloatingMode) FloatingCardGeometry.widthFraction(portraitScreenWidth, screenW)
         else FloatingCardGeometry.CARD_SCALE
@@ -289,6 +285,10 @@ fun KeyboardView(
         // 窗口——焦点型弹窗会抢焦点导致 IME 被系统收起）
         // 长按删除待确认项：词文本 + 确认后执行（候选栏/展开页共用同一确认覆盖层）
         var deletePending by remember { mutableStateOf<DeletePendingWord?>(null) }
+        // 长按候选弹出的操作菜单（排序 / 删除该词），与 deletePending 同一覆盖层风格
+        var candidateLongPressMenu by remember { mutableStateOf<CandidateLongPressMenu?>(null) }
+        // 候选排序面板：非空时全屏渲染 CandidateReorderView（长按候选 → 菜单选「调整顺序」进入）
+        var reorderOverlay by remember { mutableStateOf<ReorderOverlayData?>(null) }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -333,6 +333,7 @@ fun KeyboardView(
                 cs.associationCandidates, cs.pendingEnglishText, cs.isShowingRecentClipboard, cs.hasNextPage,
                 state.isCalculatorMode, handwritingCandidates, handwritingComments, showHandwritingCandidates,
                 railExpanded, cs.preeditCaretPos, state.recentClipboardItems,
+                cs.capitalAmountExpression, cs.capitalAmountAmount,
             ) {
                 if (showHandwritingCandidates) {
                     CandidateBarState.AssociationOnly(
@@ -362,6 +363,8 @@ fun KeyboardView(
                         } else {
                             emptyList()
                         },
+                        capitalAmountExpression = cs.capitalAmountExpression,
+                        capitalAmountAmount = cs.capitalAmountAmount,
                     )
                 }
             }
@@ -421,6 +424,8 @@ fun KeyboardView(
                 state = candidateBarState,
                 page = page,
                 candidatePageExpanded = candidatePageExpanded,
+                // keyboard.candidates.show_clear_button: false 时隐藏编码态「清空」按键
+                clearInputButtonEnabled = kbCandidates.showClearButton,
                 isFloatingMode = state.isFloatingMode,
                 // 候选栏图片候选的缩略图文件（不存在返回 null → 渲染占位图标）
                 clipboardImageFileOf = { item -> viewModel.clipboardManager.imageFileOf(item) },
@@ -528,12 +533,32 @@ fun KeyboardView(
                         val word = railEntry?.second?.text
                             ?: candidateState.value.candidates.getOrNull(index)
                         if (!word.isNullOrEmpty()) {
-                            deletePending = DeletePendingWord(word) {
-                                if (railEntry != null) {
+                            if (railEntry != null) {
+                                // 展开页（跨页全量候选）保持原删除确认：排序只作用于候选栏当前页，
+                                // 展开页点选走全局索引，混入词频重排会破坏页内索引关系
+                                deletePending = DeletePendingWord(word) {
                                     callbacks.onGlobalCandidateDelete?.invoke(railEntry.first)
-                                } else {
+                                }
+                            } else if (isT9Schema(state.currentSchemaId)) {
+                                // T9 候选不参与词频排序（服务层重排对其按条件放行），
+                                // 长按保持原删除确认，避免给出永不生效的排序入口
+                                deletePending = DeletePendingWord(word) {
                                     callbacks.onCandidateDelete?.invoke(index)
                                 }
+                            } else {
+                                // 候选栏长按：弹出操作菜单（调整顺序 / 删除该词）。
+                                candidateLongPressMenu = CandidateLongPressMenu(
+                                    word = word,
+                                    onDelete = {
+                                        callbacks.onCandidateDelete?.invoke(index)
+                                    },
+                                    onReorder = {
+                                        reorderOverlay = ReorderOverlayData(
+                                            code = candidateState.value.inputText,
+                                            initialOrder = candidateState.value.candidates.take(20),
+                                        )
+                                    },
+                                )
                             }
                         }
                     },
@@ -546,6 +571,12 @@ fun KeyboardView(
                         } else {
                             callbacks.onClearAssociation?.invoke()
                         }
+                    },
+                    onClearInput = {
+                        onHapticFeedback?.invoke()
+                        // 与删除键右滑/清空键同一条链路：服务层 clearInputStateForKeys 清候选词列表，
+                        // 并在输入框存在 composing 区（已嵌入首码）时一并结束该 composing 区。
+                        callbacks.onKeyPress("clear_composition", false)
                     },
                     onLogoClick = { viewModel.showOverlay(OverlayRoute.Menu) },
                     onBack = {
@@ -797,8 +828,8 @@ fun KeyboardView(
                         val cursorGestureActive = remember { mutableStateOf(false) }
                         val cursorMod = if (callbacks.onCursorMove != null) {
                             Modifier.pointerInput(Unit) {
-                                val stepThresholdPx = 25.dp.toPx()
-                                val activationThresholdPx = 60.dp.toPx()
+                                val stepThresholdPx = KeyGestureThresholds.CURSOR_STEP_DP.dp.toPx()
+                                val activationThresholdPx = KeyGestureThresholds.CURSOR_ACTIVATION_DP.dp.toPx()
                                 awaitEachGesture {
                                     suppressCursorMove.value = false
                                     cursorGestureActive.value = false
@@ -1205,6 +1236,9 @@ fun KeyboardView(
                         onKeyPressDown = callbacks.onKeyPressDown,
                         isFloatingMode = state.isFloatingMode,
                         specialKeyTextColor = specialKeyTextColor,
+                        onReplaceCommittedText = callbacks.onReplaceCommittedText,
+                        onCapitalAmountDisplay = callbacks.onCapitalAmountDisplay,
+                        capitalAmountExitSignal = state.capitalAmountExitSignal,
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
 
@@ -1350,6 +1384,83 @@ fun KeyboardView(
                     }
                 }
             }
+        }
+
+        // 长按候选操作菜单：调整顺序 / 删除该词。同窗口覆盖层（不弹独立窗口，
+        // 焦点型弹窗会抢焦点导致 IME 被系统收起）。
+        candidateLongPressMenu?.let { menu ->
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { candidateLongPressMenu = null },
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.widthIn(max = 300.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+                        Text(
+                            text = "候选操作",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "「${menu.word}」",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = {
+                                onHapticFeedback?.invoke()
+                                candidateLongPressMenu = null
+                                menu.onReorder()
+                            }) {
+                                Text("调整顺序", color = MaterialTheme.colorScheme.primary)
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            TextButton(onClick = {
+                                onHapticFeedback?.invoke()
+                                candidateLongPressMenu = null
+                                deletePending = DeletePendingWord(menu.word) { menu.onDelete() }
+                            }) {
+                                Text("删除该词", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 候选排序面板：全屏覆盖（含候选栏区域），长按拖拽换位即写盘。
+        reorderOverlay?.let { overlay ->
+            CandidateReorderView(
+                code = overlay.code,
+                initialOrder = overlay.initialOrder,
+                keyTextColor = keyTextColor,
+                backgroundColor = keyboardBgColor,
+                accentColor = accentColor,
+                keyBgColor = keyBgColor,
+                onReorderSave = callbacks.onCandidateReorderSave,
+                onDone = {
+                    onHapticFeedback?.invoke()
+                    reorderOverlay = null
+                },
+                bottomPaddingDp = state.keyboardBottomPaddingDp,
+                modifier = Modifier.fillMaxWidth().fillMaxHeight()
+            )
         }
 
         if (page is KeyboardPage.Overlay) {
@@ -1551,4 +1662,17 @@ fun KeyboardView(
 private data class DeletePendingWord(
     val word: String,
     val onConfirm: () -> Unit,
+)
+
+/** 长按候选弹出的操作菜单：删除该词 / 调整顺序（进入排序面板）。 */
+private data class CandidateLongPressMenu(
+    val word: String,
+    val onDelete: () -> Unit,
+    val onReorder: () -> Unit,
+)
+
+/** 候选排序面板数据：当前编码 + 进入面板时的候选全序。 */
+private data class ReorderOverlayData(
+    val code: String,
+    val initialOrder: List<String>,
 )

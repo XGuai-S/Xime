@@ -45,7 +45,8 @@ fun SettingsScreen(
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
                 onNavigateToAbout = { navController.navigate(SettingsRoutes.About) },
                 onNavigateToClipboard = { navController.navigate(SettingsRoutes.Clipboard) },
-                onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) }
+                onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) },
+                onNavigateToLogSettings = { navController.navigate(SettingsRoutes.LogSettings) }
             )
         }
         composable(SettingsRoutes.Schema) {
@@ -61,7 +62,8 @@ fun SettingsScreen(
                     onWizardBack()
                 },
                 onNavigateToMarket = { navController.navigate(SettingsRoutes.Market) },
-                onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
+                onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.UserConfigBrowser) },
+                onNavigateToFileManager = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
                 onNavigateToSchemaDictBrowser = { navController.navigate(SettingsRoutes.SchemaDictBrowser) },
             )
         }
@@ -137,7 +139,7 @@ fun SettingsScreen(
         composable(SettingsRoutes.Theme) {
             ThemeSettingsContent(
                 onBack = { navController.popBackStack() },
-                onThemeChanged = onThemeChanged
+                onThemeChanged = onThemeChanged,
             )
         }
         composable(SettingsRoutes.Plugins) {
@@ -212,8 +214,15 @@ fun SettingsScreen(
             )
         }
         composable(SettingsRoutes.RimeFileBrowser) {
+            // 通用文件管理器：从私有 rime 根目录开始，可自行进入配置目录
+            RimeFileBrowserContent(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.UserConfigBrowser) {
+            // 「打开配置目录」的承诺就是打开配置目录：直接落在 /storage/emulated/0/Xime/，
+            // 让用户一步看到 xime.yaml，而不是再点一层虚拟入口
             RimeFileBrowserContent(
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                startInUserConfigDir = true,
             )
         }
         composable(SettingsRoutes.Clipboard) {
@@ -242,6 +251,7 @@ fun SettingsScreen(
                 onNavigateToPrivacy = { navController.navigate(SettingsRoutes.Privacy) },
                 onNavigateToLicenses = { navController.navigate(SettingsRoutes.Licenses) },
                 onNavigateToLogViewer = { navController.navigate(SettingsRoutes.LogViewer) },
+                onNavigateToLogSettings = { navController.navigate(SettingsRoutes.LogSettings) },
                 onNavigateToDeveloper = { navController.navigate(SettingsRoutes.Developer) },
                 onNavigateToStorageSpace = { navController.navigate(SettingsRoutes.StorageSpace) }
             )
@@ -301,6 +311,12 @@ fun SettingsScreen(
         composable(SettingsRoutes.LogViewer) {
             LogViewerScreen(
                 onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.LogSettings) {
+            LogSettingsContent(
+                onBack = { navController.popBackStack() },
+                onOpenLogViewer = { navController.navigate(SettingsRoutes.LogViewer) },
             )
         }
         composable(SettingsRoutes.HandwritingCapture) {

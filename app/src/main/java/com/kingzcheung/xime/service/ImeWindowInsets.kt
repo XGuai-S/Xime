@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.service
+﻿package com.kingzcheung.xime.service
 
 import android.content.Context
 import android.os.Build
@@ -8,6 +8,15 @@ import android.view.WindowInsets
 import kotlin.math.roundToInt
 
 private const val INSETS_TAG = "ImeWindowInsets"
+
+/**
+ * 像素值换算为 dp（四舍五入）。
+ *
+ * 合并自本文件内 5 处逐字相同的 `(px / context.resources.displayMetrics.density).roundToInt()`，
+ * 各调用点原本只有像素来源不同（insets 分量、getDimensionPixelSize），换算部分完全一致。
+ */
+private fun pxToDp(context: Context, px: Int): Int =
+    (px / context.resources.displayMetrics.density).roundToInt()
 
 /** 获取导航栏高度（dp）。 */
 internal fun tryGetNavBarHeightDp(context: Context, imeWindow: Window?): Int {
@@ -20,13 +29,13 @@ internal fun tryGetNavBarHeightDp(context: Context, imeWindow: Window?): Int {
                     val px = insets.getInsetsIgnoringVisibility(
                         WindowInsets.Type.navigationBars()
                     ).bottom
-                    val dp = (px / context.resources.displayMetrics.density).roundToInt()
+                    val dp = pxToDp(context, px)
                     return dp
                 }
             }
         }
         val resId = context.resources.getIdentifier("navigation_bar_height", "dimen", "android")
-        val dp = if (resId > 0) (context.resources.getDimensionPixelSize(resId) / context.resources.displayMetrics.density).roundToInt() else 0
+        val dp = if (resId > 0) pxToDp(context, context.resources.getDimensionPixelSize(resId)) else 0
         return dp
     } catch (e: Exception) {
         Log.w(INSETS_TAG, "NavBar: error", e)
@@ -45,7 +54,7 @@ internal fun tryGetVisibleNavBarHeightDp(context: Context, imeWindow: Window?): 
                     val px = insets.getInsets(
                         WindowInsets.Type.navigationBars()
                     ).bottom
-                    val dp = if (px > 0) (px / context.resources.displayMetrics.density).roundToInt() else 0
+                    val dp = if (px > 0) pxToDp(context, px) else 0
                     return dp
                 }
             }
@@ -68,12 +77,12 @@ internal fun tryGetStatusBarHeightDp(context: Context, imeWindow: Window?): Int 
                     val px = insets.getInsetsIgnoringVisibility(
                         WindowInsets.Type.statusBars()
                     ).top
-                    if (px > 0) return (px / context.resources.displayMetrics.density).roundToInt()
+                    if (px > 0) return pxToDp(context, px)
                 }
             }
         }
         val resId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
-        if (resId > 0) (context.resources.getDimensionPixelSize(resId) / context.resources.displayMetrics.density).roundToInt() else 0
+        if (resId > 0) pxToDp(context, context.resources.getDimensionPixelSize(resId)) else 0
     } catch (e: Exception) { 0 }
 }
 

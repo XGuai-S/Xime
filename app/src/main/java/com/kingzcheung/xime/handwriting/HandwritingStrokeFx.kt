@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.handwriting
+﻿package com.kingzcheung.xime.handwriting
 
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer.Segment
 
@@ -14,8 +14,10 @@ const val HW_SPLIT_PAUSE_MIN_MS = 500L
 /** 识别窗口笔画上限：超过后固化最早段滑窗（正常分割靠停顿，此为不停顿兜底）。 */
 const val HW_RECOGNIZE_WINDOW_LIMIT = 25
 
-/**
- * 淡出的停顿门槛（ms）：段边界笔间间隔达到此值才视为"换字"，
+/** 淡出前缀在视觉上保留的时长（ms），之后只在渲染层跳过，不移除识别数据。 */
+const val HW_FADE_OUT_MS = 450L
+
+/** 淡出的停顿门槛（ms）：段边界笔间间隔达到此值才视为"换字"，
  * 前面段笔画才变淡——连笔中途的切分抖动（如"在"=[一][丿][丨]）不触发淡出，
  * 避免单字没写完部首就消失。
  */

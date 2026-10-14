@@ -12,8 +12,6 @@ import androidx.compose.material.icons.twotone.LastPage
 import androidx.compose.material.icons.twotone.Paid
 import androidx.compose.material.icons.twotone.Quickreply
 import androidx.compose.material.icons.twotone.SelectAll
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.outlined.Gesture

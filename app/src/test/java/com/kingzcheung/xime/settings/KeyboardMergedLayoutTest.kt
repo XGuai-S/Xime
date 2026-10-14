@@ -1,5 +1,7 @@
 package com.kingzcheung.xime.settings
 
+import com.kingzcheung.xime.keyboard.GestureAction
+import com.kingzcheung.xime.keyboard.KeyActionRegistry
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
 import com.kingzcheung.xime.ui.keyboard.isStrokeSchema
 import com.kingzcheung.xime.ui.keyboard.isT9Schema
@@ -296,12 +298,53 @@ class KeyboardMergedLayoutTest {
         assertTrue("rows 应含 shift", flat.contains("shift"))
         assertTrue("rows 应含 delete", flat.contains("delete"))
         // 第 4 行控制行
-        for (id in listOf("mode_change", "space", "earth", "enter")) {
+        for (id in listOf("mode_change", "comma", "space", "period", "enter")) {
             assertTrue("rows 应含控制键 $id", flat.contains(id))
         }
         // 逗号键（配置驱动）仍在 keys 中且为功能键 id
         assertTrue("FUNCTION_KEY_IDS 应含 comma", "comma" in KeysConfigHelper.FUNCTION_KEY_IDS)
         assertTrue("keys 应含 comma 配置", keys.containsKey("comma"))
+        assertTrue("keys 应含 period 配置", keys.containsKey("period"))
+    }
+
+    @Test
+    fun `内置 qwerty 中英切换由空格上下滑承担`() {
+        // Rime 官方 ascii_mode 开关走 toggle_ascii：空格上滑进英文、下滑回中文。
+        // 用出厂 xime.yaml 原文断言，配置里被改掉就会在这里暴露。
+        val keys = KeysConfigHelper.parseKeyboardYamlSection(ximeYamlText(), "qwerty")
+            ?: error("xime.yaml 缺少 space 配置")
+        assertEquals(
+            "space.swipe_up 应为 toggle_ascii（Rime 官方 ascii_mode 开关）",
+            GestureAction.TOGGLE_ASCII,
+            keys["space"]?.swipeUp?.action,
+        )
+        assertEquals(
+            "space.swipe_down 应为 toggle_ascii（Rime 官方 ascii_mode 开关）",
+            GestureAction.TOGGLE_ASCII,
+            keys["space"]?.swipeDown?.action,
+        )
+    }
+
+    @Test
+    fun `删除键左滑为按住快速删除且动作已注册`() {
+        // 左滑标为 repeat_delete 后，按键在按住期间按实时滑动幅度决定删除速度；
+        // 右滑保留 clear_composition 命令（只清编码，不删已上屏内容）。
+        val keys = KeysConfigHelper.parseKeyboardYamlSection(ximeYamlText(), "qwerty")
+            ?: error("xime.yaml 缺少 delete 配置")
+        assertEquals(
+            "delete.swipe_left 应为 repeat_delete",
+            GestureAction.REPEAT_DELETE,
+            keys["delete"]?.swipeLeft?.action,
+        )
+        assertEquals(
+            "delete.swipe_right 应保留 clear_composition 命令",
+            "clear_composition",
+            keys["delete"]?.swipeRight?.value,
+        )
+        assertTrue(
+            "repeat_delete 必须已注册到动作表",
+            KeyActionRegistry.fromId("repeat_delete") != null,
+        )
     }
 
     @Test

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.update
 data class KeyEffectUiState(
     val soundEnabled: Boolean = true,
     val soundVolume: Int = 50,
+    val pressBubbleEnabled: Boolean = true,
     val hapticMode: String = "following_system",
     val hapticOnKeyUp: Boolean = false,
     val pressDuration: Int = 0,
@@ -26,6 +27,7 @@ class KeyEffectSettingsViewModel(application: Application) : AndroidViewModel(ap
     private val _uiState = MutableStateFlow(KeyEffectUiState(
         soundEnabled = SettingsPreferences.isSoundEnabled(context),
         soundVolume = SettingsPreferences.getSoundVolume(context),
+        pressBubbleEnabled = SettingsPreferences.isPressBubbleEnabled(context),
         hapticMode = SettingsPreferences.getHapticMode(context),
         hapticOnKeyUp = SettingsPreferences.isHapticOnKeyUp(context),
         pressDuration = SettingsPreferences.getVibrationPressDuration(context),
@@ -59,6 +61,11 @@ class KeyEffectSettingsViewModel(application: Application) : AndroidViewModel(ap
     fun setSoundVolume(volume: Int) {
         SettingsPreferences.setSoundVolume(context, volume)
         _uiState.update { it.copy(soundVolume = volume) }
+    }
+
+    fun setPressBubbleEnabled(enabled: Boolean) {
+        SettingsPreferences.setPressBubbleEnabled(context, enabled)
+        _uiState.update { it.copy(pressBubbleEnabled = enabled) }
     }
 
     fun setHapticMode(mode: String) {

@@ -3,7 +3,6 @@ package com.kingzcheung.xime.ui.keyboard
 import android.os.Build
 import android.util.Size
 import android.view.inputmethod.InlineSuggestion
-import android.widget.inline.InlineContentView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints

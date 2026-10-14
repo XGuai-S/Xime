@@ -2,7 +2,6 @@ package com.kingzcheung.xime
 
 import android.content.Intent
 import android.Manifest
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -38,8 +37,11 @@ import com.kingzcheung.xime.settings.ImportManager
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.ui.settings.SettingsScreen
 import com.kingzcheung.xime.ui.settings.SetupWizardScreen
+import com.kingzcheung.xime.ui.settings.ConfigOverwriteDialog
+import com.kingzcheung.xime.ui.settings.StoragePermissionDialog
 import com.kingzcheung.xime.ui.theme.XimeTheme
 import com.kingzcheung.xime.util.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
@@ -67,7 +69,35 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         prewarmScope.cancel()
+        releaseScope.cancel()
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 用户从「所有文件访问」授权页返回后立刻重跑释放：否则刚授权完目录里仍是空的，
+        // 用户会以为授权没生效（旧行为必须重启应用才释放）。
+        // 判据是「清单里的文件是否全都在」，而不是上次的 releaseState：releaseState 只是
+        // 进程内的一次结果快照，用它短路会让「授权被撤销后重新授权」「新版本新增配置文件」
+        // 这类情况永远补不上文件。已齐全时直接跳过，避免每次回到前台都做无谓的目录扫描。
+        if (UserConfigDir.allFilesReleased(this)) return
+        releaseScope.launch {
+            val ready = try {
+                UserConfigDir.releaseUserConfig(this@MainActivity)
+            } catch (t: Throwable) {
+                Log.w(TAG, "release user config on resume failed", t)
+                false
+            }
+            if (ready) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "配置已释放到 ${UserConfigDir.DISPLAY_PATH}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
     }
     
     private val permissionLauncher = registerForActivityResult(
@@ -82,6 +112,9 @@ class MainActivity : ComponentActivity() {
     }
     
     private val prewarmScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** 配置目录释放专用作用域：与预热分开，便于各自取消。 */
+    private val releaseScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     private fun prewarmRimeEngine() {
         if (RimeEngine.isInitialized()) return
@@ -197,6 +230,14 @@ class MainActivity : ComponentActivity() {
                                 )
                             )
                     )
+
+                    // 存储权限引导弹窗：仅「平台支持但未授权」时出现。
+                    // 放在根 Box 里，向导页与设置页都能覆盖到（首次启动正是最该提醒的时机）。
+                    StoragePermissionDialog()
+
+                    // 新安装/升级后询问是否覆盖已有配置：仅「目录里已有 xime.yaml」且
+                    // 「当前版本还没问过」时出现；与存储权限弹窗互斥（未授权时不触发）。
+                    ConfigOverwriteDialog()
                 }
             }
         }

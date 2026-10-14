@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.DataInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -122,7 +121,7 @@ class TrieAssociationEngine {
             val charByte = char.code.toByte()
             
             for (i in pChildren.indices) {
-                if (pChildren[i] == charByte.toByte()) return pIndices[i]
+                if (pChildren[i] == charByte) return pIndices[i]
             }
             
             val newIdx = tempChildren.size
@@ -189,7 +188,7 @@ class TrieAssociationEngine {
             val charByte = char.code.toByte()
             var found = -1
             for (i in node.children.indices) {
-                if (node.children[i] == charByte.toByte()) {
+                if (node.children[i] == charByte) {
                     found = node.childIndices[i]
                     break
                 }
@@ -204,7 +203,7 @@ class TrieAssociationEngine {
         val node = nodes!![nodeIdx]
         
         if (node.word != null) {
-            candidates.add(AssociationCandidate(node.word!!, node.frequency.toFloat()))
+            candidates.add(AssociationCandidate(node.word, node.frequency.toFloat()))
         }
         
         for (childIdx in node.childIndices) {

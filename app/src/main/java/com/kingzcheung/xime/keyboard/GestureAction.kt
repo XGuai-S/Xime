@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.keyboard
+﻿package com.kingzcheung.xime.keyboard
 
 import android.view.KeyEvent
 
@@ -44,6 +44,15 @@ interface ActionExecutor {
      * @param key 功能键字符串，如 "enter"、"space"、"delete"、"clear_all"
      */
     fun dispatchKey(key: String)
+
+    /**
+     * 移动文本光标（左右滑动手势，如空格键左右滑）。
+     *
+     * 组合态下移动编码编辑光标、空闲态移动编辑器选区，两条分支由服务层统一处理
+     * （见 `handleCursorMove`）。
+     * @param delta 位移（负值左移、正值右移）
+     */
+    fun moveCursor(delta: Int)
 }
 
 /**
@@ -127,7 +136,19 @@ enum class GestureAction(val value: String) {
     VOICE("voice"),
 
     /** 重复空格：value 为次数（默认 5），一次触发连续上屏多个空格。 */
-    REPEAT_SPACE("repeat_space");
+    REPEAT_SPACE("repeat_space"),
+
+    /**
+     * 按住持续删除（删除键左滑）：单次执行等同一次删除；「持续」由按键手势层在按住期间
+     * 按滑动幅度决定的间隔重复触发本动作实现，抬手即停。幅度映射见 [SwipeRepeatSpeed]。
+     */
+    REPEAT_DELETE("repeat_delete"),
+
+    /** 光标左移（如空格键左滑）：value 为步数，缺省 1。 */
+    CURSOR_LEFT("cursor_left"),
+
+    /** 光标右移（如空格键右滑）：value 为步数，缺省 1。 */
+    CURSOR_RIGHT("cursor_right");
 
     companion object {
         /** 根据 YAML 字符串值查找对应的枚举，找不到返回 null。 */

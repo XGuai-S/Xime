@@ -1,12 +1,9 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import android.annotation.SuppressLint
 import android.content.res.Configuration
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -27,7 +24,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,7 +33,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import com.kingzcheung.xime.keyboard.GestureAction
@@ -75,8 +70,6 @@ import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import com.kingzcheung.xime.util.PermissionHelper
 import com.kingzcheung.xime.util.SubcharHelper
 import com.kingzcheung.xime.viewmodel.KeyboardUiState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * 拼音九键（T9）键盘布局。
@@ -198,23 +191,6 @@ private fun T9KeyboardSwipeOverlay(
     val swipeBubble = rememberSwipeBubbleController()
     var keyboardBounds by remember { mutableStateOf(Rect(0f, 0f, 0f, 0f)) }
 
-    fun processSwipeState(state: SwipeState, bounds: Rect) {
-        val newState = if (state.isSwipeDown && state.swipeText != null) {
-            state.copy(charInfos = SubcharHelper.parseSwipeDownText(state.swipeText))
-        } else {
-            state
-        }
-        swipeBubble.update(
-            newState,
-            Rect(
-                left = bounds.left - keyboardBounds.left,
-                top = bounds.top - keyboardBounds.top,
-                right = bounds.right - keyboardBounds.left,
-                bottom = bounds.bottom - keyboardBounds.top
-            )
-        )
-    }
-
     val isDarkTheme = keyTextColor == Color(0xFFE8EAED)
 
     val bubbleData = rememberSwipeBubbleDrawData(
@@ -265,7 +241,7 @@ private fun T9KeyboardSwipeOverlay(
                         shadowElevation = shadowElevation,
                         shadowShapeRadius = shadowShapeRadius,
                         onKeyPressDown = onKeyPressDown,
-                        onSwipeStateChange = ::processSwipeState,
+                        onSwipeStateChange = { state, bounds -> processKeySwipeState(state, bounds, keyboardBounds, swipeBubble) },
                         onDelete = onDelete,
                         compactMode = true,
                         candidateState = candidateState,
@@ -299,7 +275,7 @@ private fun T9KeyboardSwipeOverlay(
                         shadowElevation = shadowElevation,
                         shadowShapeRadius = shadowShapeRadius,
                         onKeyPressDown = onKeyPressDown,
-                        onSwipeStateChange = ::processSwipeState,
+                        onSwipeStateChange = { state, bounds -> processKeySwipeState(state, bounds, keyboardBounds, swipeBubble) },
                         onDelete = onDelete,
                         compactMode = false,
                         candidateState = candidateState,
@@ -691,7 +667,7 @@ private fun T9KeyboardContent(
                     shadowEnabled = shadowEnabled, shadowElevation = shadowElevation, shadowShapeRadius = shadowShapeRadius,
                     onSwipeUp = swipeHandlerFor(spaceSwipe, commitDirect, callbacks.onGestureAction),
                     swipeUpBadge = if (hintsActive && spaceSwipe?.display != DisplayMode.BUBBLE)
-                        spaceSwipe?.label?.ifEmpty { spaceSwipe?.value } else null,
+                        spaceSwipe?.label?.ifEmpty { spaceSwipe.value } else null,
                 )
             }
             "earth" -> IconKeyButton(
@@ -993,7 +969,7 @@ private fun NineKeyButton(
         swipeDownKeyLabel = swipes.swipeDownKeyLabel,
         onSwipe = if (swipes.onSwipeUp != null) {
             // 横向滑动不得落到上滑处理器（此前忽略方向 → 左/右滑会误输入上滑内容）
-            { dir -> if (dir != "left" && dir != "right") swipes.onSwipeUp?.invoke() }
+            { dir -> if (dir != "left" && dir != "right") swipes.onSwipeUp.invoke() }
         } else null,
         onSwipeDown = swipes.onSwipeDown?.let { handler -> { _: String -> handler() } },
         shadowEnabled = shadowEnabled,
@@ -1001,77 +977,6 @@ private fun NineKeyButton(
         shadowShapeRadius = shadowShapeRadius,
         fontSize = fontSize,
     )
-}
-
-/** 重输键 —— 文本在上、图标在下，参考功能键风格 */
-@Composable
-private fun ResetKey(
-    onClick: () -> Unit,
-    onPress: (() -> Unit)?,
-    backgroundColor: Color,
-    textColor: Color,
-    modifier: Modifier = Modifier,
-    shadowEnabled: Boolean = true,
-    shadowElevation: Dp = 1.dp,
-    shadowShapeRadius: Dp = 8.dp,
-    compactMode: Boolean = false,
-) {
-    var isPressed by remember { mutableStateOf(false) }
-    val currentOnClick by rememberUpdatedState(onClick)
-    val currentOnPress by rememberUpdatedState(onPress)
-    val density = LocalDensity.current
-    val shape = RoundedCornerShape(shadowShapeRadius)
-    val shadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 2.dp, vertical = 4.dp)
-            .then(shadowModifier)
-            .clip(shape)
-            .background(if (isPressed) backgroundColor.copy(alpha = 0.7f) else backgroundColor)
-            .pointerInput(Unit) {
-                detectTapGestures(onPress = {
-                    isPressed = true
-                    currentOnPress?.invoke()
-                    tryAwaitRelease()
-                    isPressed = false
-                }, onTap = { currentOnClick() })
-            }, contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = Icons.Default.Refresh,
-            contentDescription = "重输",
-            tint = textColor,
-            modifier = Modifier.size(if (compactMode) 16.dp else 20.dp)
-        )
-
-        if (!compactMode) {
-            Text(
-                text = "重输",
-                color = textColor.copy(alpha = 0.5f),
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Normal,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                modifier = Modifier.offset(y = (-14).dp)
-            )
-        }
-    }
 }
 
 /** T9 空格键 */
@@ -1156,7 +1061,7 @@ private fun T9SpaceKey(
                 if (onSwipeUp == null || voiceSticky) return@pointerInput
                 var totalY = 0f
                 var triggered = false
-                val thresholdPx = 50.dp.toPx()
+                val thresholdPx = KeyGestureThresholds.CODE_KEYBOARD_SWIPE_UP_DP.dp.toPx()
                 detectVerticalDragGestures(
                     onDragStart = { totalY = 0f; triggered = false },
                     onVerticalDrag = { change, dragAmount ->

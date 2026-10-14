@@ -139,7 +139,7 @@ object ModelIndexLoader {
             val request = Request.Builder().url(url).build()
             val response = client.newCall(request).execute()
             if (response.isSuccessful) {
-                response.body?.string()?.takeIf { it.isNotBlank() }
+                response.body.string().takeIf { it.isNotBlank() }
             } else {
                 Log.w(TAG, "HTTP ${response.code} fetching $url")
                 null

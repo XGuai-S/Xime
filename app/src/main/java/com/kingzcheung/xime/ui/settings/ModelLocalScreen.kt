@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.ui.settings
+﻿package com.kingzcheung.xime.ui.settings
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -17,7 +17,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
@@ -30,12 +29,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kingzcheung.xime.viewmodel.ModelItemState
 import com.kingzcheung.xime.viewmodel.ModelManagementViewModel
+import com.kingzcheung.xime.settings.formatByteSize
 
 /** 本地模型管理：列出已下载模型并提供删除入口（对齐本地方案页）。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,25 +91,14 @@ fun ModelLocalContent(
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("本地模型") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-            )
+    SettingsScreenScaffold(
+        title = "本地模型",
+        onBack = onBack,
+        containerColor = MaterialTheme.colorScheme.background,
+        actions = {
+            IconButton(onClick = { viewModel.refresh() }) {
+                Icon(Icons.Default.Refresh, contentDescription = "刷新")
+            }
         },
     ) { padding ->
         val localModels = uiState.models.filter { it.isDownloaded }
@@ -203,7 +189,7 @@ private fun ModelLocalCard(
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 Spacer(Modifier.width(8.dp))
-                TagText(modelCategoryLabel(item.model.category), MaterialTheme.colorScheme.primary)
+                TagChip(modelCategoryLabel(item.model.category), MaterialTheme.colorScheme.primary)
             }
             Spacer(Modifier.height(4.dp))
             Text(
@@ -215,7 +201,7 @@ private fun ModelLocalCard(
                 item.installedVersion?.let { append("版本: $it") }
                 if (item.diskSize > 0) {
                     if (isNotEmpty()) append(" · ")
-                    append(modelFormatSize(item.diskSize))
+                    append(formatByteSize(item.diskSize))
                 }
             }
             if (detailLine.isNotEmpty()) {
@@ -255,20 +241,5 @@ private fun ModelLocalCard(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun TagText(text: String, color: Color) {
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = color.copy(alpha = 0.12f),
-    ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-        )
     }
 }

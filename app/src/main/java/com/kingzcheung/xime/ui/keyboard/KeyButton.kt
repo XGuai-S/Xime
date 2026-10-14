@@ -5,7 +5,6 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -29,11 +28,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.kingzcheung.xime.settings.ButtonLayout
+import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.util.CharInfo
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -114,6 +112,43 @@ internal fun shouldSuppressCursorMove(
     abs(dragOffsetX) > abs(dragOffsetY) &&
     abs(dragOffsetX) > horizontalThreshold
 
+/**
+ * 横向拖动时按需把父层光标手势的抑制标记置位。
+ *
+ * 原先三处渲染器（[SwipeableKeyButton] / [SwipeableIconKeyButton] / [KeyboardLayout]）
+ * 各自抄了同一段「取出左右滑回调 → 判定 → suppressCursorMove.value = true」样板；
+ * 这里收敛为一次调用，判定仍走 [shouldSuppressCursorMove]。
+ *
+ * [onSwipeLeft] / [onSwipeRight] 传入当前回调（取值来源各调用点不同），
+ * 任一非空即视为该键配置了横向滑动。
+ */
+internal fun suppressCursorMoveIfHorizontalSwipe(
+    onSwipeLeft: (() -> Unit)?,
+    onSwipeRight: (() -> Unit)?,
+    dragOffsetX: Float,
+    dragOffsetY: Float,
+    horizontalThreshold: Float,
+): Boolean = shouldSuppressCursorMove(
+    hasHorizontalSwipe = onSwipeLeft != null || onSwipeRight != null,
+    dragOffsetX = dragOffsetX,
+    dragOffsetY = dragOffsetY,
+    horizontalThreshold = horizontalThreshold,
+)
+
+/**
+ * 键按下 / 抬起回调的「绑定 key」包装。
+ *
+ * 同一行惯用法原先逐字抄在三处渲染器里（[KeyButton] 竖屏行、[KeyboardLayout] 竖屏行与紧凑行），
+ * 改一处容易漏另两处，这里收敛为单一实现。
+ *
+ * 无需在 lambda 末尾写 `Unit`：其期望类型已是 `() -> Unit`，末表达式会按期望类型强制。
+ */
+@Composable
+internal fun rememberKeyCallback(
+    key: String,
+    callback: ((String) -> Unit)?,
+): (() -> Unit)? = remember(key, callback) { callback?.let { cb -> { cb(key) } } }
+
 data class SwipeState(
     val isSwiping: Boolean = false,
     val swipeText: String? = null,
@@ -128,25 +163,6 @@ data class SwipeState(
     val selectedLongPressIndex: Int = 0,
     val longPressDrawableIds: List<Int> = emptyList(),
 )
-
-private val shadowColorCache = HashMap<Color, Color>()
-
-internal fun crispShadowColor(backgroundColor: Color): Color {
-    return shadowColorCache.getOrPut(backgroundColor) {
-        val r = backgroundColor.red
-        val g = backgroundColor.green
-        val b = backgroundColor.blue
-        val maxChroma = maxOf(r, g, b) - minOf(r, g, b)
-        val luminance = 0.299f * r + 0.587f * g + 0.114f * b
-        if (maxChroma > 0.05f) {
-            Color(r * 0.95f, g * 0.95f, b * 0.95f, backgroundColor.alpha)
-        } else if (luminance > 0.5f) {
-            Color.Black.copy(alpha = 0.10f)
-        } else {
-            Color.White.copy(alpha = 0.12f)
-        }
-    }
-}
 
 /**
  * TalkBack 无障碍语义层：合并子节点为单一可聚焦按键、Button 角色、双击激活走语义 onClick。
@@ -211,44 +227,21 @@ fun KeyButton(
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnLongClick by rememberUpdatedState(onLongClick)
     val currentOnRelease by rememberUpdatedState(onRelease)
-    val swipeUpThreshold = with(density) { (-50).dp.toPx() }
-    val swipeDownThreshold = with(density) { 50.dp.toPx() }
+    val swipeUpThreshold = with(density) { (-KeyGestureThresholds.VERTICAL_SWIPE_DP).dp.toPx() }
+    val swipeDownThreshold = with(density) { KeyGestureThresholds.VERTICAL_SWIPE_DP.dp.toPx() }
     val bubbleShowThresholdUp = swipeUpThreshold
     val bubbleShowThresholdDown = swipeDownThreshold
     // 水平位移超过该值视为横向手势（如键盘区滑动移动光标），不再触发点击。
-    // 与 KeyboardView 光标手势激活阈值（activationThresholdPx = 60dp）对齐，
+    // 与 KeyboardView 光标手势激活阈值（KeyGestureThresholds.CURSOR_ACTIVATION_DP）同值，
     // 消除 30~60dp 位移区间"点击被取消但光标手势未激活"的死区（打字吃键）。
-    val horizontalClickCancelThreshold = with(density) { 60.dp.toPx() }
+    val horizontalClickCancelThreshold = with(density) { KeyGestureThresholds.TAP_CANCEL_DP.dp.toPx() }
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current
 
-    val shadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
-    // 辅助函数：生成更深的颜色（混合黑色）
-    fun darkenColor(color: Color, factor: Float = 0.15f): Color {
-        return Color(
-            red = (color.red * (1 - factor)).coerceIn(0f, 1f),
-            green = (color.green * (1 - factor)).coerceIn(0f, 1f),
-            blue = (color.blue * (1 - factor)).coerceIn(0f, 1f),
-            alpha = color.alpha
-        )
-    }
     
         Box(
             modifier = modifier
@@ -382,7 +375,7 @@ fun KeyButton(
             .then(shadowModifier)
             .clip(keyClipShape)
             .background(
-                if (isPressed) darkenColor(backgroundColor, 0.2f)
+                if (isPressed) darkenKeyColor(backgroundColor, 0.2f)
                 else if (isHighlighted) backgroundColor.copy(alpha = 0.8f)
                 else backgroundColor
             )
@@ -399,7 +392,10 @@ fun KeyButton(
             fontFamily = keyFontFamily
         )
         
-        if (!swipeText.isNullOrEmpty()) {
+        // 上滑提示与角标文字相同（如数字键盘「0」键上滑切大写金额模式）时不再重复渲染提示，
+        // 角标已表达该信息；swipeText 状态保持非空，上滑触发与气泡不受影响。
+        // 与 SwipeableKeyButton 的同款去重一致——九键/笔画走那个组件，此前只有本组件会叠两个浮标。
+        if (!swipeText.isNullOrEmpty() && swipeText != badgeText) {
             val displayText = if (swipeText.length <= 4) swipeText else swipeText.take(4)
             Text(
                 text = displayText,
@@ -456,6 +452,11 @@ fun SwipeableKeyButton(
     /** 左/右滑动作；配置任一后该键横向滑动即接管，自动放弃父层光标手势。 */
     onSwipeLeft: (() -> Unit)? = null,
     onSwipeRight: (() -> Unit)? = null,
+    /**
+     * 左滑是否「按住持续重复」：为 true 时按住期间按实时滑动幅度决定的间隔重复触发
+     * [onSwipeLeft]（幅度越大越快），抬手即停。删除键左滑的快速删除用它。
+     */
+    swipeLeftRepeats: Boolean = false,
     onSwipeStateChange: ((SwipeState, Rect) -> Unit)? = null,
     onPress: (() -> Unit)? = null,
     onRelease: (() -> Unit)? = null,
@@ -495,6 +496,8 @@ fun SwipeableKeyButton(
     val currentOnSwipeRight by rememberUpdatedState(onSwipeRight)
     val currentOnSwipeStateChange by rememberUpdatedState(onSwipeStateChange)
     val currentPressText by rememberUpdatedState(pressText)
+    // 左滑「按住持续重复」（删除键快速删除用）：未启用时不会有任何循环在跑
+    val currentSwipeLeftRepeats by rememberUpdatedState(swipeLeftRepeats)
     val currentOnPress by rememberUpdatedState(onPress)
     val currentOnRelease by rememberUpdatedState(onRelease)
     val currentOnClick by rememberUpdatedState(onClick)
@@ -502,41 +505,28 @@ fun SwipeableKeyButton(
     val currentLongPressItems by rememberUpdatedState(longPressItems)
     val currentLongPressDrawableIds by rememberUpdatedState(longPressDrawableIds)
     val scope = rememberCoroutineScope()
+    val swipeRepeatRunner = remember(scope) { SwipeRepeatRunner(scope) }
     val view = LocalView.current
     
     val density = LocalDensity.current
-    val swipeUpThreshold = with(density) { (-50).dp.toPx() }
-    val swipeDownThreshold = with(density) { 50.dp.toPx() }
+    val swipeUpThreshold = with(density) { (-KeyGestureThresholds.VERTICAL_SWIPE_DP).dp.toPx() }
+    val swipeDownThreshold = with(density) { KeyGestureThresholds.VERTICAL_SWIPE_DP.dp.toPx() }
     val bubbleShowThresholdUp = swipeUpThreshold
     val bubbleShowThresholdDown = swipeDownThreshold
     // 水平位移超过该值视为横向手势（如键盘区滑动移动光标），不再触发点击。
-    // 与 KeyboardView 光标手势激活阈值（activationThresholdPx = 60dp）对齐，
+    // 与 KeyboardView 光标手势激活阈值（KeyGestureThresholds.CURSOR_ACTIVATION_DP）同值，
     // 消除 30~60dp 位移区间"点击被取消但光标手势未激活"的死区（打字吃键）。
-    val horizontalClickCancelThreshold = with(density) { 60.dp.toPx() }
+    val horizontalClickCancelThreshold = with(density) { KeyGestureThresholds.TAP_CANCEL_DP.dp.toPx() }
     // 左/右滑触发阈值
-    val swipeLeftThreshold = with(density) { (-50).dp.toPx() }
-    val swipeRightThreshold = with(density) { 50.dp.toPx() }
+    val swipeLeftThreshold = with(density) { (-KeyGestureThresholds.HORIZONTAL_SWIPE_DP).dp.toPx() }
+    val swipeRightThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_DP.dp.toPx() }
     // 横向接管阈值：低于父层光标手势激活阈值（60dp），使配置了左右滑的键优先接管横向滑动
-    val horizontalSwipeSuppressThreshold = with(density) { 30.dp.toPx() }
+    val horizontalSwipeSuppressThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_SUPPRESS_DP.dp.toPx() }
     val suppressCursorMove = LocalSuppressCursorMove.current
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current
 
-    val shadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     val keyLabelFontFamily = AppFonts.keyLabelFontFamily
@@ -559,8 +549,10 @@ fun SwipeableKeyButton(
                         hasTriggeredSwipeRight = false
                         isSwiping = false
                         isSwipeDown = false
+                        swipeRepeatRunner.stop()
                     },
                     onDragEnd = {
+                        swipeRepeatRunner.stop()
                         val shouldClick = !cursorGestureActive.value &&
                             !hasTriggeredSwipeUp && !hasTriggeredSwipeDown &&
                             !hasTriggeredSwipeLeft && !hasTriggeredSwipeRight &&
@@ -582,6 +574,7 @@ fun SwipeableKeyButton(
                         currentOnSwipeStateChange?.invoke(SwipeState(false, null, false, emptyList(), false, null), buttonBounds)
                     },
                     onDragCancel = {
+                        swipeRepeatRunner.stop()
                         isPressed = false
                         currentOnRelease?.invoke()
                         dragOffsetX = 0f
@@ -602,21 +595,29 @@ fun SwipeableKeyButton(
                         // 配置了左/右滑的键：横向滑动即接管，抑制父层光标手势
                         val onSwipeLeftAction = currentOnSwipeLeft
                         val onSwipeRightAction = currentOnSwipeRight
-                        if (shouldSuppressCursorMove(
-                                onSwipeLeftAction != null || onSwipeRightAction != null,
-                                dragOffsetX, dragOffsetY, horizontalSwipeSuppressThreshold
+                        if (suppressCursorMoveIfHorizontalSwipe(
+                                onSwipeLeftAction, onSwipeRightAction,
+                                dragOffsetX, dragOffsetY, horizontalSwipeSuppressThreshold,
                             )
                         ) {
                             suppressCursorMove.value = true
                         }
-                        if (dragOffsetX < swipeLeftThreshold && !hasTriggeredSwipeLeft && onSwipeLeftAction != null) {
-                            hasTriggeredSwipeLeft = true
-                            onSwipeLeftAction()
-                        }
-                        if (dragOffsetX > swipeRightThreshold && !hasTriggeredSwipeRight && onSwipeRightAction != null) {
-                            hasTriggeredSwipeRight = true
-                            onSwipeRightAction()
-                        }
+                        hasTriggeredSwipeLeft = triggerSwipeLeft(
+                            alreadyTriggered = hasTriggeredSwipeLeft,
+                            onSwipeLeft = onSwipeLeftAction,
+                            repeatAction = { currentOnSwipeLeft?.invoke() },
+                            dragOffsetX = dragOffsetX,
+                            threshold = swipeLeftThreshold,
+                            repeats = currentSwipeLeftRepeats,
+                            amplitudeDp = with(density) { abs(dragOffsetX).toDp().value },
+                            repeater = swipeRepeatRunner,
+                        )
+                        hasTriggeredSwipeRight = triggerSwipeRight(
+                            alreadyTriggered = hasTriggeredSwipeRight,
+                            onSwipeRight = onSwipeRightAction,
+                            dragOffsetX = dragOffsetX,
+                            threshold = swipeRightThreshold,
+                        )
 
                         if (dragOffsetY < 0) {
                             if (abs(dragOffsetY) > abs(dragOffsetX) * 1.1f) {
@@ -691,7 +692,9 @@ fun SwipeableKeyButton(
                     currentOnPress?.invoke()
                     
                     val longPressJob = scope.launch {
-                        delay(400L)
+                        // 长按判定时间统一由 xime.yaml keyboard.gestures.long_press_ms 控制
+                        // （默认 300ms），与空格键进入语音的判定时间保持一致；改配置即时生效。
+                        delay(KeysConfigHelper.getKeyboardGestures().longPressMs.toLong())
                         localLongPressTriggered = true
                         view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                         currentOnSwipeStateChange?.invoke(
@@ -706,7 +709,7 @@ fun SwipeableKeyButton(
                         )
                     }
                     
-                    val cancelThresholdPx = with(density) { 5.dp.toPx() }
+                    val cancelThresholdPx = with(density) { KeyGestureThresholds.DRAG_CANCEL_DP.dp.toPx() }
                     val downY = down.position.y
                     var swipeDetected = false
                     
@@ -979,8 +982,8 @@ fun KeyboardRow(
             val swipeText = swipeKeys?.getOrNull(index)
             val swipeDownText = swipeDownKeys?.getOrNull(index)
             val rowOnClick = remember(key, onKeyPress) { { onKeyPress(key) } }
-            val rowOnPress: (() -> Unit)? = remember(key, onKeyPressDown) { { onKeyPressDown?.invoke(key); Unit } }
-            val rowOnRelease: (() -> Unit)? = remember(key, onKeyRelease) { { onKeyRelease?.invoke(key); Unit } }
+            val rowOnPress = rememberKeyCallback(key, onKeyPressDown)
+            val rowOnRelease = rememberKeyCallback(key, onKeyRelease)
             SwipeableKeyButton(
                 text = if (isShifted) key.uppercase() else key,
                 onClick = rowOnClick,
@@ -1022,33 +1025,10 @@ fun IconKeyButton(
     val density = LocalDensity.current
     val currentOnClick by rememberUpdatedState(onClick)
 
-    val shadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
-    // 辅助函数：生成更深的颜色（混合黑色）
-    fun darkenColor(color: Color, factor: Float = 0.15f): Color {
-        return Color(
-            red = (color.red * (1 - factor)).coerceIn(0f, 1f),
-            green = (color.green * (1 - factor)).coerceIn(0f, 1f),
-            blue = (color.blue * (1 - factor)).coerceIn(0f, 1f),
-            alpha = color.alpha
-        )
-    }
     
     Box(
         modifier = modifier
@@ -1072,8 +1052,8 @@ fun IconKeyButton(
             .then(shadowModifier)
             .clip(keyClipShape)
             .background(
-                if (isPressed) darkenColor(backgroundColor, 0.1f)
-                else if (isHighlighted) darkenColor(backgroundColor, 0.2f)
+                if (isPressed) darkenKeyColor(backgroundColor, 0.1f)
+                else if (isHighlighted) darkenKeyColor(backgroundColor, 0.2f)
                 else backgroundColor
             )
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
@@ -1120,6 +1100,11 @@ fun SwipeableIconKeyButton(
     onSwipeUp: (() -> Unit)? = null,
     onSwipeDown: (() -> Unit)? = null,
     onSwipeLeft: (() -> Unit)? = null,
+    /**
+     * 左滑是否「按住持续重复」：为 true 时按住期间按实时滑动幅度决定的间隔重复触发
+     * [onSwipeLeft]（幅度越大越快），抬手即停。中英键盘删除键的快速删除用它。
+     */
+    swipeLeftRepeats: Boolean = false,
     /** 右滑动作；与 [onSwipeLeft] 任一配置后，该键横向滑动即接管，自动放弃父层光标手势。 */
     onSwipeRight: (() -> Unit)? = null,
     onSwipeStateChange: ((SwipeState, Rect) -> Unit)? = null,
@@ -1153,14 +1138,18 @@ fun SwipeableIconKeyButton(
     val currentOnSwipeLeft by rememberUpdatedState(onSwipeLeft)
     val currentOnSwipeRight by rememberUpdatedState(onSwipeRight)
     val keyLabelFontFamily = AppFonts.keyLabelFontFamily
+    // 左滑「按住持续重复」（删除键快速删除用）：未启用时不会有任何循环在跑
+    val currentSwipeLeftRepeats by rememberUpdatedState(swipeLeftRepeats)
+    val scope = rememberCoroutineScope()
+    val swipeRepeatRunner = remember(scope) { SwipeRepeatRunner(scope) }
     
     val density = LocalDensity.current
-    val swipeUpThreshold = with(density) { (-50).dp.toPx() }
-    val swipeDownThreshold = with(density) { 50.dp.toPx() }
-    val swipeLeftThreshold = with(density) { (-50).dp.toPx() }
-    val swipeRightThreshold = with(density) { 50.dp.toPx() }
+    val swipeUpThreshold = with(density) { (-KeyGestureThresholds.VERTICAL_SWIPE_DP).dp.toPx() }
+    val swipeDownThreshold = with(density) { KeyGestureThresholds.VERTICAL_SWIPE_DP.dp.toPx() }
+    val swipeLeftThreshold = with(density) { (-KeyGestureThresholds.HORIZONTAL_SWIPE_DP).dp.toPx() }
+    val swipeRightThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_DP.dp.toPx() }
     // 横向接管阈值：低于父层光标手势激活阈值（60dp），使配置了左右滑的键优先接管横向滑动
-    val horizontalSwipeSuppressThreshold = with(density) { 30.dp.toPx() }
+    val horizontalSwipeSuppressThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_SUPPRESS_DP.dp.toPx() }
     val suppressCursorMove = LocalSuppressCursorMove.current
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current
@@ -1168,12 +1157,12 @@ fun SwipeableIconKeyButton(
     val bubbleShowThresholdDown = swipeDownThreshold
     
     // 上滑清空/下滑撤回需要更大的滑动距离，防止误触
-    val clearActionThreshold = with(density) { (-50).dp.toPx() }
-    val undoActionThreshold = with(density) { 50.dp.toPx() }
+    val clearActionThreshold = with(density) { (-KeyGestureThresholds.VERTICAL_SWIPE_DP).dp.toPx() }
+    val undoActionThreshold = with(density) { KeyGestureThresholds.VERTICAL_SWIPE_DP.dp.toPx() }
     // 水平位移超过该值视为横向手势（如键盘区滑动移动光标），不再触发点击。
-    // 与 KeyboardView 光标手势激活阈值（activationThresholdPx = 60dp）对齐，
+    // 与 KeyboardView 光标手势激活阈值（KeyGestureThresholds.CURSOR_ACTIVATION_DP）同值，
     // 消除 30~60dp 位移区间"点击被取消但光标手势未激活"的死区（打字吃键）。
-    val horizontalClickCancelThreshold = with(density) { 60.dp.toPx() }
+    val horizontalClickCancelThreshold = with(density) { KeyGestureThresholds.TAP_CANCEL_DP.dp.toPx() }
     
     LaunchedEffect(isLongPress) {
         if (isLongPress && onLongClick != null) {
@@ -1187,32 +1176,10 @@ fun SwipeableIconKeyButton(
         }
     }
 
-    val shadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
-    fun darkenColor(color: Color, factor: Float = 0.15f): Color {
-        return Color(
-            red = (color.red * (1 - factor)).coerceIn(0f, 1f),
-            green = (color.green * (1 - factor)).coerceIn(0f, 1f),
-            blue = (color.blue * (1 - factor)).coerceIn(0f, 1f),
-            alpha = color.alpha
-        )
-    }
     
     Box(
         modifier = modifier
@@ -1267,6 +1234,8 @@ fun SwipeableIconKeyButton(
                         onPress?.invoke()
                     },
                     onDragEnd = {
+                        // 按住连删必须在抬手时停掉，否则协程循环会一直删下去（左滑后无法打字且界面闪）
+                        swipeRepeatRunner.stop()
                         if (hasReachedClearThreshold && onSwipeUp != null) {
                             onSwipeUp()
                         } else if (hasReachedUndoThreshold && onSwipeDown != null) {
@@ -1304,6 +1273,8 @@ fun SwipeableIconKeyButton(
                         onSwipeStateChange?.invoke(SwipeState(), buttonBounds)
                     },
                     onDragCancel = {
+                        // 手势被系统取消（如三指截图/来电）：同样必须停下连删循环
+                        swipeRepeatRunner.stop()
                         dragActivated = false
                         isPressed = false
                         currentOnRelease?.invoke()
@@ -1330,9 +1301,9 @@ fun SwipeableIconKeyButton(
                         // 配置了左/右滑的键：横向滑动即接管，抑制父层光标手势
                         val onSwipeLeftAction = currentOnSwipeLeft
                         val onSwipeRightAction = currentOnSwipeRight
-                        if (shouldSuppressCursorMove(
-                                onSwipeLeftAction != null || onSwipeRightAction != null,
-                                dragOffsetX, dragOffsetY, horizontalSwipeSuppressThreshold
+                        if (suppressCursorMoveIfHorizontalSwipe(
+                                onSwipeLeftAction, onSwipeRightAction,
+                                dragOffsetX, dragOffsetY, horizontalSwipeSuppressThreshold,
                             )
                         ) {
                             suppressCursorMove.value = true
@@ -1344,15 +1315,26 @@ fun SwipeableIconKeyButton(
                             isLongPress = false
                         }
                         
-                        if (dragOffsetX < swipeLeftThreshold && !hasTriggeredSwipeLeft && onSwipeLeftAction != null) {
-                            hasTriggeredSwipeLeft = true
-                            onSwipeLeftAction()
-                        }
-
-                        if (dragOffsetX > swipeRightThreshold && !hasTriggeredSwipeRight && onSwipeRightAction != null) {
-                            hasTriggeredSwipeRight = true
-                            onSwipeRightAction()
-                        }
+                        // 图标键（数字/符号面板的删除键）不做按住重复：显式传 repeats = false，
+                        // 把该差异从"少写了一段"变成明确策略（见 HorizontalSwipeGesture 的说明）。
+                        hasTriggeredSwipeLeft = triggerSwipeLeft(
+                            alreadyTriggered = hasTriggeredSwipeLeft,
+                            onSwipeLeft = onSwipeLeftAction,
+                            dragOffsetX = dragOffsetX,
+                            threshold = swipeLeftThreshold,
+                            // 中英键盘删除键（swipeLeftRepeats=true）按住持续删；
+                            // 数字/符号面板删除键保持单次触发（未开该开关）。
+                            repeatAction = { currentOnSwipeLeft?.invoke() },
+                            repeats = currentSwipeLeftRepeats,
+                            amplitudeDp = with(density) { abs(dragOffsetX).toDp().value },
+                            repeater = swipeRepeatRunner,
+                        )
+                        hasTriggeredSwipeRight = triggerSwipeRight(
+                            alreadyTriggered = hasTriggeredSwipeRight,
+                            onSwipeRight = onSwipeRightAction,
+                            dragOffsetX = dragOffsetX,
+                            threshold = swipeRightThreshold,
+                        )
                         
                         if (dragOffsetY < 0 && dragOffsetX >= swipeLeftThreshold) {
                             val showUp = dragOffsetY < bubbleShowThresholdUp && swipeUpLabel != null
@@ -1409,7 +1391,7 @@ fun SwipeableIconKeyButton(
             .then(shadowModifier)
             .clip(keyClipShape)
             .background(
-                if (isPressed) darkenColor(backgroundColor, 0.2f)
+                if (isPressed) darkenKeyColor(backgroundColor, 0.2f)
                 else if (isHighlighted) backgroundColor.copy(alpha = 0.8f)
                 else backgroundColor
             )

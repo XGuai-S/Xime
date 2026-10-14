@@ -6,7 +6,6 @@ import android.util.Log
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
 import com.kingzcheung.xime.plugin.core.api.RemoteBackupEntry
 import java.io.File
-import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
 /**
@@ -75,7 +74,11 @@ object BackupManager {
         val filesDir = context.filesDir
         return restoreArchive(filesDir, { prefsName, json ->
             restorePrefsJson(context.getSharedPreferences(prefsName, Context.MODE_PRIVATE), json)
-        }, bytes).onSuccess {
+        }, bytes, visibleConfigWriter = { text ->
+            UserConfigDir.writeCustomConfig(context, text)
+        }, candidateOrderWriter = { text ->
+            restoreCandidateOrder(context, text)
+        }).onSuccess {
             Log.i(TAG, "Restore done -> ${filesDir.path}")
         }.onFailure { e ->
             Log.e(TAG, "restoreArchive failed", e)
@@ -83,14 +86,39 @@ object BackupManager {
     }
 
     /**
+     * 恢复候选排序词频表：优先写可见目录（与 xime.yaml 同级，用户可直接查看），
+     * 失败时回退私有目录，保证恢复的排序不丢。与
+     * [com.kingzcheung.xime.service.CandidateOrderStore.save] 的落盘策略一致。
+     */
+    private fun restoreCandidateOrder(context: Context, text: String): Boolean {
+        val fileName = com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME
+        if (UserConfigDir.writeText(context, fileName, text)) return true
+        return runCatching {
+            File(context.filesDir, fileName).writeText(text)
+        }.isSuccess
+    }
+
+    /**
      * 恢复核心（纯 JVM，便于单测）：META 条目按前缀路由，其余条目进 filesDir/rime。
      *
      * @param prefsRestorer 宿主注入的 prefs 恢复器（Android 用 SharedPreferences；测试可注入假实现）
+     * @param candidateOrderWriter 候选排序词频表（candidate_order.txt）的可见目录写入通道；
+     *   为 null 时（纯 JVM 测试）写入 `filesDir/candidate_order.txt`。与
+     *   [visibleConfigWriter] 同理：不这样分流的话，恢复出来的词频表会被可见目录里的
+     *   旧文件在下次读取时遮蔽。
      */
     fun restoreArchive(
         filesDir: File,
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
-        bytes: ByteArray
+        bytes: ByteArray,
+        /**
+         * 用户可见配置目录可用时的写入通道（Android 侧注入 `UserConfigDir.writeCustomConfig`）。
+         * 为 null 时（纯 JVM 测试，或可见目录不可用）退回写入 `filesDir/rime`。
+         * 不这样分流的话，恢复出来的 `xime.custom.yaml` 会被可见目录里的旧配置静默覆盖。
+         */
+        visibleConfigWriter: ((String) -> Boolean)? = null,
+        /** 候选排序词频表（candidate_order.txt）的写入通道，见类注释。 */
+        candidateOrderWriter: ((String) -> Boolean)? = null
     ): Result<Unit> {
         try {
             val rimeDir = File(filesDir, "rime")
@@ -126,7 +154,7 @@ object BackupManager {
                     val target = File(rimeDir, name)
                     // 显式拒绝绝对路径（File(parent, "/abs") 在 Unix 下会被拼接为 parent/abs，
                     // canonical 检查拦不住；此处按契约直接拒绝）
-                    if (File(name).isAbsolute) {
+                    if (isRootedEntryName(name)) {
                         return Result.failure(Exception("备份包包含非法路径: $name"))
                     }
                     val canonicalRoot = rimeDir.canonicalPath + File.separator
@@ -134,6 +162,38 @@ object BackupManager {
                         !target.canonicalPath.startsWith(canonicalRoot)
                     ) {
                         return Result.failure(Exception("备份包包含非法路径: $name"))
+                    }
+                    // 用户配置改走「真源」通道（可见目录 xime.yaml），否则恢复出来的配置会被
+                    // 可见目录里的旧配置静默覆盖；写入失败才退回 rime 目录，避免恢复彻底失效。
+                    // 旧备份里的条目名是 xime.custom.yaml / xime.txt，同样路由过来，等于顺带完成迁移。
+                    val relName = name.replace('\\', '/').removePrefix("./")
+                    val isUserConfig = relName == UserConfigDir.UNIFIED_CONFIG_FILE ||
+                        relName == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE ||
+                        relName == UserConfigDir.CUSTOM_CONFIG_FILE
+                    // 候选排序词频表（备份包为顶层 candidate_order.txt）：走「真源」通道
+                    //（可见目录，与 xime.yaml 同级），否则恢复出的排序会被可见目录旧表遮蔽。
+                    // writer 为 null（纯 JVM 测试）或写入失败时，回退私有目录
+                    // `filesDir/candidate_order.txt`（与 CandidateOrderStore 的私有回退路径一致）。
+                    val isCandidateOrder = relName == com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME
+                    if (isCandidateOrder) {
+                        val text = String(zis.readBytes(), Charsets.UTF_8)
+                        val routed = candidateOrderWriter?.invoke(text) ?: false
+                        if (!routed) {
+                            File(filesDir, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME).writeText(text)
+                        }
+                        entryCount++
+                        zis.closeEntry()
+                        continue
+                    }
+                    if (isUserConfig && visibleConfigWriter != null) {
+                        val text = String(zis.readBytes(), Charsets.UTF_8)
+                        if (!visibleConfigWriter(text)) {
+                            target.parentFile?.mkdirs()
+                            target.writeText(text)
+                        }
+                        entryCount++
+                        zis.closeEntry()
+                        continue
                     }
                     target.parentFile?.mkdirs()
                     target.outputStream().use { zis.copyTo(it) }
@@ -151,13 +211,33 @@ object BackupManager {
     /** 目标必须落在 baseDir 内（防元数据条目穿越），否则抛异常中止恢复。 */
     private fun writeChecked(target: File, baseDir: File, data: ByteArray) {
         val canonicalBase = baseDir.canonicalPath + File.separator
-        if (File(target.name).isAbsolute ||
+        if (isRootedEntryName(target.name) ||
             !(target.canonicalPath + File.separator).startsWith(canonicalBase)
         ) {
             throw SecurityException("备份包包含非法路径: ${target.name}")
         }
         target.parentFile?.mkdirs()
         target.writeBytes(data)
+    }
+
+    /**
+     * 条目名是否指向根路径（绝对路径或盘符路径）。
+     *
+     * 不能用 `File(name).isAbsolute` 作为唯一判据：该属性依赖平台，Windows 上
+     * `File("/etc/evil.txt").isAbsolute` 为 false（Windows 绝对路径需有盘符），
+     * 于是 POSIX 风格的绝对路径会被当作相对路径拼进目标目录，绕过恢复校验。
+     * 故先按平台无关的字符判据识别 `/`、`\` 开头与盘符形式，再回退到 isAbsolute
+     * 以覆盖 UNC 等其余平台相关形态。
+     */
+    private fun isRootedEntryName(name: String): Boolean {
+        if (name.isEmpty()) return false
+        if (name[0] == '/' || name[0] == '\\') return true
+        if (name.length >= 2 && name[1] == ':' && name[0].isLetter() &&
+            (name.length == 2 || name[2] == '\\' || name[2] == '/')
+        ) {
+            return true
+        }
+        return File(name).isAbsolute
     }
 
     // ---- prefs 备份/恢复（JSON，类型保留：b/i/l/f/s/ss） ----

@@ -630,7 +630,7 @@ class JsScriptRuntime(
                 for ((k, v) in value) map[k.toString()] = kotlinToJsValue(v)
                 JsObject(map)
             }
-            else -> value?.toString()
+            else -> value.toString()
         }
         return converted
     }

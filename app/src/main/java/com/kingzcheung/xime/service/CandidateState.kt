@@ -24,4 +24,9 @@ data class CandidateState(
     /** 编码显示串中的光标偏移（字符，-1 = 末尾/非编辑态）。
      *  全键盘组合态滑动编辑时由服务层从 editingCaretPos 映射（快照比对自愈），供气泡竖线与输入框光标。 */
     val preeditCaretPos: Int = -1,
+    /** 数字键盘「大写金额模式」的候选栏回显：算式（如 `123+45`）。
+     *  金额已随按键实时上屏，候选栏据此列出两条候选（纯金额 / 算式），点选由服务层分辨。 */
+    val capitalAmountExpression: String = "",
+    /** 上条算式对应的大写金额（如 `壹佰陆拾捌元整`）；与 [capitalAmountExpression] 同为空表示不显示。 */
+    val capitalAmountAmount: String = "",
 )

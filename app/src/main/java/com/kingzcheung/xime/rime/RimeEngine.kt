@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.rime
 
 import com.kingzcheung.xime.util.FileLogger
-import android.util.Log
 import java.io.File
 import java.util.concurrent.locks.ReentrantLock
 
@@ -632,7 +631,7 @@ class RimeEngine {
         if (!isInitialized || text.isEmpty()) return ""
         return tryLocked("") {
             if (!nativeHasSession()) return@tryLocked ""
-            nativeLookupText(text) ?: ""
+            nativeLookupText(text)
         }
     }
 
@@ -711,6 +710,22 @@ class RimeEngine {
                 nativeDestroy()
                 isInitialized = false
             }
+        }
+    }
+
+    /**
+     * 结束当前输入会话但**保留引擎**（输入法服务切走时调用）。
+     *
+     * 不能改用 [destroy]：它会调 native `finalize()` 释放 librime 全局资源，
+     * 而切回本输入法时服务重建会再次 `startup → rime->initialize()`。
+     * librime 在同一进程内「finalize 后再 initialize」并不保证可重入，
+     * 真机表现就是「从别的输入法切回本输入法闪退」。引擎保留后，
+     * 切回时 [ensureSession] 会直接复用已初始化的引擎重建会话。
+     */
+    fun endSession() {
+        if (!isInitialized) return
+        locked {
+            nativeEndSession()
         }
     }
 
@@ -829,6 +844,7 @@ class RimeEngine {
     private external fun nativeUpdateLastBuildTime()
     private external fun nativeSetPageSize(schemaId: String, pageSize: Int)
     private external fun nativeDestroy()
+    private external fun nativeEndSession()
     private external fun nativeT9SelectCandidate(pinyin: String, text: String?, textLength: Int): Boolean
     private external fun nativeT9Memorize(text: String, pinyin: String): Boolean
     private external fun nativeT9Forget(text: String, pinyin: String): Boolean

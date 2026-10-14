@@ -19,12 +19,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.twotone.LibraryBooks
 import androidx.compose.material.icons.twotone.AutoAwesome
 import androidx.compose.material.icons.twotone.Backup
+import androidx.compose.material.icons.twotone.BugReport
 import androidx.compose.material.icons.twotone.Ballot
 
-import androidx.compose.material.icons.twotone.Build
 import androidx.compose.material.icons.twotone.ContentPaste
 import androidx.compose.material.icons.twotone.Description
 import androidx.compose.material.icons.twotone.Extension
@@ -37,7 +36,6 @@ import androidx.compose.material.icons.twotone.Storefront
 import androidx.compose.material.icons.twotone.Straighten
 import androidx.compose.material.icons.twotone.TableChart
 import androidx.compose.material.icons.twotone.ToggleOn
-import androidx.compose.material.icons.twotone.TypeSpecimen
 import androidx.compose.material.icons.twotone.Vibration
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -63,10 +61,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kingzcheung.xime.settings.MarketUpdateChecker
 import com.kingzcheung.xime.settings.SettingsPreferences
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.MainScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -83,7 +77,8 @@ fun SettingsMainContent(
     onNavigateToSpeechToText: () -> Unit,
     onNavigateToAbout: () -> Unit,
     onNavigateToClipboard: () -> Unit = {},
-    onNavigateToBackup: () -> Unit = {}
+    onNavigateToBackup: () -> Unit = {},
+    onNavigateToLogSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -142,9 +137,20 @@ fun SettingsMainContent(
                         title = "选择输入法",
                         subtitle = "将曦码设为当前输入法",
                         onClick = {
-                            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) 
-                                as InputMethodManager
-                            imm.showInputMethodPicker()
+                            // 部分 ROM（尤其 Android 13+ 定制系统）在应用内直接调
+                            // showInputMethodPicker 会抛（窗口未聚焦/系统限制），
+                            // 不包住就会闪退；失败时回退到系统输入法设置页，用户同样能切。
+                            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                                as? InputMethodManager
+                            val shown = runCatching {
+                                imm?.showInputMethodPicker()
+                                imm != null
+                            }.getOrDefault(false)
+                            if (!shown) {
+                                runCatching {
+                                    context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+                                }
+                            }
                         }
                     )
                     HorizontalDivider(
@@ -362,6 +368,19 @@ fun SettingsMainContent(
                         title = "同步与备份",
                         subtitle = "多设备词典互通与配置备份",
                         onClick = onNavigateToBackup,
+                        showArrow = true
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    // 日志与用户数据相关：开关默认开、可导出汇总日志发给开发者定位问题
+                    SettingsItem(
+                        icon = Icons.TwoTone.BugReport,
+                        title = "日志",
+                        subtitle = "记录开关、查看日志、导出汇总日志",
+                        onClick = onNavigateToLogSettings,
                         showArrow = true
                     )
                 })

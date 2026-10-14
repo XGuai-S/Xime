@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.service
 
 import com.kingzcheung.xime.settings.SchemaInfo
-import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.speech.RecognitionState
 import com.kingzcheung.xime.keyboard.ToolbarButton
 import com.kingzcheung.xime.keyboard.ToolbarButtonItem
@@ -44,6 +43,9 @@ data class InputUIState(
     /** 本次 inputSessionId 变化是否为 restarting（同一编辑框刷新）：键盘 UI 据此跳过 ascii 记忆 reset。 */
     val isInputSessionRestarting: Boolean = false,
     val t9ResetSignal: Long = 0,
+    /** 大写金额模式「结束本次输入」信号：候选栏点选后由服务层自增，键盘据此退出模式并清空累积。
+     *  走与 [t9ResetSignal] 同一套单向信号，避免键盘与服务各持一份模式状态。 */
+    val capitalAmountExitSignal: Long = 0,
     val swipeCancelEpoch: Long = 0,
     val t9RightCandidateSelectedCount: Long = 0,
     val t9SelectedCandidatePinyin: String = "",

@@ -1,7 +1,8 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import org.junit.Assert.assertTrue
 
 /**
  * 悬浮卡片几何纯逻辑测试（[FloatingCardGeometry]）。
@@ -16,6 +17,35 @@ class FloatingCardGeometryTest {
     fun `card width is 85 percent of portrait width`() {
         assertEquals(349, FloatingCardGeometry.cardWidthDp(411))
         assertEquals(0, FloatingCardGeometry.cardWidthDp(0))
+    }
+
+    @Test
+    fun `portrait screen width takes the shorter side`() {
+        assertEquals(411, FloatingCardGeometry.portraitScreenWidthDp(411, 891))
+        assertEquals(411, FloatingCardGeometry.portraitScreenWidthDp(891, 411))
+        assertEquals(320, FloatingCardGeometry.portraitScreenWidthDp(320, 320))
+    }
+
+    @Test
+    fun `card width for config matches cardWidthDp of the shorter side`() {
+        // 349 = round(411 * 0.85)，与既有 cardWidthDp(411) 用例一致
+        assertEquals(349, FloatingCardGeometry.cardWidthDpForConfig(411, 891))
+        assertEquals(349, FloatingCardGeometry.cardWidthDpForConfig(891, 411))
+        assertEquals(272, FloatingCardGeometry.cardWidthDpForConfig(320, 320))
+        assertEquals(612, FloatingCardGeometry.cardWidthDpForConfig(1280, 720))
+    }
+
+    @Test
+    fun `card width for config agrees with the explicit two-step call`() {
+        for (w in listOf(320, 360, 411, 480, 891, 1280)) {
+            for (h in listOf(320, 360, 411, 480, 891, 1280)) {
+                assertEquals(
+                    "w=$w h=$h",
+                    FloatingCardGeometry.cardWidthDp(minOf(w, h)),
+                    FloatingCardGeometry.cardWidthDpForConfig(w, h),
+                )
+            }
+        }
     }
 
     @Test
@@ -45,6 +75,48 @@ class FloatingCardGeometryTest {
     @Test
     fun `half margin never negative when window narrower than card`() {
         assertEquals(0, FloatingCardGeometry.halfMarginDp(windowWidthDp = 300, portraitScreenWidthDp = 411))
+    }
+
+    @Test
+    fun `half margin for config uses the shorter screen side`() {
+        // 竖屏：配置宽即短边
+        assertEquals(
+            31,
+            FloatingCardGeometry.halfMarginDpForConfig(screenWidthDp = 411, screenHeightDp = 891),
+        )
+        // 横屏：短边是屏高，窗口宽取配置宽
+        assertEquals(
+            271,
+            FloatingCardGeometry.halfMarginDpForConfig(screenWidthDp = 891, screenHeightDp = 411),
+        )
+    }
+
+    @Test
+    fun `half margin for config matches explicit two-step call`() {
+        // 合并前调用处自行 minOf(宽, 高) 再调 halfMarginDp，二者必须等价
+        for (w in listOf(320, 411, 891, 1280)) {
+            for (h in listOf(320, 411, 891, 1280)) {
+                assertEquals(
+                    "w=$w h=$h",
+                    FloatingCardGeometry.halfMarginDp(w, minOf(w, h)),
+                    FloatingCardGeometry.halfMarginDpForConfig(w, h),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `half margin for config stays positive for real screen sizes`() {
+        // 真实屏幕配置下短边 <= 配置宽，故 halfMarginDpForConfig 恒为正：
+        // cardWidthDp(短边) = 0.85 × 短边，half = (配置宽 - 0.85 × 短边) / 2 > 0
+        for (w in listOf(320, 360, 411, 480, 891, 1280)) {
+            for (h in listOf(320, 360, 411, 480, 891, 1280)) {
+                assertTrue(
+                    "w=$w h=$h",
+                    FloatingCardGeometry.halfMarginDpForConfig(w, h) > 0,
+                )
+            }
+        }
     }
 
     @Test

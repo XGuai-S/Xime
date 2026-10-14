@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
@@ -37,12 +36,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -97,50 +93,39 @@ fun UserDictContent(onBack: () -> Unit) {
     val selectedDict = uiState.selectedDict
     val selectedMeta = uiState.dicts.find { it.name == selectedDict }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("用户词库") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    if (uiState.isTransferring) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.padding(end = 16.dp).size(20.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else if (selectedDict != null) {
-                        Box {
-                            IconButton(onClick = { showMenu = true }) {
-                                Icon(Icons.Default.MoreVert, contentDescription = "更多操作")
-                            }
-                            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("导出文本码表") },
-                                    onClick = {
-                                        showMenu = false
-                                        exportLauncher.launch(UserDictIoManager.exportFileName(selectedDict))
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("导入文本码表") },
-                                    onClick = {
-                                        showMenu = false
-                                        importLauncher.launch(arrayOf("*/*"))
-                                    }
-                                )
-                            }
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
+    SettingsScreenScaffold(
+        title = "用户词库",
+        onBack = onBack,
+        containerColor = MaterialTheme.colorScheme.background,
+        actions = {
+            if (uiState.isTransferring) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 16.dp).size(20.dp),
+                    strokeWidth = 2.dp
                 )
-            )
+            } else if (selectedDict != null) {
+                Box {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "更多操作")
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("导出文本码表") },
+                            onClick = {
+                                showMenu = false
+                                exportLauncher.launch(UserDictIoManager.exportFileName(selectedDict))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("导入文本码表") },
+                            onClick = {
+                                showMenu = false
+                                importLauncher.launch(arrayOf("*/*"))
+                            }
+                        )
+                    }
+                }
+            }
         },
         floatingActionButton = {
             if (selectedDict != null) {
@@ -154,7 +139,7 @@ fun UserDictContent(onBack: () -> Unit) {
                     )
                 }
             }
-        }
+        },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when {

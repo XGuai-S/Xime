@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import kotlin.math.roundToInt
 
@@ -25,6 +25,19 @@ object FloatingCardGeometry {
         val heightPx: Int get() = bottom - top
     }
 
+    /**
+     * 竖屏形态的屏宽（dp）：屏宽与屏高的较小者。
+     *
+     * 卡片恒为竖屏形态，其宽度、可移动半幅与兜底矩形都以这个值为基准。
+     * 合并自 5 处调用点各自书写的 minOf(宽, 高) 推算，避免短边口径漂移。
+     */
+    fun portraitScreenWidthDp(screenWidthDp: Int, screenHeightDp: Int): Int =
+        minOf(screenWidthDp, screenHeightDp)
+
+    /** 由屏幕配置直接得到卡片宽度（dp），等价于 cardWidthDp(portraitScreenWidthDp(w, h)) */
+    fun cardWidthDpForConfig(screenWidthDp: Int, screenHeightDp: Int): Int =
+        cardWidthDp(portraitScreenWidthDp(screenWidthDp, screenHeightDp))
+
     fun cardWidthDp(portraitScreenWidthDp: Int): Int =
         (portraitScreenWidthDp * CARD_SCALE).roundToInt()
 
@@ -36,6 +49,16 @@ object FloatingCardGeometry {
     /** 卡片水平可移动半幅（dp）：offsetX ∈ [-halfMargin, +halfMargin] */
     fun halfMarginDp(windowWidthDp: Int, portraitScreenWidthDp: Int): Int =
         maxOf(0, (windowWidthDp - cardWidthDp(portraitScreenWidthDp)) / 2)
+
+    /**
+     * 由屏幕配置直接得到水平可移动半幅（dp），窗口宽取配置宽、短边取屏宽屏高较小者。
+     *
+     * 合并自 3 处逐字相同的调用点序列（ImeKeyboardCallbacks、ImeSchemaController、
+     * XimeInputMethodService）：它们各自先取 screenWidthDp 与 minOf(宽, 高) 再调用
+     * [halfMarginDp]。按本对象的既定约束，禁止在调用处重复这段推算。
+     */
+    fun halfMarginDpForConfig(screenWidthDp: Int, screenHeightDp: Int): Int =
+        halfMarginDp(screenWidthDp, portraitScreenWidthDp(screenWidthDp, screenHeightDp))
 
     /** 首帧实测前的兜底卡高（dp） */
     fun fallbackCardHeightDp(keyboardHeightDp: Int, bottomPaddingDp: Int): Int =

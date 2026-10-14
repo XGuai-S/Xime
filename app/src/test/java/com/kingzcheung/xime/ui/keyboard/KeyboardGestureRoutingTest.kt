@@ -23,6 +23,12 @@ class KeyboardGestureRoutingTest {
     }
 
     @Test
+    fun `edit value 映射到编辑面板`() {
+        // shift 长按进入编辑面板走这个映射；漏了会让长按静默无反应
+        assertEquals(OverlayRoute.Edit, switchRouteOverlay("edit"))
+    }
+
+    @Test
     fun `未知 value 返回 null`() {
         assertNull(switchRouteOverlay("plugin_panel"))
         assertNull(switchRouteOverlay(""))

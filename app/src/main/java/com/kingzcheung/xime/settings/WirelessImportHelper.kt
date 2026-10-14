@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.settings
+﻿package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -163,126 +163,7 @@ class WirelessImportHelper(private val context: Context) {
                             ContentType.Application.Json)
                     }
                 }
-                post("/upload") {
-                    val rimeDir = File(context.filesDir, "rime")
-                    rimeDir.mkdirs()
-                    val tmpFile = File.createTempFile("upload_", ".tmp", rimeDir)
-                    var lastName = ""
-
-                    try {
-                        // 1. 流式写入临时文件（不占堆内存）
-                        val ch = call.receiveChannel()
-                        java.io.FileOutputStream(tmpFile).use { fos ->
-                            val buf = ByteArray(8192)
-                            while (!ch.isClosedForRead) {
-                                val n = ch.readAvailable(buf, 0, buf.size)
-                                if (n <= 0) break
-                                fos.write(buf, 0, n)
-                            }
-                        }
-
-                        // 2. 从临时文件解析 multipart（RandomAccessFile 流式读取）
-                        val ctHeader = call.request.headers["Content-Type"] ?: ""
-                        val boundary = ctHeader.split("boundary=").getOrNull(1)?.trim()
-                        if (boundary.isNullOrEmpty()) {
-                            call.respondText("""{"success":false,"error":"No boundary"}""",
-                                ContentType.Application.Json, HttpStatusCode.BadRequest)
-                            return@post
-                        }
-                        val boundaryBytes = ("\r\n--$boundary").toByteArray()
-                        val firstBoundary = ("--$boundary").toByteArray()
-                        val headerEndMarker = "\r\n\r\n".toByteArray()
-
-                        var saved = false
-                        java.io.RandomAccessFile(tmpFile, "r").use { raf ->
-                            var pos = findBytes(raf, firstBoundary, 0)
-                            if (pos < 0) return@use
-
-                            while (true) {
-                                val partStart = pos + firstBoundary.size
-                                val nextB = findBytes(raf, boundaryBytes, partStart)
-                                if (nextB < 0) break
-                                val partEnd = nextB
-
-                                // 解析 part header
-                                raf.seek(partStart.toLong())
-                                val hdr = ByteArray(4096)
-                                val hdrLen = readUntil(raf, hdr, headerEndMarker)
-                                if (hdrLen < 0) { pos = nextB + 2; continue }
-
-                                val headerStr = hdr.decodeToString(0, hdrLen)
-                                val fn = Regex("""filename="([^"]*)"""").find(headerStr)
-                                val name = fn?.groupValues?.getOrNull(1)
-                                if (name.isNullOrEmpty() || name == "blob") { pos = nextB + 2; continue }
-
-                                lastName = name
-                                val contentStart = raf.filePointer
-                                val contentLen = partEnd - contentStart
-
-                when {
-                    ImportManager.isPluginFile(name) ||
-                    name.endsWith(".zip", ignoreCase = true) ||
-                    name.endsWith(".tar.gz", ignoreCase = true) ||
-                    name.endsWith(".tgz", ignoreCase = true) ||
-                    name.endsWith(".yaml") || name.endsWith(".schema.yaml") || name.endsWith(".dict.yaml") ||
-                    name.endsWith(".jpg", ignoreCase = true) || name.endsWith(".jpeg", ignoreCase = true) ||
-                    name.endsWith(".png", ignoreCase = true) ||
-                    name.endsWith(".ttf", ignoreCase = true) || name.endsWith(".otf", ignoreCase = true) ||
-                    name.endsWith(".woff", ignoreCase = true) || name.endsWith(".woff2", ignoreCase = true) -> {
-                        // 经临时文件传递给 ImportManager，避免大文件 ByteArray OOM
-                        val partFile = File.createTempFile("part_", "_$name", context.cacheDir)
-                        try {
-                            partFile.outputStream().use { out ->
-                                raf.channel.transferTo(contentStart, contentLen, out.channel)
-                            }
-                            when (val result = ImportManager.importFile(
-                                context, name, partFile, autoEnable = false
-                            )) {
-                                is ImportManager.ImportResult.Plugin -> {
-                                    PluginManager.loadEnabledPlugins()
-                                    saved = true
-                                    _uploadResults.trySend(UploadResult(fileName = name, success = true))
-                                }
-                                is ImportManager.ImportResult.Content -> {
-                                    saved = result.success
-                                    _uploadResults.trySend(
-                                        if (result.success) UploadResult(fileName = name, success = true)
-                                        else UploadResult(
-                                            fileName = name, success = false,
-                                            error = if (result.conflicts.isNotEmpty())
-                                                "${result.conflicts.first().fileName} 与已安装内容不同，已取消"
-                                            else "保存失败"
-                                        )
-                                    )
-                                }
-                                else -> {
-                                    _uploadResults.trySend(
-                                        UploadResult(fileName = name, success = false, error = "不支持的文件类型")
-                                    )
-                                }
-                            }
-                        } finally {
-                            partFile.delete()
-                        }
-                    }
-                    else -> {
-                        _uploadResults.trySend(UploadResult(fileName = name, success = false, error = "不支持的文件类型"))
-                    }
-                }
-                                pos = nextB + 2
-                            }
-                        }
-
-                        if (saved) {
-                            call.respondText("""{"success":true,"file":"$lastName"}""", ContentType.Application.Json)
-                        } else {
-                            call.respondText("""{"success":false,"error":"No valid file (supported: .yaml, .zip, .tar.gz, .jpg/.png, .ttf/.otf/.woff/.woff2)"}""",
-                                ContentType.Application.Json, HttpStatusCode.BadRequest)
-                        }
-                    } finally {
-                        tmpFile.delete()
-                    }
-                }
+                post("/upload") { routeUpload(call) }
             }
         }.start(wait = false)
 
@@ -296,6 +177,150 @@ class WirelessImportHelper(private val context: Context) {
         Log.i(TAG, "Server stopped")
     }
     /** 从 app assets 读取静态文件并响应，避免把前端源码硬编码进 Kotlin。 */
+
+    /**
+     * multipart 流式上传路由：临时文件 + RandomAccessFile 解析，避免大文件 OOM。
+     *
+     * 正文自 start() 的 post("/upload") lambda 逐字搬出，仅整体缩进减 12 空格。
+     */
+
+    /**
+     * 将 multipart 单个 part 落盘并交给 ImportManager 导入。
+     *
+     * 返回 null 表示该 part 类型不受支持（调用方保持 saved 不变）；true/false 表示
+     * 插件导入成功 / 内容导入的成败，与原 when 首分支里对 saved 的赋值语义逐一对应。
+     * 正文自 routeUpload 的 when 首分支逐字搬出，仅整体缩进减 20 空格。
+     */
+    private suspend fun importUploadPart(
+        name: String,
+        raf: java.io.RandomAccessFile,
+        contentStart: Long,
+        contentLen: Long,
+    ): Boolean? {
+        // 经临时文件传递给 ImportManager，避免大文件 ByteArray OOM
+        val partFile = File.createTempFile("part_", "_$name", context.cacheDir)
+        try {
+            partFile.outputStream().use { out ->
+                raf.channel.transferTo(contentStart, contentLen, out.channel)
+            }
+            when (val result = ImportManager.importFile(
+                context, name, partFile, autoEnable = false
+            )) {
+                is ImportManager.ImportResult.Plugin -> {
+                    PluginManager.loadEnabledPlugins()
+                    _uploadResults.trySend(UploadResult(fileName = name, success = true))
+                    return true
+                }
+                is ImportManager.ImportResult.Content -> {
+                    _uploadResults.trySend(
+                        if (result.success) UploadResult(fileName = name, success = true)
+                        else UploadResult(
+                            fileName = name, success = false,
+                            error = if (result.conflicts.isNotEmpty())
+                                "${result.conflicts.first().fileName} 与已安装内容不同，已取消"
+                            else "保存失败"
+                        )
+                    )
+                    return result.success
+                }
+                else -> {
+                    _uploadResults.trySend(
+                        UploadResult(fileName = name, success = false, error = "不支持的文件类型")
+                    )
+                    return null
+                }
+            }
+        } finally {
+            partFile.delete()
+        }
+    }
+
+    private suspend fun routeUpload(call: ApplicationCall) {
+        val rimeDir = File(context.filesDir, "rime")
+        rimeDir.mkdirs()
+        val tmpFile = File.createTempFile("upload_", ".tmp", rimeDir)
+        var lastName = ""
+
+        try {
+            // 1. 流式写入临时文件（不占堆内存）
+            val ch = call.receiveChannel()
+            java.io.FileOutputStream(tmpFile).use { fos ->
+                val buf = ByteArray(8192)
+                while (!ch.isClosedForRead) {
+                    val n = ch.readAvailable(buf, 0, buf.size)
+                    if (n <= 0) break
+                    fos.write(buf, 0, n)
+                }
+            }
+
+            // 2. 从临时文件解析 multipart（RandomAccessFile 流式读取）
+            val ctHeader = call.request.headers["Content-Type"] ?: ""
+            val boundary = ctHeader.split("boundary=").getOrNull(1)?.trim()
+            if (boundary.isNullOrEmpty()) {
+                call.respondText("""{"success":false,"error":"No boundary"}""",
+                    ContentType.Application.Json, HttpStatusCode.BadRequest)
+                return
+            }
+            val boundaryBytes = ("\r\n--$boundary").toByteArray()
+            val firstBoundary = ("--$boundary").toByteArray()
+            val headerEndMarker = "\r\n\r\n".toByteArray()
+
+            var saved = false
+            java.io.RandomAccessFile(tmpFile, "r").use { raf ->
+                var pos = findBytes(raf, firstBoundary, 0)
+                if (pos < 0) return@use
+
+                while (true) {
+                    val partStart = pos + firstBoundary.size
+                    val nextB = findBytes(raf, boundaryBytes, partStart)
+                    if (nextB < 0) break
+                    val partEnd = nextB
+
+                    // 解析 part header
+                    raf.seek(partStart.toLong())
+                    val hdr = ByteArray(4096)
+                    val hdrLen = readUntil(raf, hdr, headerEndMarker)
+                    if (hdrLen < 0) { pos = nextB + 2; continue }
+
+                    val headerStr = hdr.decodeToString(0, hdrLen)
+                    val fn = Regex("""filename="([^"]*)"""").find(headerStr)
+                    val name = fn?.groupValues?.getOrNull(1)
+                    if (name.isNullOrEmpty() || name == "blob") { pos = nextB + 2; continue }
+
+                    lastName = name
+                    val contentStart = raf.filePointer
+                    val contentLen = partEnd - contentStart
+
+                    when {
+                        ImportManager.isPluginFile(name) ||
+                        name.endsWith(".zip", ignoreCase = true) ||
+                        name.endsWith(".tar.gz", ignoreCase = true) ||
+                        name.endsWith(".tgz", ignoreCase = true) ||
+                        name.endsWith(".yaml") || name.endsWith(".schema.yaml") || name.endsWith(".dict.yaml") ||
+                        name.endsWith(".jpg", ignoreCase = true) || name.endsWith(".jpeg", ignoreCase = true) ||
+                        name.endsWith(".png", ignoreCase = true) ||
+                        name.endsWith(".ttf", ignoreCase = true) || name.endsWith(".otf", ignoreCase = true) ||
+                        name.endsWith(".woff", ignoreCase = true) || name.endsWith(".woff2", ignoreCase = true) -> {
+                            saved = importUploadPart(name, raf, contentStart, contentLen) ?: saved
+                        }
+                        else -> {
+                            _uploadResults.trySend(UploadResult(fileName = name, success = false, error = "不支持的文件类型"))
+                        }
+                    }
+                    pos = nextB + 2
+                }
+            }
+
+            if (saved) {
+                call.respondText("""{"success":true,"file":"$lastName"}""", ContentType.Application.Json)
+            } else {
+                call.respondText("""{"success":false,"error":"No valid file (supported: .yaml, .zip, .tar.gz, .jpg/.png, .ttf/.otf/.woff/.woff2)"}""",
+                    ContentType.Application.Json, HttpStatusCode.BadRequest)
+            }
+        } finally {
+            tmpFile.delete()
+        }
+    }
     private suspend fun serveAsset(call: ApplicationCall, assetPath: String) {
         val mime = when {
             assetPath.endsWith(".html") -> ContentType.Text.Html
@@ -331,7 +356,8 @@ class WirelessImportHelper(private val context: Context) {
     }
 
     /** 递归构建数据目录树。 */
-    private fun buildNode(file: File): FileNode {        if (!file.isDirectory) {
+private fun buildNode(file: File): FileNode {
+        if (!file.isDirectory) {
             return FileNode(
                 name = file.name,
                 path = file.path,

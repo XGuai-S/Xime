@@ -13,17 +13,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,26 +76,7 @@ fun ClipboardSyncSettingsContent(
     // 切换服务走单选对话框（插件多时页面长度恒定，不随插件数量变长）
     var showServicePicker by remember { mutableStateOf(false) }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            TopAppBar(
-                title = { Text("剪贴板同步") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                ),
-            )
-        }
-    ) { padding ->
+    SettingsScreenScaffold(title = "剪贴板同步", onBack = onBack) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -182,7 +158,7 @@ fun ClipboardSyncSettingsContent(
                         append(plugin.description)
                         if (!capabilities?.protocols.isNullOrEmpty()) {
                             append("\n同步协议: ")
-                            append(capabilities?.protocols?.joinToString("、"))
+                            append(capabilities.protocols.joinToString("、"))
                         }
                         if (capabilities?.attachments != true) {
                             append("\n该插件不支持图片同步（仅文本）")
@@ -269,7 +245,7 @@ private fun CurrentServiceItem(
                         append(ability)
                     } else {
                         append("同步协议: ")
-                        append(capabilities?.protocols?.joinToString("、"))
+                        append(capabilities.protocols.joinToString("、"))
                         append(" · ")
                         append(ability)
                     }

@@ -59,7 +59,17 @@ elseif(EXISTS "${T9_PLUGIN_LINK}")
   file(REMOVE_RECURSE "${T9_PLUGIN_LINK}")
 endif()
 file(CREATE_LINK "../../librime-t9"
-     "${T9_PLUGIN_LINK}" SYMBOLIC)
+     "${T9_PLUGIN_LINK}" SYMBOLIC RESULT T9_LINK_RESULT)
+if(NOT T9_LINK_RESULT STREQUAL "0")
+  # Windows 未开启开发者模式时，普通用户没有创建符号链接的权限。
+  # 回退为拷贝（与上面 librime-octagram 等插件的同步方式一致）。
+  # 注意：不要用目录联接（junction）替代——junction 会被本文件上面的
+  # file(REMOVE_RECURSE) 以及 Gradle 侧 syncT9Plugin 的递归删除穿透，
+  # 从而删掉权威源码 jni/librime-t9 的内容。
+  message(STATUS "librime-t9 symlink unavailable (${T9_LINK_RESULT}), using copy")
+  file(COPY "${CMAKE_SOURCE_DIR}/librime-t9/"
+       DESTINATION "${T9_PLUGIN_LINK}")
+endif()
 
 # librime-lua 需要特殊命名 lua
 file(COPY "${CMAKE_SOURCE_DIR}/librime-lua/"

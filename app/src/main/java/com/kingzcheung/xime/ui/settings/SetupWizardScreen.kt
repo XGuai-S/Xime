@@ -643,8 +643,17 @@ private fun SwitchToImeStep(onCompleted: () -> Unit) {
 
     Button(
         onClick = {
+            // 同设置页：部分 ROM 直接调用会抛异常，包住并回退到系统输入法设置
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showInputMethodPicker()
+            val shown = runCatching {
+                imm?.showInputMethodPicker()
+                imm != null
+            }.getOrDefault(false)
+            if (!shown) {
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+                }
+            }
         },
         modifier = Modifier.wizardButton()
     ) {

@@ -1,4 +1,4 @@
-package com.kingzcheung.xime.keyboard
+﻿package com.kingzcheung.xime.keyboard
 
 import android.view.KeyEvent
 
@@ -124,6 +124,10 @@ object KeyActionRegistry {
             c.service.dispatchKey("ime_switch")
         }
         register("delete", ActionDomain.CROSS, GestureAction.DELETE) { c, _ -> c.service.dispatchKey("delete") }
+        // 单次语义与 delete 相同；「按住持续」由按键手势层重复触发本动作实现
+        register("repeat_delete", ActionDomain.CROSS, GestureAction.REPEAT_DELETE) { c, _ ->
+            c.service.dispatchKey("delete")
+        }
 
         register("enter", ActionDomain.SERVICE, GestureAction.ENTER) { c, _ -> c.service.dispatchKey("enter") }
         register("newline", ActionDomain.SERVICE, GestureAction.NEWLINE) { c, _ -> c.service.dispatchKey("newline") }
@@ -135,11 +139,22 @@ object KeyActionRegistry {
         register("clear_all", ActionDomain.SERVICE, GestureAction.CLEAR_ALL) { c, _ -> c.service.dispatchKey("clear_all") }
         register("undo_clear", ActionDomain.SERVICE, GestureAction.UNDO_CLEAR) { c, _ -> c.service.dispatchKey("undo_clear") }
 
+        // 光标左右移动（空格键左右滑等）：value 为步数，缺省 1 步
+        register("cursor_left", ActionDomain.SERVICE, GestureAction.CURSOR_LEFT) { c, v ->
+            c.service.moveCursor(-cursorSteps(v))
+        }
+        register("cursor_right", ActionDomain.SERVICE, GestureAction.CURSOR_RIGHT) { c, v ->
+            c.service.moveCursor(cursorSteps(v))
+        }
+
         // 内置命令：保持与旧命令执行完全一致的语义
         for (name in listOf("clear_composition", "show_ime_picker")) {
             registerCommand(Handler(name, ActionDomain.SERVICE, null) { c, v -> c.service.executeCommand(v) })
         }
     }
+
+    /** 光标移动步数：value 缺省或非法时为 1 步。 */
+    private fun cursorSteps(value: String): Int = value.toIntOrNull()?.coerceIn(1, 50) ?: 1
 
     private fun register(
         id: String,

@@ -14,8 +14,11 @@ import com.kingzcheung.xime.rime.RimeConfigHelper
 import com.kingzcheung.xime.model.ModelRuntime
 import com.kingzcheung.xime.rime.RimeEngine
 import com.kingzcheung.xime.settings.KeysConfigHelper
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.ui.keyboard.AppFonts
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.settings.UnifiedConfigFile
+import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -106,6 +109,20 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 从 xime.yaml 加载配色方案
         KeyboardThemes.initFromConfig(this)
 
+        // 首次启动把用户配置释放到 /storage/emulated/0/Xime/（用户可用系统「文件」App、
+        // 电脑 USB 或第三方编辑器直接打开修改），并把已有的私有配置迁移过去。
+        // 幂等，每次启动调用都安全；异步执行避免阻塞冷启动——释放的内容要么是等价迁移、
+        // 要么是纯注释模板，都不会改变本次启动已解析出的行为。
+        // 内部顺序：先迁移旧目录 → 再生成统一配置 xime.yaml → 最后判定目录就绪状态。
+        // 未授权时整体跳过；授权后由 MainActivity 在回到前台时立即重跑（无需重启应用）。
+        applicationScope.launch {
+            try {
+                UserConfigDir.releaseUserConfig(this@XimeApplication)
+            } catch (t: Throwable) {
+                Log.w(TAG, "release user config dir failed", t)
+            }
+        }
+
         // 从 xime.yaml 的 style 读取默认主题和显示模式
         // color_scheme 可指定 dynamic（Material You 动态配色，仅 Android 12+，
         // 低版本 getThemeById 自动回退到内置配色）
@@ -132,6 +149,13 @@ class XimeApplication : Application(), ImageLoaderFactory {
                 // 首次安装/升级后静默编译词库。ensureDeployment 内部带互斥且 hash 一致时跳过，
                 // 统一负责 deploymentDone/hash 状态，避免与输入法服务的初始化重复触发全量编译。
                 RimeConfigHelper.ensureDeployment(this@XimeApplication)
+
+                // 此时 Rime 工作目录才真正就绪（方案与词库已从 assets 释放进来）。
+                // 必须在这里再同步一次：上面的 releaseUserConfig 与本次引擎初始化是两个
+                // 独立协程，谁先跑完并不确定。若只靠前者，全新安装时镜像目录会建成空的——
+                // 用户授权后打开 `/storage/emulated/0/Xime/` 看不到 `rime/`，
+                // 正好是本功能要消除的那个困惑。
+                RimeUserFileSync.sync(this@XimeApplication)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to pre-initialize Rime engine", e)
             }

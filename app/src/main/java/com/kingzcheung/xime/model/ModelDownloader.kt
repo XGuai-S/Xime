@@ -93,7 +93,7 @@ object ModelDownloader {
             throw IOException("HTTP ${response.code}")
         }
 
-        val body = response.body ?: throw IOException("Response body is null")
+        val body = response.body
         val totalBytes = body.contentLength()
         var downloadedBytes = 0L
 
@@ -132,7 +132,7 @@ object ModelDownloader {
             throw IOException("HTTP ${response.code}")
         }
 
-        val body = response.body ?: throw IOException("Response body is null")
+        val body = response.body
         val totalBytes = body.contentLength()
         var downloadedBytes = 0L
 
@@ -230,7 +230,7 @@ object ModelDownloader {
         return try {
             val request = Request.Builder().head().url(url).build()
             val response = client.newCall(request).execute()
-            response.body?.contentLength() ?: -1
+            response.body.contentLength()
         } catch (e: Exception) {
             -1
         }

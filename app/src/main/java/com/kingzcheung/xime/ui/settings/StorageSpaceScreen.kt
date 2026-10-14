@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.twotone.Archive
 import androidx.compose.material.icons.twotone.CloudDownload
@@ -25,7 +24,6 @@ import androidx.compose.material.icons.twotone.Extension
 import androidx.compose.material.icons.twotone.Folder
 import androidx.compose.material.icons.twotone.Memory
 import androidx.compose.material.icons.twotone.Schedule
-import androidx.compose.material.icons.twotone.Storage
 import androidx.compose.material.icons.twotone.Widgets
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -34,13 +32,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -104,26 +98,7 @@ fun StorageSpaceScreen(
         )
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            TopAppBar(
-                title = { Text("存储空间") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { paddingValues ->
+    SettingsScreenScaffold(title = "存储空间", onBack = onBack) { paddingValues ->
         val list = categories
         LazyColumn(
             modifier = Modifier

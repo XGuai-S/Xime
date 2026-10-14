@@ -5,6 +5,8 @@ import com.kingzcheung.xime.rime.RimeEngine
 import com.kingzcheung.xime.rime.T9InputController
 import com.kingzcheung.xime.rime.buildT9DisplayState
 import com.kingzcheung.xime.settings.SchemaManager
+import com.kingzcheung.xime.settings.KeyboardComboEvaluator
+import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.ui.keyboard.isT9Schema
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
@@ -26,114 +28,44 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         t9PluginInjections: List<T9CandidateInjection> = emptyList(),
     ) {
         val inputText = composition.input
-        val codeInInputBox = SettingsPreferences.getInputTextLocation(service) == SettingsPreferences.INPUT_TEXT_INPUT_BOX
-        val preeditText = composition.preedit
-        val candidatesWithComments = composition.candidates.toList()
+        // 编码是否真的占用输入框（「候选首词显示在输入框」开启时编码让位给候选词）
+        val codeInInputBox = SettingsPreferences.isCodeInInputBox(service)
         val isAsciiMode = composition.isAsciiMode
-        val hasNextPage = composition.hasNextPage
-        val hasPrevPage = composition.hasPrevPage
 
         val pendingEnglish = service.candidateState.value.pendingEnglishText
 
-        val (filteredTexts, filteredComments) = if (isAsciiMode) {
-            val filtered = candidatesWithComments.filterNot { candidate ->
-                candidate.text.any { it.code in 0x4E00..0x9FFF }
-            }
-            filtered.map { it.text } to filtered.map { it.comment }
-        } else {
-            candidatesWithComments.map { it.text } to candidatesWithComments.map { it.comment }
-        }
-
-        val isT9Schema = isT9Schema(service.uiState.value.currentSchemaId)
-        // T9 候选词过滤：根据左侧选择历史过滤不匹配的候选词
-        val (t9FilteredTexts, t9FilteredComments) = if (isT9Schema) {
-            service.keyboardCallbacks?.onFilterT9Candidates?.invoke(filteredTexts, filteredComments)
-                ?: (filteredTexts to filteredComments)
-        } else {
-            filteredTexts to filteredComments
-        }
-        val displayText: String
-        val displayCandidates: List<String>
-        val displayComments: List<String>
-        val isComposing: Boolean
-        var t9CandidateActions: List<CandidateAction> = emptyList()
-        if (isT9Schema) {
-            // T9 编码显示永不回退原始数字 input：preedit 缺失，或含未转换数字
-            //（合成切不出词时引擎把原始输入当编码回退，如全拼+简拼混合态）时，
-            // 保留上一帧字母编码，用户看到的编码必须是字母
-            val rawPreedit = when {
-                preeditText.isNotEmpty() && preeditText.none { it.isDigit() } -> preeditText
-                inputText.isEmpty() -> ""
-                else -> service.candidateState.value.preeditText
-            }
+        val display = computeDisplayState(
+            isAsciiMode = isAsciiMode,
+            candidatesWithComments = composition.candidates,
+            inputText = inputText,
+            preeditText = composition.preedit,
+        )
+        if (display.isT9) {
             FileLogger.d(
                 XimeInputMethodService.TAG,
-                "T9 display: enginePreedit='$preeditText' rawPreedit='$rawPreedit' input='$inputText' partials=${service.t9PartialSegments.size}"
+                "T9 display: enginePreedit='${composition.preedit}' rawPreedit='${display.t9RawPreedit}' input='$inputText' partials=${service.t9PartialSegments.size}"
             )
-            // preedit 转换由 C++ t9_filter 完成，Kotlin 侧直接使用引擎输出的 preedit
-            val display = buildT9DisplayState(
-                service.t9PartialSegments.map { it.text }, rawPreedit, inputText, t9FilteredTexts, t9FilteredComments
-            )
-            displayText = display.displayText
-            // T9 插件候选按引擎锚点插入（transformForT9 已把插件输出顺序折叠为
-            // anchorEngineIndex；编码命中→锚 0→第二候选位，内容命中→跟随对应候选；
-            // 无锚点追加末尾）。引擎段 actions 用平行 index 引用（T9 点击走引擎分支，
-            // 不实际消费 engineIndex，仅用于插件候选分流）
-            val baseCands = display.displayCandidates
-            val baseComments = display.displayComments
-            val byAnchor = t9PluginInjections.groupBy { it.anchorEngineIndex }
-            val mergedCands = ArrayList<String>(baseCands.size + t9PluginInjections.size)
-            val mergedComments = ArrayList<String>(mergedCands.size)
-            val mergedActions = ArrayList<CandidateAction>(mergedCands.size)
-            for ((idx, cand) in baseCands.withIndex()) {
-                byAnchor[idx]?.forEach { inj ->
-                    mergedCands.add(inj.snapshot.text)
-                    mergedComments.add(inj.snapshot.comment)
-                    mergedActions.add(CandidateAction.plugin(inj.snapshot.text))
-                }
-                mergedCands.add(cand)
-                mergedComments.add(baseComments.getOrElse(idx) { "" })
-                mergedActions.add(CandidateAction.engine(idx))
-            }
-            byAnchor[null]?.forEach { inj ->
-                mergedCands.add(inj.snapshot.text)
-                mergedComments.add(inj.snapshot.comment)
-                mergedActions.add(CandidateAction.plugin(inj.snapshot.text))
-            }
-            displayCandidates = mergedCands
-            displayComments = mergedComments
-            isComposing = display.isComposing
-            t9CandidateActions = mergedActions
-        } else {
-            // 非 T9 方案：preeditText 用引擎回显（带音节分隔符，如全拼 ni'hao）供候选栏展示；
-            // inputText 保留原始键入串（无分隔）——空格/切模式等提交路径会把它直接上屏，
-            // 不能混入回显字符。历史上曾整体用 input 规避自装双拼插件的展开编码显示，
-            // 代价是全拼丢失分隔符；现仅显示层恢复 librime 标准回显。
-            displayText = if (preeditText.isNotEmpty()) preeditText else inputText
-            displayCandidates = filteredTexts
-            displayComments = filteredComments
-            isComposing = inputText.isNotEmpty()
         }
+        // T9：插件候选按引擎锚点并入显示态，并生成与候选平行的 actions；
+        // 非 T9：直接沿用显示态，actions 用调用方的插件变换结果。
+        val t9Merged = if (display.isT9) mergeT9PluginInjections(display, t9PluginInjections) else null
+        val shown = t9Merged?.let { display.copy(candidates = it.candidates, comments = it.comments) } ?: display
+        val candidateActions = t9Merged?.actions ?: pluginActions
 
         // 用户开始实际输入时，清除候选栏中残留的 inline suggestions
-        if (displayText.isNotEmpty() || displayCandidates.isNotEmpty()) {
+        if (shown.text.isNotEmpty() || shown.candidates.isNotEmpty()) {
             service.dismissInlineSuggestions()
         }
 
-        service.candidateState.value = service.candidateState.value.copy(
-            // T9 保持合成显示态同源；非 T9 仅显示层用 preedit 回显，inputText 保留原始键入串
-            inputText = if (isT9Schema) displayText else inputText,
-            preeditText = displayText,
-            candidates = displayCandidates,
-            candidateComments = displayComments,
-            isComposing = isComposing,
-            associationCandidates = if ((isAsciiMode || !service.isChineseMode) && pendingEnglish.isEmpty()) emptyList() else service.candidateState.value.associationCandidates,
-            isShowingRecentClipboard = false,
-            hasNextPage = hasNextPage,
-            hasPrevPage = hasPrevPage,
-            // 候选词变换映射（全键盘 pluginActions / T9 平行 actions；防御空）
-            candidateActions = if (isT9Schema) t9CandidateActions else pluginActions,
-            preeditCaretPos = displayCaretOffset(displayText, inputText)
+        writeDisplayState(
+            display = shown,
+            rawInputText = inputText,
+            hasNextPage = composition.hasNextPage,
+            hasPrevPage = composition.hasPrevPage,
+            // 候选词变换映射（全键盘 pluginActions / T9 平行 actions）
+            candidateActions = candidateActions,
+            isAsciiMode = isAsciiMode,
+            pendingEnglish = pendingEnglish,
         )
         if (isAsciiMode != service.uiState.value.isAsciiMode) {
             FileLogger.i(XimeInputMethodService.TAG, "applyComposition: ascii ${service.uiState.value.isAsciiMode}->$isAsciiMode")
@@ -141,29 +73,12 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 展开态时刷新跨页全量候选并重置页码（编码已变化）
         service.refreshExpandedCandidates()
         // composing 快照 → 插件（input_changed 事件；T9 与候选栏同源显示态）
-        service.pluginEvents.dispatchInputChanged(if (isT9Schema) displayText else inputText)
+        service.pluginEvents.dispatchInputChanged(if (shown.isT9) shown.text else inputText)
 
-        if (pendingEnglish.isNotEmpty() && !service.isSecretEditor() && service.supportsEnglishCandidateReplace()) {
-            service.serviceScope.launch {
-                val candidates = service.predictionManager.getEnglishAssociations(pendingEnglish, PredictionManager.MAX_ASSOCIATION_COUNT)
-                withContext(Dispatchers.Main) {
-                    val current = service.candidateState.value
-                    // 在途联想过期校验：pendingEnglish 已变/已清（如点击候选栏"清空"）→
-                    // 丢弃迟到回填，防止"清了又冒出来"与旧联想覆盖新联想的竞态
-                    if (current.pendingEnglishText == pendingEnglish) {
-                        service.candidateState.value = current.copy(associationCandidates = candidates)
-                    }
-                }
-            }
-        }
+        refreshPendingEnglishAssociations(pendingEnglish)
 
-        if (codeInInputBox && !service.uiState.value.toolPanelInputFocused) {
-            val ic = service.currentInputConnection
-            if (isComposing && displayText.isNotEmpty()) {
-                showInputBoxComposition(ic, displayText, preeditCaretOffsetForInputBox(displayText))
-            } else {
-                service.endComposingInputBox()
-            }
+        if (!service.uiState.value.toolPanelInputFocused) {
+            syncInputBoxComposition(codeInInputBox, shown.text, shown.candidates, shown.isComposing)
         }
     }
 
@@ -191,6 +106,40 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
     /** 取刚组装进 candidateState 的显示光标偏移（输入框 composing 光标用）。 */
     private fun preeditCaretOffsetForInputBox(displayText: String): Int {
         return service.candidateState.value.preeditCaretPos.takeIf { displayText.isNotEmpty() } ?: -1
+    }
+
+    /**
+     * 把当前应显示的文本同步进系统输入框 composing 区。
+     *
+     * 两条来源互斥、优先级明确：
+     * - 「候选首词显示在输入框」开启 → 写**第一个候选词**（编码让位，只在候选栏显示）。
+     *   开关开启时绝不写编码，保证 composing 区内容确定——清空/撤回/删除会话要靠
+     *   [SettingsPreferences.isCodeInInputBox] 判断输入框里到底是编码还是候选词。
+     * - 否则「编码显示=显示在输入框」→ 写编码。
+     *
+     * 两者都不满足时清空 composing 区，避免上一帧的编码/候选词残留在正文里。
+     */
+    private fun syncInputBoxComposition(
+        codeInInputBox: Boolean,
+        displayText: String,
+        displayCandidates: List<String>,
+        isComposing: Boolean,
+    ) {
+        val candidateFirst = SettingsPreferences.showCandidateFirstInInputBox(service)
+        if (!codeInInputBox && !candidateFirst) return
+        val candidate = displayCandidates.firstOrNull().orEmpty()
+            .takeIf { candidateFirst && isComposing && it.isNotEmpty() }
+        val text = candidate ?: displayText.takeIf { codeInInputBox && isComposing && it.isNotEmpty() }
+        if (text == null) {
+            service.endComposingInputBox()
+            return
+        }
+        // 候选词不是可编辑编码，光标固定在末尾；编码沿用编辑光标
+        showInputBoxComposition(
+            service.currentInputConnection,
+            text,
+            if (candidate != null) -1 else preeditCaretOffsetForInputBox(displayText),
+        )
     }
 
     /**
@@ -229,80 +178,238 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         return if (disp >= displayText.length) -1 else disp
     }
 
-    internal fun updateUIWithResult(
-        result: com.kingzcheung.xime.rime.RimeProcessResult,
-        pluginActions: List<CandidateAction> = emptyList(),
-    ) {
-        val isAsciiMode = result.isAsciiMode
-        val candidatesWithComments = result.candidates
+    /** 候选栏显示态：由引擎输出（composition / process result）映射而来，两个入口共用。 */
+    private data class DisplayState(
+        val isT9: Boolean,
+        val text: String,
+        val candidates: List<String>,
+        val comments: List<String>,
+        val isComposing: Boolean,
+        /** T9 路径下参与显示决策的 rawPreedit（仅供 [applyComposition] 的诊断日志使用）。 */
+        val t9RawPreedit: String? = null,
+    )
 
-        val pendingEnglish = service.candidateState.value.pendingEnglishText
+    /** T9 插件候选并入后的结果：候选、注释，以及与候选平行的 actions。 */
+    private class MergedT9Candidates(
+        val candidates: List<String>,
+        val comments: List<String>,
+        val actions: List<CandidateAction>,
+    )
 
-        val (filteredTexts, filteredComments) = if (isAsciiMode) {
-            val filtered = candidatesWithComments.filterNot { candidate ->
-                candidate.text.any { it.code in 0x4E00..0x9FFF }
-            }
-            filtered.map { it.text } to filtered.map { it.comment }
-        } else {
-            candidatesWithComments.map { it.text } to candidatesWithComments.map { it.comment }
-        }
+    /**
+     * 引擎输出 → 候选栏显示态（[applyComposition] 与 [updateUIWithResult] 共用）。
+     *
+     * 收敛前这段逻辑（ASCII 汉字过滤、T9 候选过滤、T9/非 T9 显示分支）在两个入口里
+     * 各有一份几乎逐字相同的实现，改一处漏一处就会让「组合输入」与「按键处理结果」
+     * 两条路径的候选栏表现不一致。
+     */
+    private fun computeDisplayState(
+        isAsciiMode: Boolean,
+        candidatesWithComments: Array<com.kingzcheung.xime.rime.RimeCandidate>,
+        inputText: String,
+        preeditText: String,
+    ): DisplayState {
+        val (filteredTexts, filteredComments) = filterCandidatesForDisplay(isAsciiMode, candidatesWithComments)
 
-        // 非 T9 方案（如双拼）使用原始输入文本显示，
-        // 避免显示 rime speller 展开后的编码（如双拼 i → ch）
-        val isT9Schema = isT9Schema(service.uiState.value.currentSchemaId)
-        // T9 候选词过滤：根据左侧选择历史（全拼/简拼）过滤不匹配的候选词
-        val (t9FilteredTexts, t9FilteredComments) = if (isT9Schema) {
+        val isT9 = isT9Schema(service.uiState.value.currentSchemaId)
+        // T9 候选词过滤：根据左侧选择历史过滤不匹配的候选词
+        val (t9FilteredTexts, t9FilteredComments) = if (isT9) {
             service.keyboardCallbacks?.onFilterT9Candidates?.invoke(filteredTexts, filteredComments)
                 ?: (filteredTexts to filteredComments)
         } else {
             filteredTexts to filteredComments
         }
-        val displayText: String
-        val displayCandidates: List<String>
-        val displayComments: List<String>
-        val isComposing: Boolean
-        if (isT9Schema) {
-            // 同 applyComposition：T9 编码显示永不回退原始数字 input，
-            // preedit 缺失或含未转换数字时保留上一帧字母编码
-            val rawPreedit = when {
-                result.preeditText.isNotEmpty() && result.preeditText.none { it.isDigit() } -> result.preeditText
-                result.inputText.isEmpty() -> ""
-                else -> service.candidateState.value.preeditText
-            }
+
+        if (isT9) {
+            // 编码显示规则（永不回退原始数字 input）见 resolveT9RawPreedit
+            val rawPreedit = resolveT9RawPreedit(preeditText, inputText, service.candidateState.value.preeditText)
+            // preedit 转换由 C++ t9_filter 完成，Kotlin 侧直接使用引擎输出的 preedit
             val display = buildT9DisplayState(
-                service.t9PartialSegments.map { it.text }, rawPreedit, result.inputText, t9FilteredTexts, t9FilteredComments
+                service.t9PartialSegments.map { it.text }, rawPreedit, inputText, t9FilteredTexts, t9FilteredComments
             )
-            displayText = display.displayText
-            displayCandidates = display.displayCandidates
-            displayComments = display.displayComments
-            isComposing = display.isComposing
-        } else {
-            // 非 T9 方案：preeditText 用引擎回显（带音节分隔符，如全拼 ni'hao），空则回退 input；
-            // inputText 保留原始键入串供提交路径直接上屏（见 applyComposition 注释）。
-            displayText = if (result.preeditText.isNotEmpty()) result.preeditText else result.inputText
-            displayCandidates = filteredTexts
-            displayComments = filteredComments
-            isComposing = result.inputText.isNotEmpty()
+            return DisplayState(
+                isT9 = true,
+                text = display.displayText,
+                candidates = display.displayCandidates,
+                comments = display.displayComments,
+                isComposing = display.isComposing,
+                t9RawPreedit = rawPreedit,
+            )
         }
+        // 非 T9 方案：preeditText 用引擎回显（带音节分隔符，如全拼 ni'hao）供候选栏展示；
+        // inputText 保留原始键入串（无分隔）——空格/切模式等提交路径会把它直接上屏，
+        // 不能混入回显字符。历史上曾整体用 input 规避自装双拼插件的展开编码显示，
+        // 代价是全拼丢失分隔符；现仅显示层恢复 librime 标准回显。
+        return DisplayState(
+            isT9 = false,
+            text = resolveDisplayText(preeditText, inputText),
+            candidates = filteredTexts,
+            comments = filteredComments,
+            isComposing = inputText.isNotEmpty(),
+        )
+    }
+
+    /**
+     * T9 插件候选按引擎锚点插入（transformForT9 已把插件输出顺序折叠为
+     * anchorEngineIndex；编码命中→锚 0→第二候选位，内容命中→跟随对应候选；
+     * 无锚点追加末尾）。引擎段 actions 用平行 index 引用（T9 点击走引擎分支，
+     * 不实际消费 engineIndex，仅用于插件候选分流）。
+     */
+    private fun mergeT9PluginInjections(
+        display: DisplayState,
+        injections: List<T9CandidateInjection>,
+    ): MergedT9Candidates {
+        val baseCands = display.candidates
+        val baseComments = display.comments
+        val byAnchor = injections.groupBy { it.anchorEngineIndex }
+        val mergedCands = ArrayList<String>(baseCands.size + injections.size)
+        val mergedComments = ArrayList<String>(mergedCands.size)
+        val mergedActions = ArrayList<CandidateAction>(mergedCands.size)
+        for ((idx, cand) in baseCands.withIndex()) {
+            byAnchor[idx]?.forEach { inj ->
+                mergedCands.add(inj.snapshot.text)
+                mergedComments.add(inj.snapshot.comment)
+                mergedActions.add(CandidateAction.plugin(inj.snapshot.text))
+            }
+            mergedCands.add(cand)
+            mergedComments.add(baseComments.getOrElse(idx) { "" })
+            mergedActions.add(CandidateAction.engine(idx))
+        }
+        byAnchor[null]?.forEach { inj ->
+            mergedCands.add(inj.snapshot.text)
+            mergedComments.add(inj.snapshot.comment)
+            mergedActions.add(CandidateAction.plugin(inj.snapshot.text))
+        }
+        return MergedT9Candidates(mergedCands, mergedComments, mergedActions)
+    }
+
+    /**
+     * 把显示态写入 candidateState（两个入口共用）。
+     *
+     * 两处差异只由参数表达：候选栏页信息来自各自的输入对象；候选动作由调用方决定
+     * （T9 用与候选平行的 actions，非 T9 用插件变换 actions）。
+     */
+    private fun writeDisplayState(
+        display: DisplayState,
+        rawInputText: String,
+        hasNextPage: Boolean,
+        hasPrevPage: Boolean,
+        candidateActions: List<CandidateAction>,
+        isAsciiMode: Boolean,
+        pendingEnglish: String,
+    ) {
+        // 组合键：输入码完整命中时，候选栏直接给出求值后的结果（日期/节气/命令），
+        // 覆盖引擎候选。T9 不接入（其输入是数字码，与组合键编码空间不同）。
+        // 防御：组合键涉及用户可改的配置与日期格式化，任何异常都只能降级成「不干预」，
+        // 绝不能让输入法进程崩掉（真机曾因正则兼容性在此处崩成 ExceptionInInitializerError）。
+        val combo = if (display.isT9) null else runCatching {
+            KeysConfigHelper.matchCombo(rawInputText)
+        }.getOrNull()
+        if (combo != null) {
+            val evaluated = runCatching {
+                combo.items.map { item ->
+                    if (item.isCommand) {
+                        item.label.orEmpty().ifEmpty { item.command.orEmpty() } to
+                            CandidateAction.command(item.command.orEmpty())
+                    } else {
+                        val text = KeyboardComboEvaluator.evaluate(item.template.orEmpty())
+                        text to CandidateAction.combo(text)
+                    }
+                }.filter { (label, _) -> label.isNotEmpty() }
+            }.getOrDefault(emptyList())
+            if (evaluated.isEmpty()) return
+            service.candidateState.value = service.candidateState.value.copy(
+                inputText = rawInputText,
+                preeditText = rawInputText,
+                candidates = evaluated.map { it.first },
+                candidateComments = evaluated.map { "组合" },
+                candidateActions = evaluated.map { it.second },
+                isComposing = true,
+                associationCandidates = emptyList(),
+                isShowingRecentClipboard = false,
+                hasNextPage = false,
+                hasPrevPage = false,
+                preeditCaretPos = -1,
+            )
+            return
+        }
+        // 用户手动排序（纯引擎路径）：按本地词频表重排候选栏显示顺序。
+        // 重排产生的 engine actions 让点选仍落在正确的引擎候选上
+        // （selectCandidateAsync 走 pendingAction.engineIndex）。
+        val reordered = if (shouldApplyCandidateOrder(display.isT9, isAsciiMode, candidateActions)) {
+            CandidateOrderStore.reorder(
+                code = rawInputText,
+                candidates = display.candidates,
+                comments = display.comments,
+                table = service.candidateOrderTable,
+            )
+        } else {
+            null
+        }
+        service.candidateState.value = service.candidateState.value.copy(
+            // T9 保持合成显示态同源；非 T9 仅显示层用 preedit 回显，inputText 保留原始键入串
+            inputText = if (display.isT9) display.text else rawInputText,
+            preeditText = display.text,
+            candidates = reordered?.candidates ?: display.candidates,
+            candidateComments = reordered?.comments ?: display.comments,
+            isComposing = display.isComposing,
+            associationCandidates = if ((isAsciiMode || !service.isChineseMode) && pendingEnglish.isEmpty()) emptyList() else service.candidateState.value.associationCandidates,
+            isShowingRecentClipboard = false,
+            hasNextPage = hasNextPage,
+            hasPrevPage = hasPrevPage,
+            candidateActions = reordered?.actions ?: candidateActions,
+            preeditCaretPos = displayCaretOffset(display.text, rawInputText)
+        )
+    }
+
+    /**
+     * 回填英文联想候选（两个入口共用）。
+     *
+     * 在途联想过期校验：pendingEnglish 已变/已清（如点击候选栏「清空」）时丢弃迟到回填，
+     * 防止「清了又冒出来」与旧联想覆盖新联想的竞态。
+     */
+    private fun refreshPendingEnglishAssociations(pendingEnglish: String) {
+        if (pendingEnglish.isEmpty() || service.isSecretEditor() || !service.supportsEnglishCandidateReplace()) return
+        service.serviceScope.launch {
+            val candidates = service.predictionManager.getEnglishAssociations(pendingEnglish, PredictionManager.MAX_ASSOCIATION_COUNT)
+            withContext(Dispatchers.Main) {
+                val current = service.candidateState.value
+                if (current.pendingEnglishText == pendingEnglish) {
+                    service.candidateState.value = current.copy(associationCandidates = candidates)
+                }
+            }
+        }
+    }
+
+    internal fun updateUIWithResult(
+        result: com.kingzcheung.xime.rime.RimeProcessResult,
+        pluginActions: List<CandidateAction> = emptyList(),
+    ) {
+        val isAsciiMode = result.isAsciiMode
+
+        val pendingEnglish = service.candidateState.value.pendingEnglishText
+
+        val display = computeDisplayState(
+            isAsciiMode = isAsciiMode,
+            candidatesWithComments = result.candidates,
+            inputText = result.inputText,
+            preeditText = result.preeditText,
+        )
 
         // 用户开始实际输入时，清除候选栏中残留的 inline suggestions
-        if (displayText.isNotEmpty() || displayCandidates.isNotEmpty()) {
+        if (display.text.isNotEmpty() || display.candidates.isNotEmpty()) {
             service.dismissInlineSuggestions()
         }
 
-        service.candidateState.value = service.candidateState.value.copy(
-            inputText = if (isT9Schema) displayText else result.inputText,
-            preeditText = displayText,
-            candidates = displayCandidates,
-            candidateComments = displayComments,
-            isComposing = isComposing,
-            associationCandidates = if ((isAsciiMode || !service.isChineseMode) && pendingEnglish.isEmpty()) emptyList() else service.candidateState.value.associationCandidates,
-            isShowingRecentClipboard = false,
+        writeDisplayState(
+            display = display,
+            rawInputText = result.inputText,
             hasNextPage = result.hasNextPage,
             hasPrevPage = result.hasPrevPage,
             // 候选词变换映射（T9 不接入变换，防御清空；ascii 时调用方不产生 actions）
-            candidateActions = if (isT9Schema) emptyList() else pluginActions,
-            preeditCaretPos = displayCaretOffset(displayText, result.inputText)
+            candidateActions = if (display.isT9) emptyList() else pluginActions,
+            isAsciiMode = isAsciiMode,
+            pendingEnglish = pendingEnglish,
         )
         service.uiState.value = service.uiState.value.copy(isAsciiMode = isAsciiMode)
         // 展开态时刷新跨页全量候选并重置页码（编码已变化）
@@ -310,29 +417,13 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 候选展开页：编码删空（候选与联想均空）时自动收起，不留空页
         service.maybeCollapseCandidatePage()
         // composing 快照 → 插件（input_changed 事件；空编码表示本轮输入结束）
-        service.pluginEvents.dispatchInputChanged(if (isT9Schema) displayText else result.inputText)
+        service.pluginEvents.dispatchInputChanged(if (display.isT9) display.text else result.inputText)
 
-        if (pendingEnglish.isNotEmpty() && !service.isSecretEditor() && service.supportsEnglishCandidateReplace()) {
-            service.serviceScope.launch {
-                val candidates = service.predictionManager.getEnglishAssociations(pendingEnglish, PredictionManager.MAX_ASSOCIATION_COUNT)
-                withContext(Dispatchers.Main) {
-                    val current = service.candidateState.value
-                    // 在途联想过期校验：pendingEnglish 已变/已清 → 丢弃迟到回填
-                    if (current.pendingEnglishText == pendingEnglish) {
-                        service.candidateState.value = current.copy(associationCandidates = candidates)
-                    }
-                }
-            }
-        }
+        refreshPendingEnglishAssociations(pendingEnglish)
 
-        if (SettingsPreferences.getInputTextLocation(service) == SettingsPreferences.INPUT_TEXT_INPUT_BOX) {
-            val ic = service.currentInputConnection
-            if (isComposing && displayText.isNotEmpty()) {
-                showInputBoxComposition(ic, displayText, preeditCaretOffsetForInputBox(displayText))
-            } else {
-                service.endComposingInputBox()
-            }
-        }
+        syncInputBoxComposition(
+            SettingsPreferences.isCodeInInputBox(service), display.text, display.candidates, display.isComposing
+        )
     }
 
     internal fun updateSchemaName() {

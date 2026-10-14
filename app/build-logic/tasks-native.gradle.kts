@@ -376,9 +376,26 @@ val syncT9Plugin by tasks.registering {
         if (Files.isSymbolicLink(link)) {
             Files.delete(link)
         } else if (mirror.exists()) {
-            mirror.deleteRecursively()
+            // 只删链接本身，绝不无条件递归删除：若 mirror 是目录联接（junction），
+            // deleteRecursively 会穿透链接删空权威源码 jni/librime-t9 的内容。
+            try {
+                Files.delete(link)
+            } catch (_: java.nio.file.DirectoryNotEmptyException) {
+                // 真实目录（拷贝副本）：递归删除只影响副本自身
+                mirror.deleteRecursively()
+            }
         }
-        Files.createSymbolicLink(link, expectedTarget)
+        try {
+            Files.createSymbolicLink(link, expectedTarget)
+        } catch (_: java.nio.file.FileSystemException) {
+            // Windows 未开启开发者模式时普通用户无符号链接权限，退化为拷贝，
+            // 与 Rime.cmake 的回退保持一致（拷贝是真实目录，可安全递归删除）。
+            mirror.mkdirs()
+            copy {
+                from(authoritative)
+                into(mirror)
+            }
+        }
     }
 }
 

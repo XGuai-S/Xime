@@ -1293,6 +1293,34 @@ public:
         initialized_ = false;
     }
 
+    /**
+     * 只结束当前输入会话，保留已初始化的 librime 引擎。
+     *
+     * 与 [destroy] 的区别：**不调 rime->finalize()**。
+     * 输入法服务切走（切到别的输入法）时只该结束会话；若连引擎一起 finalize，
+     * 切回来服务重建会再次 startup → rime->initialize()，而 librime 在同一进程内
+     * “finalize 后再 initialize”并不保证可重入，真机表现为切回本输入法闪退。
+     */
+    void endSession()
+    {
+        if (rime && session_id_)
+        {
+            rime->destroy_session(session_id_);
+            session_id_ = 0;
+        }
+    }
+
+    /**
+     * 把 T9 数字词典的 WAL 落盘为 .ldb。
+     *
+     * 原先只在进程退出（destroy）时做；现在服务切走只 endSession、不再 finalize 引擎，
+     * 若不在这里一并落盘，切输入法时刚学到的自造词可能还在 WAL 里未持久化。
+     */
+    void compactT9UserDict()
+    {
+        rime::T9DigitUserDict::CompactDb();
+    }
+
     // 读取方案配置中的字符串项（schema + custom.yaml patch 合并后的最终值）
     std::string getSchemaString(const char *schema_id, const char *key)
     {
@@ -2501,6 +2529,19 @@ extern "C"
         // Compact T9 数字词典（flush WAL 为 .ldb），确保进程退出时数据持久化。
         rime::T9DigitUserDict::CompactDb();
         Rime::Instance().destroy();
+    }
+
+    // 只结束当前会话，保留 librime 引擎（输入法服务切走时调用）。
+    // 详见 Rime::endSession 注释：切走就 finalize 会让切回来时的 initialize 不可靠。
+    JNIEXPORT void JNICALL
+    Java_com_kingzcheung_xime_rime_RimeEngine_nativeEndSession(
+        JNIEnv *env,
+        jobject thiz)
+    {
+        LOGI("Ending Rime session (engine kept alive)");
+        // 切走前把 T9 自造词 WAL 落盘（原先只在 destroy 里做）
+        Rime::Instance().compactT9UserDict();
+        Rime::Instance().endSession();
     }
 
     // 部署

@@ -2,11 +2,8 @@ package com.kingzcheung.xime.service
 
 import android.app.Service
 import android.content.Intent
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
-import com.kingzcheung.xime.association.AssociationCandidate
 import com.kingzcheung.xime.association.NativeOnnxEngine
 import com.kingzcheung.xime.handwriting.HandwritingInference
 import com.kingzcheung.xime.handwriting.HandwritingNativeEngine

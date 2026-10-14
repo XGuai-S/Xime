@@ -6,6 +6,12 @@
 # Keep utility classes used by Application and services
 -keep class com.kingzcheung.xime.util.** { *; }
 
+# 说明（勿删）：com.kingzcheung.xime.settings.** 与 ui.settings.** **不需要**显式 keep。
+# 它们全部经 Kotlin 直接调用/Compose 静态引用可达，R8 不会裁掉；而本文件开局
+# 已 `-dontobfuscate`，符号名也不会被改写。日志开关（SettingsPreferences /
+# LogSettingsContent）与配置文件目录直达路由（user_config_browser）均属此类。
+# 仅当改用反射/字符串查找访问这些类时，才需要在此补 keep 规则。
+
 -dontwarn com.sun.nio.file.**
 -dontwarn kotlin.Cloneable$DefaultImpls
 

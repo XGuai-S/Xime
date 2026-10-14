@@ -3,7 +3,6 @@ package com.kingzcheung.xime.ui.settings
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,7 +39,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.UploadResult
 import com.kingzcheung.xime.settings.WirelessImportHelper
 import kotlinx.coroutines.Dispatchers

@@ -10,6 +10,8 @@ data class KeyboardCallbacks(
     val onKeyPressDown: ((String) -> Unit)? = null,
     val onKeyRelease: ((String) -> Unit)? = null,
     val onCandidateSelect: (Int) -> Unit,
+    /** 当前候选数量；用函数读取以避免键盘回调捕获过期候选状态。 */
+    val candidateCount: () -> Int = { 0 },
     // 长按候选删除自造词：index 为候选栏显示索引（候选栏→服务层透传）
     val onCandidateDelete: ((Int) -> Unit)? = null,
     /**
@@ -147,4 +149,30 @@ data class KeyboardCallbacks(
      * 手写活动区固化（停顿/点选确认）后触发联想推理（基于已上屏文本）。
      */
     val onHandwritingFinalize: (() -> Unit)? = null,
+    /**
+     * 数字键盘「大写金额模式」：把光标前的 [expected] 替换为 [replacement]。
+     *
+     * [expected] 为空表示首次上屏（直接提交，不删任何东西）。
+     * 返回是否成功：光标前文本与 [expected] 不一致（用户移动过光标、或退格过）时返回 false，
+     * 调用方应重置本地累积状态——否则后续按键会去替换一段已经不存在的文本。
+     *
+     * 用于「边输边自动补位值」：每按一个数字，整串大写金额都要重写一次，
+     * 因此必须能安全地回删上一次的结果再重提。需在主线程调用。
+     */
+    val onReplaceCommittedText: ((expected: String, replacement: String) -> Boolean)? = null,
+    /**
+     * 数字键盘「大写金额模式」的候选栏回显：算式 [expression] 与对应的大写金额 [amount]。
+     *
+     * 两者都为空表示清除回显（退出模式、或退格到没有金额）。
+     *
+     * 金额已随按键实时上屏，候选栏回显运算过程并把两条候选（纯金额 / 算式）交给
+     * 候选栏点选，由服务层分辨处理。需在主线程调用。
+     */
+    val onCapitalAmountDisplay: ((expression: String, amount: String) -> Unit)? = null,
+    /**
+     * 候选排序面板换位后保存词频（写全序）：编码 [code] 下的候选按 [ordered] 全序
+     * 并入本地词频表并写盘，随后服务层立即按新表重排当前候选。
+     * 由候选排序面板在每次拖拽换位后调用。需在主线程调用。
+     */
+    val onCandidateReorderSave: ((code: String, ordered: List<String>) -> Unit)? = null,
 )

@@ -14,12 +14,19 @@ object SettingsPreferences {
     private const val KEY_BUILTIN_SCHEMAS_MERGED = "builtin_schemas_merged"
     private const val KEY_DEPLOYMENT_HASH = "deployment_hash"
     private const val KEY_RIME_ASSETS_VERSION = "rime_assets_version"
+    /** 用户已就哪一份内置基线（内容指纹）对「是否覆盖 xime.yaml」做过决定；空表示从未处理。 */
+    private const val KEY_CONFIG_BASELINE = "config_baseline"
     private const val KEY_SETUP_COMPLETED = "setup_completed"
     private const val KEY_DARK_MODE = "dark_mode"
+    /** 日志级别（设置 → 数据与同步 → 日志）。缺省表示「未在界面设置过」，由 xime.yaml 决定。 */
+    private const val KEY_LOG_LEVEL = "log_level"
+    /** 旧键：布尔型日志开关，仅保留迁移读取。 */
     private const val KEY_VERBOSE_LOGGING = "verbose_logging"
     private const val KEY_PLUGIN_DEV_MODE = "plugin_dev_mode"
     
     private const val KEY_SOUND_ENABLED = "sound_enabled"
+    /** 按键按压气泡开关（键帽上方弹出的按键预览）。默认开，与历史行为一致。 */
+    const val KEY_PRESS_BUBBLE_ENABLED = "press_bubble_enabled"
     private const val KEY_SOUND_VOLUME = "sound_volume"
     private const val KEY_VIBRATION_ENABLED = "vibration_enabled"
     private const val KEY_VIBRATION_INTENSITY = "vibration_intensity"
@@ -106,6 +113,7 @@ object SettingsPreferences {
     private const val KEY_INSTALLED_MARKET_IDS = "installed_market_ids"
     private const val KEY_COMPACT_MODE = "compact_mode"
     private const val KEY_SHOW_CANDIDATE_COMMENTS = "show_candidate_comments"
+    private const val KEY_CANDIDATE_FIRST_IN_INPUT_BOX = "candidate_first_in_input_box"
     private const val KEY_INPUT_TEXT_LOCATION = "input_text_location"
     private const val KEY_PAGE_SIZE = "page_size"
     private const val KEY_CANDIDATE_TEXT_SIZE = "candidate_text_size"
@@ -128,6 +136,43 @@ object SettingsPreferences {
     fun setShowCandidateComments(context: Context, show: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_SHOW_CANDIDATE_COMMENTS, show).apply()
     }
+
+    /**
+     * 候选首词显示在输入框：开启后系统输入框的 composing 区显示**第一个候选词**，
+     * 便于在正文里预览将要上屏的词。
+     *
+     * 开启时编码让位：输入框被候选词占用，编码只在候选栏显示（见 [isCodeInInputBox]）。
+     * 默认关闭，保持既有行为不变。
+     */
+    fun showCandidateFirstInInputBox(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_CANDIDATE_FIRST_IN_INPUT_BOX, false)
+    }
+
+    fun setShowCandidateFirstInInputBox(context: Context, show: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_CANDIDATE_FIRST_IN_INPUT_BOX, show).apply()
+    }
+
+    /**
+     * 编码串当前是否显示在系统输入框内。
+     *
+     * 「候选首词显示在输入框」开启时输入框被候选词占用、编码让位，因此返回 false。
+     * **所有「输入框里的文本是否与编码同源」的判断都必须用本方法**，不要再用
+     * `getInputTextLocation(..) == INPUT_TEXT_INPUT_BOX`：否则会把候选词当成编码，
+     * 在清空/撤回/删除会话里多删或多记正文。
+     */
+    fun isCodeInInputBox(context: Context): Boolean =
+        getInputTextLocation(context) == INPUT_TEXT_INPUT_BOX && !showCandidateFirstInInputBox(context)
+
+    /**
+     * 系统输入框当前是否承载 composing 区（里面是编码，或候选首词）。
+     *
+     * 两种模式都必须用 `endComposingInputBox()` 清空 composing 区；改用
+     * `deleteSurroundingText` 去删会删到正文。**所有「输入框里有 composing 区」的判断
+     * 都必须用本方法**，不要再用 `getInputTextLocation(..) == INPUT_TEXT_INPUT_BOX`：
+     * 漏判会让 composing 区残留，或按字符数误删正文。
+     */
+    fun isInputBoxComposing(context: Context): Boolean =
+        getInputTextLocation(context) == INPUT_TEXT_INPUT_BOX || showCandidateFirstInInputBox(context)
 
     fun getInputTextLocation(context: Context): String {
         return getPrefs(context).getString(KEY_INPUT_TEXT_LOCATION, INPUT_TEXT_CANDIDATE_BAR) ?: INPUT_TEXT_CANDIDATE_BAR
@@ -228,13 +273,54 @@ object SettingsPreferences {
         getPrefs(context).edit().putInt(KEY_RIME_ASSETS_VERSION, version).apply()
     }
 
-    /** 调试 verbose 日志总开关（仅 Debug 构建生效，Release 恒关闭）。 */
+    /**
+     * 用户已就「是否覆盖用户配置」做过决定的那份内置基线指纹（见
+     * [UnifiedConfigFile.baselineHash]）；null 表示从未处理过。
+     *
+     * 用**内容指纹**而不是 versionCode：本项目的 versionCode 是硬编码常量，每次构建都一样，
+     * 拿它当判据会导致「装了新版本却永远不提示覆盖」。指纹随内置配置内容变化，判据才成立。
+     */
+    fun getConfigBaseline(context: Context): String? {
+        return getPrefs(context).getString(KEY_CONFIG_BASELINE, null)
+    }
+
+    fun setConfigBaseline(context: Context, hash: String) {
+        getPrefs(context).edit().putString(KEY_CONFIG_BASELINE, hash).apply()
+    }
+
+    /**
+     * 日志级别（设置 → 数据与同步 → 日志）。默认 [LogLevel.ERROR]：只记崩溃与错误。
+     *
+     * 返回 null 表示用户**从未在界面上设置过**，此时应由 `xime.yaml` 的
+     * `logging.level` 决定（见 [LogLevelResolver]）。把「未设置」与「显式设为某级」
+     * 区分开，才能既支持界面配置、又支持改配置文件。
+     */
+    fun getLogLevelOverride(context: Context): LogLevel? {
+        val prefs = getPrefs(context)
+        val raw = prefs.getString(KEY_LOG_LEVEL, null) ?: return null
+        return runCatching { LogLevel.valueOf(raw) }.getOrNull()
+    }
+
+    fun setLogLevelOverride(context: Context, level: LogLevel) {
+        getPrefs(context).edit().putString(KEY_LOG_LEVEL, level.name).apply()
+    }
+
+    /** 清除界面覆盖值，回落到 `xime.yaml` 配置。 */
+    fun clearLogLevelOverride(context: Context) {
+        getPrefs(context).edit().remove(KEY_LOG_LEVEL).apply()
+    }
+
+    /** 兼容旧布尔键：读取为 ERROR / OFF 两档。 */
     fun isVerboseLoggingEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_VERBOSE_LOGGING, true)
+        val prefs = getPrefs(context)
+        if (prefs.contains(KEY_LOG_LEVEL)) {
+            return getLogLevelOverride(context) != LogLevel.OFF
+        }
+        return prefs.getBoolean(KEY_VERBOSE_LOGGING, true)
     }
 
     fun setVerboseLoggingEnabled(context: Context, enabled: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_VERBOSE_LOGGING, enabled).apply()
+        setLogLevelOverride(context, if (enabled) LogLevel.ERROR else LogLevel.OFF)
     }
 
     /**
@@ -275,6 +361,19 @@ object SettingsPreferences {
     
     fun setSoundEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_SOUND_ENABLED, enabled).apply()
+    }
+
+    /**
+     * 是否显示按键按压气泡（键帽上方弹出的按键预览）。
+     *
+     * 默认开，与历史行为一致；关掉后键盘不再绘制任何按压气泡，滑动/长按提示气泡不受影响。
+     */
+    fun isPressBubbleEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_PRESS_BUBBLE_ENABLED, true)
+    }
+
+    fun setPressBubbleEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_PRESS_BUBBLE_ENABLED, enabled).apply()
     }
     
     fun getSoundVolume(context: Context): Int {

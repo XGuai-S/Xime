@@ -1,7 +1,6 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
@@ -10,27 +9,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.kingzcheung.xime.handwriting.HW_FADE_OUT_MS
 import com.kingzcheung.xime.handwriting.HandwritingCandidate
 import com.kingzcheung.xime.handwriting.HandwritingEngine
 import com.kingzcheung.xime.handwriting.HandwritingStrokeFx
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
 import com.kingzcheung.xime.handwriting.renderStrokes
-import com.kingzcheung.xime.keyboard.KeyboardDimensions
 import com.kingzcheung.xime.viewmodel.KeyboardUiState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -74,7 +66,7 @@ fun HandwritingLookupKeyboard(
     /** 视觉消失调度：450ms 后 gonePrefix 推进到 target（笔画数据保留，渲染层跳过）。 */
     fun scheduleGone(target: Int) {
         scope.launch {
-            delay(450L)
+            delay(HW_FADE_OUT_MS)
             if (gonePrefix < target) {
                 gonePrefix = target.coerceAtMost(fadingPrefix)
                 dragVersion++

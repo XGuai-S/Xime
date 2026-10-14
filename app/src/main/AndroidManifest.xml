@@ -8,6 +8,19 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      用户配置目录 /storage/emulated/0/Xime/ 的写入权限。
+      - API 30+：需要「所有文件访问」，用户在系统设置里手动授予（设置页提供跳转入口）。
+      - API 28/29：WRITE_EXTERNAL_STORAGE 运行时权限，仅声明到 29。
+      未授权时应用回退私有目录 + 内置文件管理器，功能不缺失。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
     
     <application
         android:name=".XimeApplication"
@@ -87,5 +100,49 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     </application>
+
+    <!-- 「用其他应用打开配置目录」需要在 Android 11+ 看见文件管理器。
+         分两类声明：
+         1. <intent> 按能力发现：声明「能 VIEW 任意类型 / 能打开文档树」的应用都可见，
+            覆盖清单外的第三方管理器，也是 queryIntentActivities 返回结果的前提；
+         2. <package> 按包名探测：MT管理器、MiXplorer 等多数管理器并不声明目录 MIME，
+            只能按包名判断是否安装，不声明就探测不到。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
+        </intent>
+        <package android:name="bin.mt.plus" />
+        <package android:name="bin.mt.plus.canary" />
+        <package android:name="pl.solidexplorer2" />
+        <package android:name="com.estrongs.android.pop" />
+        <package android:name="com.mixplorer" />
+        <package android:name="com.mixplorer.beta" />
+        <package android:name="com.mixplorer.silver" />
+        <package android:name="com.speedsoftware.rootexplorer" />
+        <package android:name="com.speedsoftware.explorer" />
+        <package android:name="com.google.android.apps.nbu.files" />
+        <package android:name="com.google.android.documentsui" />
+        <package android:name="com.android.documentsui" />
+        <package android:name="com.mi.android.globalFileexplorer" />
+        <package android:name="com.huawei.filemanager" />
+        <package android:name="com.coloros.filemanager" />
+        <package android:name="com.vivo.filemanager" />
+        <package android:name="com.oppo.filemanager" />
+        <package android:name="net.micode.fileexplorer" />
+        <package android:name="com.zte.filemanager" />
+        <package android:name="com.sec.android.app.myfiles" />
+        <package android:name="com.lge.filemanager" />
+        <package android:name="com.htc.filemanager" />
+        <package android:name="com.asus.filemanager" />
+        <package android:name="com.motorola.filemanager" />
+        <package android:name="com.sonymobile.explorer" />
+        <package android:name="com.qihoo360.mobilesafe.filemanager" />
+        <package android:name="com.qihoo.filemanager" />
+        <package android:name="com.lionmobi.filemanager" />
+    </queries>
 
 </manifest>

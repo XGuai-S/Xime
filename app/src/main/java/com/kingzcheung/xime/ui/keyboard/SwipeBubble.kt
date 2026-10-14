@@ -1,11 +1,13 @@
 package com.kingzcheung.xime.ui.keyboard
 
 import android.content.res.Configuration
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,6 +25,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kingzcheung.xime.keyboard.KeyboardDimensions
+import com.kingzcheung.xime.settings.SettingsPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -126,8 +129,28 @@ fun rememberSwipeBubbleDrawData(
     keyboardWidth: Float,
 ): BubbleDrawData? {
     val context = LocalContext.current
+    // 设置页与输入法同进程：监听偏好变化，切换开关后无需重启输入法即可生效。
+    var pressBubbleEnabled by remember {
+        mutableStateOf(SettingsPreferences.isPressBubbleEnabled(context))
+    }
+    DisposableEffect(context) {
+        val prefs = SettingsPreferences.getPrefsPublic(context)
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == SettingsPreferences.KEY_PRESS_BUBBLE_ENABLED) {
+                pressBubbleEnabled = SettingsPreferences.isPressBubbleEnabled(context)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     // 点按气泡恒开：非滑动、非点按、非长按时不绘制
     if (!swipeState.isSwiping && !swipeState.isPressed && !swipeState.isLongPress) return null
+
+    // 设置里的「按键气泡」开关：关掉后不再绘制**按压**气泡（键帽预览）。
+    // 只拦纯按压态：滑动/长按气泡属于手势反馈（选拼音、选长按项要靠它看选项），
+    // 与按键预览不是一回事，不受该开关影响。
+    val isPurePress = swipeState.isPressed && !swipeState.isSwiping && !swipeState.isLongPress
+    if (isPurePress && !pressBubbleEnabled) return null
 
     val isLongPressMode = swipeState.isLongPress && swipeState.longPressItems.isNotEmpty()
     val displayText = if (isLongPressMode) null

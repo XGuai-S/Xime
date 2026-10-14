@@ -1,7 +1,6 @@
-package com.kingzcheung.xime.ui.keyboard
+﻿package com.kingzcheung.xime.ui.keyboard
 
 import com.kingzcheung.xime.util.FileLogger
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,7 +27,6 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.Dp
-import com.kingzcheung.xime.keyboard.KeyboardDimensions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -92,18 +90,6 @@ fun CommonSymbolKeyboardLayout(
     val swipeBubble = rememberSwipeBubbleController()
     var keyboardBounds by remember { mutableStateOf(Rect(0f, 0f, 0f, 0f)) }
 
-    fun processSwipeState(state: SwipeState, bounds: Rect) {
-        swipeBubble.update(
-            state,
-            Rect(
-                left = bounds.left - keyboardBounds.left,
-                top = bounds.top - keyboardBounds.top,
-                right = bounds.right - keyboardBounds.left,
-                bottom = bounds.bottom - keyboardBounds.top,
-            )
-        )
-    }
-
     val bubbleData = rememberSwipeBubbleDrawData(
         swipeState = swipeBubble.state,
         keyBounds = swipeBubble.keyBounds,
@@ -141,7 +127,7 @@ fun CommonSymbolKeyboardLayout(
                 shadowShapeRadius = shadowShapeRadius,
                 onKeyPressDown = onKeyPressDown,
                 suppressCursorMove = suppressCursorMove,
-                onSwipeStateChange = { state, bounds -> processSwipeState(state, bounds) },
+                onSwipeStateChange = { state, bounds -> processKeySwipeState(state, bounds, keyboardBounds, swipeBubble) },
                 specialKeyTextColor = specialKeyTextColor,
                 isAsciiMode = localAsciiMode,
                 onToggleAsciiMode = {
@@ -271,7 +257,7 @@ fun CommonSymbolKeyboardLayout(
                                     suppressCursorMove.value = true; onKeyPress("clear_composition")
                                 },
                                 onSwipeStateChange = { state, bounds ->
-                                    processSwipeState(state, bounds)
+                                    processKeySwipeState(state, bounds, keyboardBounds, swipeBubble)
                                 },
                                 shadowEnabled = shadowEnabled,
                                 shadowElevation = shadowElevation,
