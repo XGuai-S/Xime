@@ -26,9 +26,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,6 +41,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kingzcheung.xime.data.RecentUsageStore
+import com.kingzcheung.xime.settings.KeysConfigHelper
+import com.kingzcheung.xime.ui.isTablet
 import com.kingzcheung.xime.data.SymbolCategory
 import com.kingzcheung.xime.data.SymbolData
 import kotlinx.coroutines.launch
@@ -53,12 +55,23 @@ fun SymbolKeyboardLayout(
     textColor: Color,
     accentColor: Color,
     keyBgColor: Color,
+    /** 功能键（返回、删除、分类 tab）的底色/文字色：与数字/常用符号面板的功能键同一套 */
+    specialKeyBgColor: Color = keyBgColor,
+    specialKeyTextColor: Color = textColor,
     bottomPaddingDp: Int = 0,
     modifier: Modifier = Modifier,
     /** 分类 tab 切换与返回按钮的振动钩子（符号点击/删除经 onSelect 由调用方统一振动）。 */
     onHapticFeedback: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val isTablet = isTablet()
+    val kbKey = KeysConfigHelper.getKeyboardKeyConfig()
+    // 键圆角与键盘同档：xime.yaml 的 key.symbol.corner_radius 也能管到这块全量符号面板
+    val keyCornerRadius = keyCornerRadiusFor(kbKey, "symbol", isTablet)
+    // 键距与面板一致：面板是「每键内衬 spacing/2」，这里用等距 gap 表达 ⇒ gap = spacing
+    val (keySpacingX, keySpacingY) = kbKey.spacingFor("symbol")
+    val columnGap = ((keySpacingX ?: 2f) * 2).dp
+    val rowGap = ((keySpacingY ?: 2f) * 2).dp
     // 最近使用（LRU）：惰性排序——面板打开期间点按任何符号只持久化使用记录，
     // 不重排当前 UI（最近使用页位置稳定，便于连续输入同一符号）；面板关闭后
     // 组合状态丢弃，下次打开重新读取持久化结果，即为最新顺序。
@@ -69,12 +82,8 @@ fun SymbolKeyboardLayout(
         listOf(SymbolCategory(name = "最近使用", id = "recentSymbols", symbols = recentSymbols)) +
             SymbolData.categories
     }
-    // 图标按钮容器色：surface 与 primary 的混合色调（带种子色但不过于强烈）
-    val iconButtonContainer = androidx.compose.ui.graphics.lerp(
-        MaterialTheme.colorScheme.surface,
-        MaterialTheme.colorScheme.primary,
-        0.15f
-    )
+    // 图标按钮容器色 = 功能键底色（与面板的返回/删除键同色，不再自造 lerp 色调）
+    val iconButtonContainer = specialKeyBgColor
     val scope = rememberCoroutineScope()
 
     val pagerState = rememberPagerState(
@@ -87,18 +96,22 @@ fun SymbolKeyboardLayout(
     BoxWithConstraints(modifier = modifier) {
         val isWide = maxWidth >= WIDE_CONTAINER_WIDTH
         val symbolColumns = gridColumnCount(maxWidth, targetCellWidth = 50.dp, minColumns = 8, maxColumns = 15)
+        // 外围留白与数字/常用符号面板同一套：平板两侧 16dp + 底部 8dp、
+        // 手机竖屏 4dp、手机横屏（宽容器）沿用面板的 2/50dp 档
+        val outerPadding = panelOuterPadding(isLandscape = isWide && !isTablet, isTablet = isTablet)
 
+    CompositionLocalProvider(LocalKeyCornerRadius provides keyCornerRadius) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundColor)
+            .padding(outerPadding)
     ) {
         // 导航区：返回按钮
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
-                .padding(start = if (isWide) 50.dp else 8.dp, end = if (isWide) 50.dp else 8.dp),
+                .height(50.dp),
             contentAlignment = Alignment.CenterStart
         ) {
             Box(
@@ -126,7 +139,6 @@ fun SymbolKeyboardLayout(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(horizontal = if (isWide) 50.dp else 4.dp)
                 .padding(bottom = 4.dp)
         ) {
             HorizontalPager(
@@ -152,12 +164,12 @@ fun SymbolKeyboardLayout(
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                    verticalArrangement = Arrangement.spacedBy(rowGap)
                 ) {
                     category.symbols.chunked(columns).forEach { rowSymbols ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            horizontalArrangement = Arrangement.spacedBy(columnGap)
                         ) {
                             rowSymbols.forEach { symbol ->
                                 SymbolButton(
@@ -189,16 +201,15 @@ fun SymbolKeyboardLayout(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(44.dp)
-                .padding(horizontal = if (isWide) 50.dp else 4.dp, vertical = 0.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                .height(44.dp),
+            horizontalArrangement = Arrangement.spacedBy(columnGap),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(columnGap)
             ) {
                 displayCategories.forEachIndexed { index, category ->
                     SymbolCategoryTab(
@@ -218,8 +229,8 @@ fun SymbolKeyboardLayout(
             KeyButton(
                 text = "删除",
                 onClick = { onSelect("delete") },
-                backgroundColor = backgroundColor,
-                textColor = textColor,
+                backgroundColor = specialKeyBgColor,
+                textColor = specialKeyTextColor,
                 modifier = Modifier.width(48.dp),
                 fontSize = 12.sp
             )
@@ -227,6 +238,7 @@ fun SymbolKeyboardLayout(
 
         // 底部留空（至少覆盖导航栏 inset 与键盘底部内边距）
         Spacer(modifier = Modifier.height(bottomPaddingDp.dp))
+    }
     }
     }
 }
@@ -244,7 +256,7 @@ private fun SymbolButton(
     Box(
         modifier = modifier
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
             .background(
                 if (isPressed) androidx.compose.ui.graphics.lerp(backgroundColor, Color.Black, 0.2f)
                 else backgroundColor
@@ -279,7 +291,7 @@ private fun SymbolCategoryTab(
     Box(
         modifier = modifier
             .height(30.dp)
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(LocalKeyCornerRadius.current / 2))
             .background(
                 if (isSelected) selectedBackgroundColor
                 else backgroundColor

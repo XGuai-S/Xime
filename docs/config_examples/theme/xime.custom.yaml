@@ -40,7 +40,6 @@ metadata:
 # 2. 手动把图片放入 rime/themes/（如通过 USB 或文件管理器），再在 xime.custom.yaml 中引用它。
 #    内置主题的同名文件会被用户目录中的文件覆盖。
 
-color_schemes:
 style:
   color_scheme:
     light: zine_light

@@ -6,6 +6,8 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.kingzcheung.xime.correction.CorrectionPriors
+import com.kingzcheung.xime.correction.KeyTapLogger
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.PluginConfigStoreImpl
 import com.kingzcheung.xime.util.FileLogger
@@ -53,6 +55,18 @@ class XimeApplication : Application(), ImageLoaderFactory {
         super.onCreate()
 
         FileLogger.init(this)
+        KeyTapLogger.init(this)
+        KeyTapLogger.enabled = SettingsPreferences.isKeyTapLogEnabled(this)
+        // 邻键误触纠错（librime 插件版）：初始化先验推送器
+        CorrectionPriors.init(this)
+        CorrectionPriors.enabled = SettingsPreferences.isCorrectorEnabled(this)
+        // 启动自检：确认生效 schema 里挂上了 correction_translator（写文件日志）
+        if (CorrectionPriors.enabled) {
+            Thread {
+                runCatching { Thread.sleep(4000) }
+                runCatching { CorrectionPriors.selfCheck(SettingsPreferences.getCurrentSchema(this)) }
+            }.start()
+        }
         AppFonts.initialize(this)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -76,8 +90,14 @@ class XimeApplication : Application(), ImageLoaderFactory {
         PluginManager.wsHostApiFactory = { pluginId ->
             com.kingzcheung.xime.plugin.ws.WsHostApiImpl(this, pluginId)
         }
+        // 大文件句柄仓库（流式上传/下载用）：与 http 能力共享同一实例，
+        // backup.push 登记的备份包句柄才能被 host.http.upload 解析到。
+        val blobStore = com.kingzcheung.xime.plugin.http.PluginBlobStore(
+            File(cacheDir, "plugin-blobs")
+        )
+        PluginManager.blobStoreFactory = { blobStore }
         PluginManager.httpHostApiFactory = { pluginId ->
-            com.kingzcheung.xime.plugin.http.HttpHostApiImpl(this, pluginId)
+            com.kingzcheung.xime.plugin.http.HttpHostApiImpl(this, pluginId, blobStore)
         }
         PluginManager.sseHostApiFactory = { pluginId ->
             com.kingzcheung.xime.plugin.http.SseHostApiImpl(this, pluginId)

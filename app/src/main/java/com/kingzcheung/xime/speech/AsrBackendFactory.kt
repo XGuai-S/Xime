@@ -9,8 +9,8 @@ import android.content.Context
 object AsrBackendFactory {
     fun create(context: Context): AsrBackend? = AsrSupport.create(context)
 
-    /** 本地引擎显示名。 */
-    fun getLocalName(): String? = AsrSupport.getLocalName()
+    /** 本地引擎显示名（当前生效模型名；未下载任何模型时为 null）。 */
+    fun getLocalName(context: Context): String? = AsrSupport.getLocalName(context)
 
     /** 预热本地模型并保持常驻（打开"本地识别"开关时调用）。 */
     fun warmup(context: Context) = AsrSupport.warmup(context)

@@ -27,7 +27,12 @@ internal object AsrSupport {
         return OfflineAsrBackend(context)
     }
 
-    fun getLocalName(): String? = "本地 Zipformer"
+    /**
+     * 本地引擎显示名：当前生效（已下载）模型的名称；未下载任何模型时为 null
+     * （不默认指定某个模型）。
+     */
+    fun getLocalName(context: Context): String? =
+        AsrModelManager(context.applicationContext).getSelectedModelInfo()?.name
 
     /** 加载本地模型并保持 :asr 服务常驻，直到 [releaseModel]。 */
     fun warmup(context: Context) {

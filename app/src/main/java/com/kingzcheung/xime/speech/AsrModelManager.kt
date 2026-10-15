@@ -14,15 +14,20 @@ import java.io.File
  * 模型推理由自研的 streaming zipformer2 实现（libasr_jni.so）负责。
  * 模型清单与描述来自「扩展商店」远程索引（[ModelManager]，category=asr），
  * 文件角色映射以内置适配注册表（[AsrModelRegistry]）为准；
- * 索引未加载时回退到注册表（内置默认模型 zipformer-zh-int8）。
+ * 索引未加载时回退到注册表清单。
+ *
+ * 选择规则：只在已下载（模型文件齐全）的模型里生效。用户选择记录在偏好里，
+ * 但所选模型不存在或已被删除时自动改用其它已安装模型；未下载任何模型时
+ * 没有生效模型（不默认指定某个模型）。
  */
 class AsrModelManager(private val context: Context) {
 
     companion object {
-        /** 内置默认 ASR 模型（远程索引加载前/失败时的兜底）。 */
-        val DEFAULT_MODEL = AsrModelRegistry.default.toAsrModelInfo()
+        private const val PREFS_NAME = "asr_model"
+        private const val KEY_SELECTED_MODEL = "selected_model"
 
-        private const val DEFAULT_ID = "zipformer-zh-int8"
+        /** 词表文件名（与 [com.kingzcheung.xime.service.AsrInferenceService] 的加载判定一致）。 */
+        private const val TOKENS_FILE = "tokens.txt"
 
         /** 把索引里的 ModelInfo 转换为 ASR 专用模型信息（文件映射按 id 查注册表）。 */
         private fun toAsrModelInfo(info: com.kingzcheung.xime.model.ModelInfo): AsrModelInfo {
@@ -58,6 +63,25 @@ class AsrModelManager(private val context: Context) {
             decoderFile = decoderFile,
             joinerFile = joinerFile
         )
+
+        /** 注册表定义顺序（内置模型优先）；索引新增、注册表未知的模型排在最后。 */
+        private fun registryOrder(id: String): Int =
+            AsrModelRegistry.profiles.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: Int.MAX_VALUE
+
+        /**
+         * 选出生效模型：用户选择且已安装的优先；否则取已安装模型中注册表顺序
+         * 最靠前者（同一份文件在 :asr 进程判断结果一致）；无已安装模型时返回 null。
+         */
+        internal fun pickEffectiveModel(
+            models: List<AsrModelInfo>,
+            selectedId: String?,
+            isInstalled: (String) -> Boolean
+        ): AsrModelInfo? {
+            if (selectedId != null) {
+                models.find { it.id == selectedId && isInstalled(it.id) }?.let { return it }
+            }
+            return models.filter { isInstalled(it.id) }.minByOrNull { registryOrder(it.id) }
+        }
     }
 
     data class AsrModelInfo(
@@ -93,41 +117,60 @@ class AsrModelManager(private val context: Context) {
     /** 所有 ASR 模型 id，用于判断某个 id 是否为已知 ASR 模型。 */
     fun getAsrModelIds(): Set<String> = getAsrModels().map { it.id }.toSet()
 
-    fun isModelReady(): Boolean {
-        val modelDir = getSelectedModelDir()
-        if (!modelDir.exists()) return false
-        val files = modelDir.listFiles()
-        return files != null && files.isNotEmpty()
-    }
+    /** 生效模型是否可用（模型文件齐全）。 */
+    fun isModelReady(): Boolean = getSelectedModelInfo() != null
 
-    /** 指定模型（含未选中模型）的模型目录是否已有文件。 */
+    /**
+     * 按 id 解析模型信息：索引/注册表优先，索引未收录的内置/未知 id 按注册表布局兜底。
+     * 加载端（:asr 进程）以模型目录名调用，避免跨进程读偏好拿到尚未同步的选择。
+     */
+    fun getModelInfo(modelId: String): AsrModelInfo =
+        getAsrModels().find { it.id == modelId }
+            ?: AsrModelRegistry.profileOrDefault(modelId).toAsrModelInfo()
+
+    /**
+     * 指定模型的模型文件是否齐全。归档解包后文件可能位于模型目录的子目录，
+     * 因此用递归查找；与加载时的文件判定保持一致。
+     */
     fun isModelInstalled(modelId: String): Boolean {
-        val dir = ModelStorage.getModelDir(context, modelId)
-        return dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
-    }
-
-    fun getSelectedModelDir(): File {
-        val modelId = getSelectedModelId()
-        val dir = ModelStorage.getModelDir(context, modelId)
-        // 兼容旧版：自动迁移 asr_models/<id>/ 下的模型文件
         ModelStorage.migrateLegacyForModel(context, modelId)
-        return dir
+        val dir = ModelStorage.getModelDir(context, modelId)
+        if (!dir.isDirectory) return false
+        val info = getModelInfo(modelId)
+        return listOf(info.encoderFile, info.decoderFile, info.joinerFile, TOKENS_FILE)
+            .all { name -> findFile(dir, name)?.let { it.exists() && it.length() > 0 } == true }
     }
 
-    fun getSelectedModelId(): String {
-        val sharedPrefs = context.getSharedPreferences("asr_model", Context.MODE_PRIVATE)
-        return sharedPrefs.getString("selected_model", DEFAULT_ID) ?: DEFAULT_ID
+    /** 生效模型目录；未下载任何模型时为 null。 */
+    fun getSelectedModelDir(): File? {
+        val info = getSelectedModelInfo() ?: return null
+        // 兼容旧版：自动迁移 asr_models/<id>/ 下的模型文件
+        ModelStorage.migrateLegacyForModel(context, info.id)
+        return ModelStorage.getModelDir(context, info.id)
     }
 
-    /** 当前选中模型的完整信息（索引优先，兜底内置默认）。 */
+    /** 用户显式选择的模型 id；从未选择过时为 null（不默认指定模型）。 */
+    fun getSelectedModelId(): String? {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return sharedPrefs.getString(KEY_SELECTED_MODEL, null)?.takeIf { it.isNotBlank() }
+    }
+
+    /** 当前生效模型（用户选择优先，否则回退到已安装模型）；未下载任何模型时为 null。 */
     fun getSelectedModelInfo(): AsrModelInfo? {
-        val modelId = getSelectedModelId()
-        return getAsrModels().find { it.id == modelId } ?: DEFAULT_MODEL
+        val models = getAsrModels()
+        val selectedId = getSelectedModelId()
+        pickEffectiveModel(models, selectedId, ::isModelInstalled)?.let { return it }
+        // 索引未加载（如 :asr 进程）时所选模型不在清单内，但文件已就绪：按注册表布局兜底
+        if (selectedId != null && isModelInstalled(selectedId)) {
+            return models.find { it.id == selectedId }
+                ?: AsrModelRegistry.profileOrDefault(selectedId).toAsrModelInfo()
+        }
+        return null
     }
 
     fun setModel(modelId: String) {
-        val sharedPrefs = context.getSharedPreferences("asr_model", Context.MODE_PRIVATE)
-        sharedPrefs.edit().putString("selected_model", modelId).apply()
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        sharedPrefs.edit().putString(KEY_SELECTED_MODEL, modelId).apply()
     }
 
     fun findFile(dir: File, fileName: String): File? {
@@ -142,4 +185,3 @@ class AsrModelManager(private val context: Context) {
         return null
     }
 }
-

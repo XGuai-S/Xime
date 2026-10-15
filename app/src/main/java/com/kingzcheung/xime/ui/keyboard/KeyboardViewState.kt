@@ -61,15 +61,17 @@ enum class AsciiKeyboardContext {
 
     /** 数字面板（无中英切换键，记忆恒等于引擎，对称保留） */
     NUMBER_PANEL,
-
-    /** 符号面板（有中英切换键，默认英文，独立记忆） */
-    SYMBOL_PANEL,
 }
 
-/** 获取视图状态所属的 ascii 上下文；Overlay 取背后键盘，不改变上下文 */
-fun KeyboardViewState.asciiContext(): AsciiKeyboardContext = when (this) {
+/**
+ * 获取视图状态所属的 ascii 上下文；Overlay 取背后键盘。
+ *
+ * 符号面板返回 null：它中英共用一套布局，既不区分中英也不再切换引擎中英态
+ * （旧设计为显示半角段会在进入面板时把引擎切成英文，现已移除）。
+ */
+fun KeyboardViewState.asciiContext(): AsciiKeyboardContext? = when (this) {
     is KeyboardViewState.NumberPanel -> AsciiKeyboardContext.NUMBER_PANEL
-    is KeyboardViewState.CommonSymbolPanel -> AsciiKeyboardContext.SYMBOL_PANEL
+    is KeyboardViewState.CommonSymbolPanel -> null
     is KeyboardViewState.Overlay -> behind.asciiContext()
     else -> AsciiKeyboardContext.MAIN
 }

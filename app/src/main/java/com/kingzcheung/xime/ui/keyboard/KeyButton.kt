@@ -27,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.kingzcheung.xime.correction.KeyTapLogger
 import com.kingzcheung.xime.settings.ButtonLayout
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.util.CharInfo
@@ -45,6 +46,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
@@ -70,6 +72,11 @@ val LocalKeyVisualPadding = staticCompositionLocalOf {
 /** 上滑/下滑提示改画键面角标（上滑=右上角、下滑=底部）。
  *  手机横屏键矮，提示按默认方式画在主字符上下方（offset ±hintOffset）会被键盘顶部裁掉。 */
 val LocalSwipeHintCorner = staticCompositionLocalOf { false }
+
+/** 键面提示放大系数：1f=手机；平板为 1.35f（键盘根层提供）。驱动上滑提示字号/加深/
+ *  角标内边距、字母加粗与 tap 气泡缺省。键组件统一读取本 Local，布局自由自定义时
+ *  任何键（字母/退格/空格等）的提示样式都随设备档一致变化。 */
+val LocalHintExtraScale = staticCompositionLocalOf { 1f }
 
 /** 按键圆角半径，由各布局在根层通过 CompositionLocalProvider 提供。
  *  独立于 shadow.shape_radius，为统一配置化而设。 */
@@ -303,9 +310,10 @@ fun KeyButton(
                                         onSwipeStateChange?.invoke(SwipeState(shouldShowBubble, swipeText, false))
                                     }
                                     
-                                    if (dragOffsetY < swipeUpThreshold && !hasTriggeredSwipeUp && swipeText != null && onSwipe != null) {
+                                    // 触发只看回调绑定，不依赖提示文本（与 SwipeableKeyButton 同规则）
+                                    if (dragOffsetY < swipeUpThreshold && !hasTriggeredSwipeUp && onSwipe != null) {
                                         hasTriggeredSwipeUp = true
-                                        onSwipe(swipeText)
+                                        onSwipe(swipeText ?: "")
                                     }
                                 }
                             } else if (dragOffsetY > 0) {
@@ -317,9 +325,10 @@ fun KeyButton(
                                         onSwipeStateChange?.invoke(SwipeState(shouldShowBubble, swipeDownText, true))
                                     }
                                     
-                                    if (dragOffsetY > swipeDownThreshold && !hasTriggeredSwipeDown && swipeDownText != null && onSwipeDown != null) {
+                                    // 触发只看回调绑定，不依赖提示文本（与 SwipeableKeyButton 同规则）
+                                    if (dragOffsetY > swipeDownThreshold && !hasTriggeredSwipeDown && onSwipeDown != null) {
                                         hasTriggeredSwipeDown = true
-                                        onSwipeDown(swipeDownText)
+                                        onSwipeDown(swipeDownText ?: "")
                                     }
                                 }
                             }
@@ -447,6 +456,10 @@ fun SwipeableKeyButton(
     swipeDownKeyLabel: String? = null,
     /** 上滑文本显示在按键上（气泡则为空，用于 display:bubble） */
     swipeUpKeyLabel: String? = null,
+    /** 左滑键面提示（画在键左缘、垂直居中；空串 = 显式不画，用于 display:bubble） */
+    swipeLeftKeyLabel: String? = null,
+    /** 右滑键面提示（画在键右缘、垂直居中；空串 = 显式不画，用于 display:bubble） */
+    swipeRightKeyLabel: String? = null,
     onSwipe: ((String) -> Unit)? = null,
     onSwipeDown: ((String) -> Unit)? = null,
     /** 左/右滑动作；配置任一后该键横向滑动即接管，自动放弃父层光标手势。 */
@@ -486,6 +499,8 @@ fun SwipeableKeyButton(
     var isSwipeDown by remember { mutableStateOf(false) }
     var buttonBounds by remember { mutableStateOf(Rect(0f, 0f, 0f, 0f)) }
     var dragActivated by remember { mutableStateOf(false) }
+    // 按键坐标日志：记录本次按下的局部坐标（相邻键纠错数据采集，关闭时零开销）
+    var lastPressOffset by remember { mutableStateOf(Offset.Zero) }
     
     val currentText by rememberUpdatedState(text)
     val currentSwipeText by rememberUpdatedState(swipeText)
@@ -660,7 +675,8 @@ fun SwipeableKeyButton(
             .pointerInput(text, currentLongPressItems.isNullOrEmpty()) {
                 if (currentLongPressItems.isNullOrEmpty()) {
                     detectTapGestures(
-                        onPress = {
+                        onPress = { offset ->
+                            lastPressOffset = offset
                             isPressed = true
                             currentOnSwipeStateChange?.invoke(SwipeState(isPressed = true, pressedText = currentPressText), buttonBounds)
                             currentOnPress?.invoke()
@@ -672,7 +688,13 @@ fun SwipeableKeyButton(
                             }
                         },
                         onTap = {
-                            if (!dragActivated && !hasTriggeredSwipeUp && !hasTriggeredSwipeDown) currentOnClick()
+                            if (!dragActivated && !hasTriggeredSwipeUp && !hasTriggeredSwipeDown) {
+                                KeyTapLogger.recordTap(
+                                    currentText, lastPressOffset.x, lastPressOffset.y,
+                                    buttonBounds, density.density
+                                )
+                                currentOnClick()
+                            }
                         }
                     )
                     return@pointerInput
@@ -758,6 +780,7 @@ fun SwipeableKeyButton(
                                 if (localLongPressTriggered) {
                                     val selected = items.getOrNull(selectedIdx)
                                     if (selected != null) {
+                                        KeyTapLogger.recordTap(selected, downX, downY, buttonBounds, density.density)
                                         currentOnLongPressSelect?.invoke(selected)
                                     }
                                 } else if (!dragActivated) {
@@ -765,6 +788,7 @@ fun SwipeableKeyButton(
                                     // 而 dragActivated 由 touch slop（更大）触发。两者之间的位移区间
                                     // （5dp~touchSlop）若被 swipeDetected 吞掉点击，且 drag 未激活无 dragEnd
                                     // 兜底，会造成快速打字漏键（吃键）。5dp 位移只用于取消长按（longPressJob）。
+                                    KeyTapLogger.recordTap(currentText, downX, downY, buttonBounds, density.density)
                                     currentOnClick()
                                 }
                             }
@@ -794,7 +818,10 @@ fun SwipeableKeyButton(
         val contentScale = adaptiveKeyContentScale(maxHeight.value)
         val hintScale = adaptiveHintScale(contentScale)
         val hintOffset = adaptiveHintOffsetDp(contentScale).dp
-        val effectiveSwipeFontSize = (swipeFontSize.value * hintScale).sp
+        val hintExtraScale = LocalHintExtraScale.current
+        val effectiveSwipeFontSize = (swipeFontSize.value * hintScale * hintExtraScale).sp
+        // 平板大键（hintExtraScale > 1）时上标同步加深，对齐 Gboard 数字上标的醒目程度
+        val hintAlpha = if (hintExtraScale > 1f) 0.72f else 0.5f
 
         if (layoutMode == ButtonLayout.COMPACT) {
             Box(modifier = Modifier.fillMaxSize()) {
@@ -871,23 +898,61 @@ fun SwipeableKeyButton(
                 }
             }
         } else {
-            if (icon != null) {
-                Icon(
-                    painter = icon,
-                    contentDescription = text,
-                    tint = textColor,
-                    modifier = Modifier.size(20.dp)
-                )
+            // 主字符保持居中；左右滑提示放在「键边缘」与「主字符」之间的空档正中。
+            // 用等权重行实现：左空档(weight 1) / 主字符(wrap) / 右空档(weight 1)，
+            // 两侧权重相等 → 主字符仍被顶到正中，提示则各自居中于左右空档。
+            val hasHorizontalHint =
+                !swipeLeftKeyLabel.isNullOrEmpty() || !swipeRightKeyLabel.isNullOrEmpty()
+            val mainContent: @Composable () -> Unit = {
+                if (icon != null) {
+                    Icon(
+                        painter = icon,
+                        contentDescription = text,
+                        tint = textColor,
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else {
+                    Text(
+                        text = text,
+                        color = textColor,
+                        fontSize = ((if (fontSize != androidx.compose.ui.unit.TextUnit.Unspecified) fontSize.value else if (text.length > 2) 14f else 18f) * contentScale).sp,
+                        // 平板大键（hintExtraScale > 1）单字母也用 Medium，避免大键面上 Normal 显细
+                        fontWeight = if (text.length > 2 || hintExtraScale > 1f) FontWeight.Medium else FontWeight.Normal,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        fontFamily = keyFontFamily
+                    )
+                }
+            }
+            if (hasHorizontalHint) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        if (!swipeLeftKeyLabel.isNullOrEmpty()) {
+                            SwipeSideHint(
+                                text = swipeLeftKeyLabel,
+                                textColor = textColor,
+                                fontSize = effectiveSwipeFontSize,
+                                fontFamily = keyLabelFontFamily,
+                            )
+                        }
+                    }
+                    mainContent()
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        if (!swipeRightKeyLabel.isNullOrEmpty()) {
+                            SwipeSideHint(
+                                text = swipeRightKeyLabel,
+                                textColor = textColor,
+                                fontSize = effectiveSwipeFontSize,
+                                fontFamily = keyLabelFontFamily,
+                            )
+                        }
+                    }
+                }
             } else {
-                Text(
-                    text = text,
-                    color = textColor,
-                    fontSize = ((if (fontSize != androidx.compose.ui.unit.TextUnit.Unspecified) fontSize.value else if (text.length > 2) 14f else 18f) * contentScale).sp,
-                    fontWeight = if (text.length > 2) FontWeight.Medium else FontWeight.Normal,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    fontFamily = keyFontFamily
-                )
+                mainContent()
             }
 
             // 上滑提示与角标文字相同（如九键/笔画上滑输入键面数字）时不再重复渲染提示，
@@ -904,7 +969,7 @@ fun SwipeableKeyButton(
                     else if (keyLabel.length <= 4) keyLabel else keyLabel.take(4)
                 Text(
                     text = displayText,
-                    color = textColor.copy(alpha = 0.6f),
+                    color = textColor.copy(alpha = if (hintExtraScale > 1f) hintAlpha else 0.6f),
                     fontSize = effectiveSwipeFontSize,
                     fontWeight = FontWeight.Medium,
                     textAlign = TextAlign.Center,
@@ -914,7 +979,11 @@ fun SwipeableKeyButton(
                     lineHeight = if (swipeHintCorner && hintLineCount == 1) 1.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
                     modifier = if (swipeHintCorner) Modifier
                         .align(Alignment.TopEnd)
-                        .padding(top = 2.dp, end = 4.dp)
+                        // 平板大键上标离角更远（贴角顶点太局促），手机横屏维持紧凑 2/4dp
+                        .padding(
+                            top = if (hintExtraScale > 1f) 5.dp else 2.dp,
+                            end = if (hintExtraScale > 1f) 10.dp else 4.dp,
+                        )
                     else Modifier.offset(y = -hintOffset),
                     fontFamily = keyLabelFontFamily
                 )
@@ -941,6 +1010,8 @@ fun SwipeableKeyButton(
                 )
             }
 
+            // 左右滑键面提示已随主字符以等权重行渲染（见上），此处不再单独绘制。
+
             if (badgeText != null) {
                 Text(
                     text = badgeText,
@@ -957,6 +1028,30 @@ fun SwipeableKeyButton(
             }
         }
     }
+}
+
+/**
+ * 左右滑的键面提示（单行小字）。
+ *
+ * 九键键窄，过长截断为前 3 个字符，避免在空档内挤到主字符。
+ */
+@Composable
+private fun SwipeSideHint(
+    text: String,
+    textColor: Color,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    fontFamily: androidx.compose.ui.text.font.FontFamily?,
+) {
+    Text(
+        text = if (text.length <= 3) text else text.take(3),
+        color = textColor.copy(alpha = 0.5f),
+        fontSize = fontSize,
+        fontWeight = FontWeight.Normal,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        lineHeight = 1.sp,
+        fontFamily = fontFamily,
+    )
 }
 
 @Composable
@@ -1092,6 +1187,10 @@ fun SwipeableIconKeyButton(
     swipeText: String? = null,
     onSwipe: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
+    /** 长按气泡项；非空时接管长按（气泡滑动选择），[onLongClick] / [repeatLongPress] 不再生效。 */
+    longPressItems: List<String>? = null,
+    longPressDrawableIds: List<Int> = emptyList(),
+    onLongPressSelect: ((String) -> Unit)? = null,
     onPress: (() -> Unit)? = null,
     onRelease: (() -> Unit)? = null,
     // 上滑/下滑/左滑增强
@@ -1107,6 +1206,11 @@ fun SwipeableIconKeyButton(
     swipeLeftRepeats: Boolean = false,
     /** 右滑动作；与 [onSwipeLeft] 任一配置后，该键横向滑动即接管，自动放弃父层光标手势。 */
     onSwipeRight: (() -> Unit)? = null,
+    /**
+     * 长按是否连发（每 30ms 重复）。删除键为 true（长按连删）；
+     * 普通功能键传 false（长按只触发一次，避免重复打开面板/切换状态）。
+     */
+    repeatLongPress: Boolean = true,
     onSwipeStateChange: ((SwipeState, Rect) -> Unit)? = null,
     shadowEnabled: Boolean = true,
     shadowElevation: Dp = 1.dp,
@@ -1137,6 +1241,10 @@ fun SwipeableIconKeyButton(
     val currentOnRelease by rememberUpdatedState(onRelease)
     val currentOnSwipeLeft by rememberUpdatedState(onSwipeLeft)
     val currentOnSwipeRight by rememberUpdatedState(onSwipeRight)
+    val currentOnLongPressSelect by rememberUpdatedState(onLongPressSelect)
+    val currentLongPressItems by rememberUpdatedState(longPressItems)
+    val currentLongPressDrawableIds by rememberUpdatedState(longPressDrawableIds)
+    val view = LocalView.current
     val keyLabelFontFamily = AppFonts.keyLabelFontFamily
     // 左滑「按住持续重复」（删除键快速删除用）：未启用时不会有任何循环在跑
     val currentSwipeLeftRepeats by rememberUpdatedState(swipeLeftRepeats)
@@ -1164,14 +1272,17 @@ fun SwipeableIconKeyButton(
     // 消除 30~60dp 位移区间"点击被取消但光标手势未激活"的死区（打字吃键）。
     val horizontalClickCancelThreshold = with(density) { KeyGestureThresholds.TAP_CANCEL_DP.dp.toPx() }
     
-    LaunchedEffect(isLongPress) {
+    LaunchedEffect(isLongPress, repeatLongPress) {
         if (isLongPress && onLongClick != null) {
             hasTriggeredLongPress = true
-            while (isLongPress) {
-                onLongClick()
-                // 长按重复间隔 30ms：80ms 时退格删除以 12.5Hz 离散更新
-                // 候选栏，低于视觉融合阈值，看起来像"一闪一闪"；30ms 时更新更密集更顺滑。
-                delay(30)
+            onLongClick()
+            if (repeatLongPress) {
+                while (isLongPress) {
+                    // 长按重复间隔 30ms：80ms 时退格删除以 12.5Hz 离散更新
+                    // 候选栏，低于视觉融合阈值，看起来像"一闪一闪"；30ms 时更新更密集更顺滑。
+                    delay(30)
+                    onLongClick()
+                }
             }
         }
     }
@@ -1209,7 +1320,8 @@ fun SwipeableIconKeyButton(
                         hasTriggeredLongPress = false
                     },
                     onLongPress = {
-                        isLongPress = true
+                        // 配了长按气泡项时由下方的气泡选择手势接管，避免连发长按
+                        if (currentLongPressItems.isNullOrEmpty()) isLongPress = true
                     }
                 )
             }
@@ -1384,6 +1496,88 @@ fun SwipeableIconKeyButton(
                     }
                 )
             }
+            // 长按气泡滑动选择（配置了 longPressItems 时生效）。必须放在拖拽手势之后（更内层）：
+            // Main pass 内层先收，长按期间消费掉位移，滑动/点击不会再被激活。
+            // 短按不消费事件，仍由点击/拖拽块处理，避免重复触发。
+            .pointerInput(currentLongPressItems.isNullOrEmpty()) {
+                if (currentLongPressItems.isNullOrEmpty()) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var localLongPressTriggered = false
+                    var selectedIdx = 0
+                    val downX = down.position.x
+                    val downY = down.position.y
+                    val items = currentLongPressItems ?: return@awaitEachGesture
+
+                    val longPressJob = scope.launch {
+                        // 长按判定时间统一由 xime.yaml keyboard.gestures.long_press_ms 控制
+                        // （默认 300ms），与空格键进入语音的判定时间保持一致；改配置即时生效。
+                        delay(KeysConfigHelper.getKeyboardGestures().longPressMs.toLong())
+                        localLongPressTriggered = true
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                        onSwipeStateChange?.invoke(
+                            SwipeState(
+                                isPressed = true,
+                                isLongPress = true,
+                                longPressItems = items,
+                                selectedLongPressIndex = 0,
+                                longPressDrawableIds = currentLongPressDrawableIds,
+                            ),
+                            buttonBounds,
+                        )
+                    }
+
+                    val cancelThresholdPx = with(density) { 5.dp.toPx() }
+                    try {
+                        var lastReportedIdx = -1
+                        var completed = false
+                        while (!completed) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull() ?: break
+                            val isRelease =
+                                event.type == androidx.compose.ui.input.pointer.PointerEventType.Release
+
+                            if (!localLongPressTriggered) {
+                                val deltaX = change.position.x - downX
+                                val deltaY = change.position.y - downY
+                                if (kotlin.math.abs(deltaX) > cancelThresholdPx ||
+                                    kotlin.math.abs(deltaY) > cancelThresholdPx
+                                ) {
+                                    longPressJob.cancel()
+                                }
+                                if (isRelease) completed = true
+                                continue
+                            }
+
+                            val deltaX = change.position.x - downX
+                            val itemWidth = buttonBounds.width / items.size
+                            selectedIdx = ((deltaX / itemWidth) + if (items.size > 1) 0.5f else 0f)
+                                .toInt().coerceIn(0, items.size - 1)
+                            if (!isRelease && selectedIdx != lastReportedIdx) {
+                                lastReportedIdx = selectedIdx
+                                onSwipeStateChange?.invoke(
+                                    SwipeState(
+                                        isPressed = true,
+                                        isLongPress = true,
+                                        longPressItems = items,
+                                        selectedLongPressIndex = selectedIdx,
+                                        longPressDrawableIds = currentLongPressDrawableIds,
+                                    ),
+                                    buttonBounds,
+                                )
+                            }
+                            change.consume()
+                            if (isRelease) {
+                                completed = true
+                                items.getOrNull(selectedIdx)?.let { currentOnLongPressSelect?.invoke(it) }
+                            }
+                        }
+                    } finally {
+                        longPressJob.cancel()
+                        onSwipeStateChange?.invoke(SwipeState(), buttonBounds)
+                    }
+                }
+            }
             .onGloballyPositioned { coordinates ->
                 buttonBounds = coordinates.boundsInRoot()
             }
@@ -1408,17 +1602,22 @@ fun SwipeableIconKeyButton(
         if (!swipeText.isNullOrEmpty()) {
             // 键矮场景（LocalSwipeHintCorner，手机横屏）：提示画右上角，避免 offset 提示被键盘顶部裁掉
             val hintCorner = LocalSwipeHintCorner.current
+            // 平板（LocalHintExtraScale > 1）提示加大加深、离角更远，与字母键上标同规则
+            val hintExtraScale = LocalHintExtraScale.current
             Text(
                 text = swipeText,
-                color = iconColor.copy(alpha = 0.5f),
-                fontSize = 9.sp,
+                color = iconColor.copy(alpha = if (hintExtraScale > 1f) 0.72f else 0.5f),
+                fontSize = (9f * hintExtraScale).sp,
                 fontWeight = FontWeight.Normal,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
                 lineHeight = if (hintCorner) 1.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
                 modifier = if (hintCorner) Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 2.dp, end = 4.dp)
+                    .padding(
+                        top = if (hintExtraScale > 1f) 5.dp else 2.dp,
+                        end = if (hintExtraScale > 1f) 10.dp else 4.dp,
+                    )
                 else Modifier.offset(y = (-14).dp),
                 fontFamily = keyLabelFontFamily
             )

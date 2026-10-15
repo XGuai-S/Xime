@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime
+package com.kingzcheung.xime
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -51,9 +51,11 @@ class DuplicateImplementationRegressionTest {
         assertTrue("StrokeKeyboardLayout 应使用共享实现: $users", users.contains("StrokeKeyboardLayout.kt"))
         assertTrue("T9KeyboardLayout 应使用共享实现: $users", users.contains("T9KeyboardLayout.kt"))
         assertTrue("NumberKeyboardLayout 应使用共享实现: $users", users.contains("NumberKeyboardLayout.kt"))
+        // CommonSymbolKeyboardLayout 已在上游合并中由 PanelKeyboardLayout 取代（COMMON_SYMBOL 面板），
+        // 面板布局同样接入共享实现
         assertTrue(
-            "CommonSymbolKeyboardLayout 应使用共享实现: $users",
-            users.contains("CommonSymbolKeyboardLayout.kt")
+            "PanelKeyboardLayout 应使用共享实现: $users",
+            users.contains("PanelKeyboardLayout.kt")
         )
     }
 

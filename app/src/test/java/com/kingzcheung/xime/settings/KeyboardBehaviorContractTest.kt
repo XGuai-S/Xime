@@ -118,7 +118,7 @@ class KeyboardBehaviorContractTest {
             "hasCandidates 应由候选数量推导",
             layout.contains("val hasCandidates = callbacks.candidateCount() > 0"),
         )
-        val env = layout.substringAfter("private class QwertyRowEnv(").substringBefore("\n)")
+        val env = layout.substringAfter("class QwertyRowEnv(").substringBefore("\n)")
         assertTrue("env 缺少 hasCandidates 字段", env.contains("val hasCandidates: Boolean = false"))
     }
 

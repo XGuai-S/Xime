@@ -1,0 +1,118 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# gesture_verify —— 手势 / command 分发 验证清单（26 键全键盘）
+#
+# 用途：一次导入即可逐条验证「command 命令分发」与「功能键手势槽」。
+#
+# 用法（二选一）：
+#   1. 浏览器导入：xime app → 输入方案 → 浏览器导入 → 上传本文件（文件名需为 xime.custom.yaml）；
+#   2. 手动放置：拷到设备 rime/xime.custom.yaml，然后「重载配置」或「部署方案」。
+#
+# 前置：切到全键盘（26 键）布局；本文件写的是中文态 keyboard.qwerty，
+#      英文态要同样效果，把 keys 整段复制到 keyboard.qwerty_en.keys 下。
+#
+# ⚠ 左右滑请用「中间的键」（本文件用 f / earth）：
+#   最左/最右的键，朝屏幕外方向滑会撞上系统返回手势区域而失效，输入法无法屏蔽：
+#     · ?123（mode_change，底行最左）→ swipe_left 常无效；
+#     · enter（底行最右）/ delete（第三行最右）→ swipe_right 常无效。
+#   本文件已把边缘键的「朝外」方向去掉（只留朝内的左滑/右滑），左右滑的主验证放在
+#   f（第二行正中）与 earth（底行靠中）上。
+#
+# ⚠ 合并进已有自定义配置时，注意 YAML 里**同一个键不要出现两行**（后者覆盖前者）；
+#   如果你之前粘贴过老版本的示例，先删掉重复的那行。
+#
+# ── 预期结果对照 ──────────────────────────────────────────────────────────────
+#   ①  上滑逗号            → 打开符号面板（不再打出 "symbol"）
+#   ①' f 左/右滑           → 复制 / 粘贴（第二行正中，左右滑最可靠）
+#   ②  中英键 earth 上滑   → 打开表情面板；earth 左滑→复制、右滑→清空编码
+#   ③  ?123 上/下/右滑     → 数字面板 / 常用符号面板 / 粘贴（左滑朝屏幕外，已去掉）
+#   ④  回车 上/下/左滑     → 全选 / 段尾 / 段首；长按 → 气泡「全选 / 粘贴」
+#   ⑤  长按空格            → 气泡「语音 / 重复空格」，滑动选中松手执行
+#                          （注意：space 配了多项长按后，它的四向滑动不再生效）
+#   ⑥  退格 左滑           → 清空编码（右滑朝屏幕外，已去掉）
+#   ⑦  shift 双击 / 上滑   → 锁定大写 / 清空输入
+#   ⑧  q 上滑 / 双击       → 上屏 "1" / 双击「无反应」（double_tap 仅 shift 支持）
+#   ⑨  a 上滑              → 无输出（action: none 吸收上滑，也不误打字符）
+#   ⑩  s 上滑              → 无输出（拼错的命令名只记日志，不上屏）
+#   ⑪  长按 z              → 气泡「锁大写 / 清编码」
+#   ⑫  w 上滑              → 打开剪贴板面板（switch_route 在字母键上滑生效）
+#   ⑬  长按 e              → 气泡「数字面板」
+#   可选（图标功能键，需先按其下方注释改 layout.rows）：
+#      symbol 四向滑/长按  → 复制 / 粘贴 / 气泡三项；点按仍开符号面板
+#   另：`shift` 的长按目前不支持（只有 点按/双击/四向滑）。
+# ═══════════════════════════════════════════════════════════════════════════════
+metadata:
+  app_name: Xime
+  app_version: ">=3.0.0"
+  platform: android
+  config_version: 1
+  generator: "Xime Config Generator"
+  modified_time: "2026-10-14"
+
+keyboard:
+  qwerty:
+    keys:
+      # ── ① command 面板命令（原报障；保持原样）──
+      comma: { width: 0.8, tap: { label: "，", value: "," }, swipe_up: { label: "符号", action: command, value: symbol } }
+
+      # ── ①' 左右滑主验证：f 在第二行正中，离屏幕两侧都远 ──
+      f: { tap: "f", swipe_left: { label: "复制", action: copy }, swipe_right: { label: "粘贴", action: paste } }
+
+      # ── ② command: emoji（earth 靠底行中间，顺带验证它的左右滑）──
+      earth: { tap: { label: "@language", action: toggle_ascii }, swipe_up: { label: "表情", action: command, value: emoji }, swipe_left: { label: "复制", action: copy }, swipe_right: { label: "清编码", action: command, value: clear_composition } }
+
+      # ── ③ ?123 三向滑 + 长按气泡（左滑朝屏幕外，去掉）──
+      mode_change: { width: 1.2, tap: { action: command, value: mode_change }, swipe_up: { label: "数字", action: command, value: mode_change_number }, swipe_down: { label: "常用符号", action: command, value: mode_change_common_symbol }, swipe_right: { label: "粘贴", action: paste }, long_press: { display: bubble, values: [ { label: number, action: command, value: mode_change_number }, { label: common_symbol, action: command, value: mode_change_common_symbol } ] } }
+
+      # ── ④ 回车三向滑 + 长按气泡（右滑朝屏幕外，去掉）──
+      enter: { width: 1.2, tap: { action: enter }, swipe_up: { label: "全选", action: select_all }, swipe_down: { label: "段尾", action: line_end }, swipe_left: { label: "段首", action: line_start }, long_press: { display: bubble, values: [ { label: "全选", action: select_all }, { label: "粘贴", action: paste } ] } }
+
+      # ── ⑤ 空格长按气泡多项（手势链命令：voice / repeat_space）──
+      space: { width: 3, tap: { action: space }, long_press: { display: bubble, values: [ { label: "语音", action: voice }, { label: "重复空格", action: repeat_space, value: 5 } ] } }
+
+      # ── ⑥ 退格左滑（右滑朝屏幕外，且左右滑已在 f/earth 上验证）──
+      delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: command, value: clear_composition } }
+
+      # ── ⑦ shift：双击锁大写（double_tap 应只在这里生效）+ 上滑清空 ──
+      shift: { width: 1.4, tap: { action: command, value: shift_single }, double_tap: { action: command, value: shift_caps }, swipe_up: { action: clear_all } }
+
+      # ── ⑧ 字母上滑 COMMIT 回归（应上屏 1）+ 双击应「无反应」作对比 ──
+      q: { tap: "q", swipe_up: "1", double_tap: { label: "X", action: commit, value: "X" } }
+
+      # ── ⑨ action: none 吸收上滑：不上屏，也不误打出字符 ──
+      a: { tap: "a", swipe_up: { label: "仅提示", action: none } }
+
+      # ── ⑩ 拼错的命令名不上屏（仅在日志里 command 未知 value 告警）──
+      s: { tap: "s", swipe_up: { label: "拼错", action: command, value: symobl } }
+
+      # ── ⑪ 长按气泡里的 command（手势链）：锁大写 / 清编码 ──
+      z: { tap: "z", long_press: { display: bubble, values: [ { label: "锁大写", action: command, value: shift_caps }, { label: "清编码", action: command, value: clear_composition } ] } }
+
+      # ── ⑫ 字母上滑 switch_route → 剪贴板面板（此前会把 "clipboard" 打出来）──
+      w: { tap: "w", swipe_up: { label: "剪贴板", action: switch_route, value: clipboard } }
+
+      # ── ⑬ 长按气泡里的 command mode_change_number → 数字面板 ──
+      e: { tap: "e", long_press: { display: bubble, values: [ { label: "数字面板", action: command, value: mode_change_number } ] } }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 可选：手机验证「图标功能键」（symbol / emoji / voice / caps / cursor_* / tab）
+    #
+    # 这些键默认只出现在平板布局（qwerty_tablet），手机要验证需先把它们排进 layout.rows。
+    # layout.rows 是「整段覆盖」，所以要四行写全。取消下面 layout 与 symbol/emoji/cursor 的
+    # 注释即可（会改变底行布局，验证完记得删掉或还原）。
+    #
+    # 底行中间位置（space 两侧）留给 cursor_left / cursor_right，方便验证左右滑：
+    #
+    # layout:
+    #   rows:
+    #     - [q, w, e, r, t, y, u, i, o, p]
+    #     - [a, s, d, f, g, h, j, k, l]
+    #     - [shift, z, x, c, v, b, n, m, delete]
+    #     - [mode_change, comma, symbol, cursor_left, space, cursor_right, emoji, enter]
+    #
+    # keys 里追加（放在上面的 keys 段内）：
+    #   # 点按保持内置（开面板）；补四向滑 + 长按气泡
+    #   symbol: { swipe_up: { label: "复制", action: copy }, swipe_down: { label: "粘贴", action: paste }, long_press: { display: bubble, values: [ { label: "表情面板", action: switch_route, value: emoji }, { label: "符号面板", action: switch_route, value: symbol }, { label: "语音", action: voice } ] } }
+    #   emoji: { swipe_up: { label: "换输入法", action: command, value: show_ime_picker } }
+    #   cursor_left: { tap: { action: cursor_left }, swipe_left: { label: "段首", action: line_start }, swipe_right: { label: "段尾", action: line_end } }
+    #   cursor_right: { tap: { action: cursor_right }, swipe_left: { label: "复制", action: copy }, swipe_right: { label: "粘贴", action: paste }, long_press: { display: bubble, values: [ { label: "全选", action: select_all }, { label: "复制", action: copy } ] } }
+    # ─────────────────────────────────────────────────────────────────────────

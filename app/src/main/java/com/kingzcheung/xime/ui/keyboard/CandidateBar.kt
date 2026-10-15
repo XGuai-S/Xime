@@ -6,7 +6,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -604,9 +603,11 @@ fun CandidateBar(
                                         modifier = Modifier
                                             .padding(horizontal = 5.dp)
                                             .size(32.dp)
-                                            .clickable(
+                                            // 工具栏在 horizontalScroll 内：用 tolerantClick 容忍轻点的小位移，
+                                            // 避免 ROM 手势判定吃掉点击（与候选条目同因）
+                                            .tolerantClick(
+                                                showRipple = false,
                                                 interactionSource = interactionSource,
-                                                indication = null,
                                                 onClick = action.onClick
                                             ),
                                         contentAlignment = Alignment.Center
@@ -804,7 +805,7 @@ fun ClipboardImageCandidateItem(
             .background(
                 if (isSelected) accentColor.copy(alpha = 0.2f) else containerColor
             )
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .tolerantClick(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 5.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -875,9 +876,11 @@ fun CandidateItem(
                 if (isSelected) accentColor.copy(alpha = 0.2f)
                 else Color.Transparent
             )
-            .combinedClickable(
+            // 候选栏在 LazyRow 内且外层还有滚动手势：用 tolerantClick 容忍轻点的小位移，
+            // 避免 ROM 手势判定吃掉点击（部分平板/高采样率屏幕会表现为“点候选没反应”）
+            .tolerantClick(
                 onClick = onClick,
-                onLongClick = onLongClick
+                onLongClick = onLongClick,
             )
             .padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically

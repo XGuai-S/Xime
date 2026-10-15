@@ -44,6 +44,18 @@ class KeyboardGestureConfigTest {
     }
 
     @Test
+    fun `逗号上滑 command symbol 解析为打开符号面板命令`() {
+        val kc = parse(
+            """comma: { width: 0.8, tap: { label: "，", value: "," }, swipe_up: { label: "符号", action: "command", value: "symbol" } }"""
+        )["comma"]!!
+        assertEquals("，", kc.tap!!.label)
+        assertEquals(",", kc.tap!!.value)
+        assertEquals("符号", kc.swipeUp!!.label)
+        assertEquals(GestureAction.COMMAND, kc.swipeUp!!.action)
+        assertEquals("symbol", kc.swipeUp!!.value)
+    }
+
+    @Test
     fun `double_tap 字符串简写默认为 commit`() {
         val kc = parse("a: { tap: \"a\", double_tap: \"A\" }")["a"]!!
         assertEquals(GestureAction.COMMIT, kc.doubleTap!!.action)

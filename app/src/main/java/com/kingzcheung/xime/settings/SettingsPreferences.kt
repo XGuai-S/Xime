@@ -12,6 +12,7 @@ object SettingsPreferences {
     private const val KEY_CURRENT_SCHEMA_DUAL = "current_schema_dual"
     private const val KEY_DEPLOYMENT_DONE = "deployment_done"
     private const val KEY_BUILTIN_SCHEMAS_MERGED = "builtin_schemas_merged"
+    private const val KEY_PENDING_DICT_MERGE = "pending_dict_merge"
     private const val KEY_DEPLOYMENT_HASH = "deployment_hash"
     private const val KEY_RIME_ASSETS_VERSION = "rime_assets_version"
     /** 用户已就哪一份内置基线（内容指纹）对「是否覆盖 xime.yaml」做过决定；空表示从未处理。 */
@@ -23,6 +24,11 @@ object SettingsPreferences {
     /** 旧键：布尔型日志开关，仅保留迁移读取。 */
     private const val KEY_VERBOSE_LOGGING = "verbose_logging"
     private const val KEY_PLUGIN_DEV_MODE = "plugin_dev_mode"
+    /** 按键坐标日志开关（相邻键纠错数据采集，默认关闭）。 */
+    private const val KEY_KEY_TAP_LOG = "key_tap_log"
+    /** 纠错模型影子模式（只记录"会怎么改"，不改行为，默认关闭）。 */
+
+    private const val KEY_CORRECTOR_ENABLED = "corrector_enabled"
     
     private const val KEY_SOUND_ENABLED = "sound_enabled"
     /** 按键按压气泡开关（键帽上方弹出的按键预览）。默认开，与历史行为一致。 */
@@ -58,6 +64,11 @@ object SettingsPreferences {
     private const val KEY_RIME_INSTALLATION_ID = "rime_installation_id"
 
     private const val KEY_LAST_RIME_SYNC_AT = "last_rime_sync_at"
+    private const val KEY_LAST_BACKUP_AT = "last_backup_at"
+    private const val KEY_LAST_SYNC_ERROR = "last_sync_error"
+    private const val KEY_LAST_SYNC_ERROR_AT = "last_sync_error_at"
+    private const val KEY_LAST_BACKUP_ERROR = "last_backup_error"
+    private const val KEY_LAST_BACKUP_ERROR_AT = "last_backup_error_at"
 
     private const val KEY_MODE_CHANGE_TARGET = "mode_change_target"
 
@@ -256,6 +267,18 @@ object SettingsPreferences {
         getPrefs(context).edit().putBoolean(KEY_BUILTIN_SCHEMAS_MERGED, merged).apply()
     }
 
+    /**
+     * 待合并的自造词快照标记：恢复备份时若引擎未就绪（冷启动直接进设置页），
+     * 快照已落盘但无法调 `syncUserData()` 合并——由 IME 服务在引擎就绪后补做。
+     */
+    fun isPendingDictMerge(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_PENDING_DICT_MERGE, false)
+    }
+
+    fun setPendingDictMerge(context: Context, pending: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_PENDING_DICT_MERGE, pending).apply()
+    }
+
     fun getDeploymentHash(context: Context): String {
         return getPrefs(context).getString(KEY_DEPLOYMENT_HASH, "") ?: ""
     }
@@ -336,6 +359,24 @@ object SettingsPreferences {
 
     fun setPluginDevModeEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_PLUGIN_DEV_MODE, enabled).apply()
+    }
+
+    /** 按键坐标日志（相邻键纠错采集），默认关闭。 */
+    fun isKeyTapLogEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_KEY_TAP_LOG, false)
+    }
+
+    fun setKeyTapLogEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_KEY_TAP_LOG, enabled).apply()
+    }
+
+    /** 智能纠错（相邻键纠错候选，默认关闭）。 */
+    fun isCorrectorEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_CORRECTOR_ENABLED, false)
+    }
+
+    fun setCorrectorEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_CORRECTOR_ENABLED, enabled).apply()
     }
 
     fun isSetupCompleted(context: Context): Boolean {
@@ -652,6 +693,49 @@ object SettingsPreferences {
 
     fun setLastRimeSyncAt(context: Context, at: Long) {
         getPrefs(context).edit().putLong(KEY_LAST_RIME_SYNC_AT, at).apply()
+    }
+
+    /** 上次生成完整备份包的时间（云端立即备份或本地导出成功时更新；毫秒时间戳，0=从未）。 */
+    fun getLastBackupAt(context: Context): Long =
+        getPrefs(context).getLong(KEY_LAST_BACKUP_AT, 0L)
+
+    fun setLastBackupAt(context: Context, at: Long) {
+        getPrefs(context).edit().putLong(KEY_LAST_BACKUP_AT, at).apply()
+    }
+
+    /**
+     * 最近一次云端词条同步的失败原因（null=没有未消除的失败；成功后清空）。
+     *
+     * 目的：失败不再只是 snackbar 一闪而过——回到「同步与备份」页仍能看到"上次失败 + 重试"。
+     */
+    fun getLastSyncError(context: Context): String? =
+        getPrefs(context).getString(KEY_LAST_SYNC_ERROR, null)
+
+    /** 失败发生时间（毫秒；0=无）。 */
+    fun getLastSyncErrorAt(context: Context): Long =
+        getPrefs(context).getLong(KEY_LAST_SYNC_ERROR_AT, 0L)
+
+    fun setLastSyncError(context: Context, message: String?) =
+        setOpError(context, KEY_LAST_SYNC_ERROR, KEY_LAST_SYNC_ERROR_AT, message)
+
+    /** 最近一次云端完整备份的失败原因（语义同 [getLastSyncError]）。 */
+    fun getLastBackupError(context: Context): String? =
+        getPrefs(context).getString(KEY_LAST_BACKUP_ERROR, null)
+
+    fun getLastBackupErrorAt(context: Context): Long =
+        getPrefs(context).getLong(KEY_LAST_BACKUP_ERROR_AT, 0L)
+
+    fun setLastBackupError(context: Context, message: String?) =
+        setOpError(context, KEY_LAST_BACKUP_ERROR, KEY_LAST_BACKUP_ERROR_AT, message)
+
+    private fun setOpError(context: Context, key: String, atKey: String, message: String?) {
+        val editor = getPrefs(context).edit()
+        if (message.isNullOrBlank()) {
+            editor.remove(key).remove(atKey)
+        } else {
+            editor.putString(key, message).putLong(atKey, System.currentTimeMillis())
+        }
+        editor.apply()
     }
     
     /** 获取方案偏好的键盘布局，默认全键盘 */

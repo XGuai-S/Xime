@@ -64,6 +64,8 @@ class VoiceRecognitionHandlerFinishTest {
     @Before
     fun setup() {
         whenever(mockContext.getSharedPreferences(any(), anyInt())).thenReturn(mockPrefs)
+        // AsrSupport.getLocalName 会经 applicationContext 取模型管理（本地模型未安装时返回 null）
+        whenever(mockContext.applicationContext).thenReturn(mockContext)
         // 所有布尔设置返回默认值；isSttUseLocal 置 true 使 resolveProviderName 走本地引擎
         // 早退（不触碰未初始化的 PluginManager/ExtensionManager），warmup 分支为异步线程无副作用
         whenever(mockPrefs.getBoolean(any(), any<Boolean>())).thenAnswer { it.getArgument(1) }

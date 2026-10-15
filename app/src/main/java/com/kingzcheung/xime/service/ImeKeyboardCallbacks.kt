@@ -93,7 +93,7 @@ internal fun rememberImeKeyboardCallbacks(
             onHideKeyboard = { service.hideKeyboard() },
             onSwitchKeyboard = { handleSwitchKeyboard(service) },
             onToolbarEditingAction = { action -> service.schemaController.handleToolbarEditingAction(action) },
-            onCommitImage = { imagePath -> handleCommitImage(service, imagePath) },
+onCommitImage = { imagePath -> handleCommitImage(service, imagePath) },
             onVoiceModeChange = { enabled -> handleVoiceModeChange(service, enabled) },
             onVoiceStickyToggle = { handleVoiceStickyToggle(service) },
             onPageDown = { service.keyRouter.pageDown() },
@@ -105,7 +105,7 @@ internal fun rememberImeKeyboardCallbacks(
                 service.keyRouter.deleteCandidateGlobal(globalIndex)
             },
             onRequestExpandedCandidates = { service.refreshExpandedCandidates() },
-            onCursorMove = { direction -> handleCursorMove(service, direction) },
+onCursorMove = { direction -> handleCursorMove(service, direction) },
             onGestureAction = { action, value ->
                 KeyActionRegistry.execute(action, KeyActionContext(service), value)
             },

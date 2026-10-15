@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.settings
+package com.kingzcheung.xime.settings
 
 import com.kingzcheung.xime.RepoFiles
 import org.junit.Assert.assertEquals
@@ -66,12 +66,20 @@ class ModeChangeDispatchTest {
     @Test
     fun `两个命令都走 COMMAND 动作分发到 onKeyPress`() {
         // invokeKeyAction：COMMAND / SEND_RIME → onKeyPress(value)，配置里的 command 才能落到
-        // fullScreenOnKeyPress 的字符串路由上
+        // fullScreenOnKeyPress 的字符串路由上（命令名白名单经 dispatchCommandAction 校验后直通按键路由）
         val body = layoutSource.substringAfter("internal fun invokeKeyAction(")
             .substringBefore("\n/**\n * 可上屏键")
         assertTrue(
             "COMMAND 必须分发到 onKeyPress",
-            body.contains("GestureAction.SEND_RIME, GestureAction.COMMAND -> onKeyPress(value)"),
+            body.contains("GestureAction.SEND_RIME -> onKeyPress(value)") &&
+                body.contains("GestureAction.COMMAND -> dispatchCommandAction(value, onKeyPress)"),
+        )
+        // 白名单命令最终也落到按键路由，与 SEND_RIME 同一条链路
+        val routing = RepoFiles.file("src/main/java/com/kingzcheung/xime/ui/keyboard/KeyboardGestureRouting.kt")
+            .readText().replace("\r\n", "\n")
+        assertTrue(
+            "白名单命令必须落到 onKeyPress",
+            routing.contains("onKeyPress(value)"),
         )
     }
 

@@ -80,12 +80,20 @@ import com.kingzcheung.xime.rime.buildT9DisplayState
 
 import com.kingzcheung.xime.settings.LogLevel
 import com.kingzcheung.xime.settings.LogLevelResolver
+
+import com.kingzcheung.xime.rime.RimeCandidate
+import com.kingzcheung.xime.rime.resolveRimeCandidateIndex
+
+import com.kingzcheung.xime.correction.KeyTapLogger
+import com.kingzcheung.xime.settings.SchemaConfigHelper
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.settings.SyncManager
 import com.kingzcheung.xime.ui.keyboard.KeyboardView
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import com.kingzcheung.xime.ui.theme.keyboardBackground
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.ui.theme.XimeTheme
@@ -95,6 +103,8 @@ import com.kingzcheung.xime.keyboard.ActionExecutor
 import com.kingzcheung.xime.keyboard.KeyboardPage
 import com.kingzcheung.xime.keyboard.OverlayRoute
 import com.kingzcheung.xime.keyboard.ToolbarButtonItem
+import com.kingzcheung.xime.plugin.core.api.PluginResultItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -213,7 +223,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     init {
         serviceScope.launch {
             keyJobs.consumeEach { job ->
-                job.join()
+                try {
+                    job.join()
+                } catch (e: CancellationException) {
+                    // 服务销毁时正常取消：必须继续向上抛出，否则消费者会吞掉取消信号
+                    throw e
+                } catch (e: Throwable) {
+                    // 单个按键任务失败不能让消费者协程退出，否则后续按键/候选点选会永久堆积失效
+                    FileLogger.e(TAG, "key job failed, keep consuming", e)
+                }
             }
         }
         serviceScope.launch(Dispatchers.Main) {
@@ -342,13 +360,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal fun refreshExpandedCandidates() {
         if (!keyboardViewModel.candidatePageExpanded.value) {
             if (candidateState.value.expandedCandidates.isNotEmpty()) {
-                candidateState.value = candidateState.value.copy(expandedCandidates = emptyList())
+                candidateState.value = candidateState.value.copy(
+                    expandedCandidates = emptyList(),
+                    expandedActions = emptyList()
+                )
             }
             return
         }
         val perfT0 = android.os.SystemClock.elapsedRealtime()
+        // 纠错候选由 librime 插件（correction_translator）直接产出并参与引擎排序，
+        // 展开页只需拉取引擎的跨页全量候选，不再在 Kotlin 侧合成候选。
         val all = rimeEngine.getAllCandidates().toList()
-        candidateState.value = candidateState.value.copy(expandedCandidates = all)
+        candidateState.value = candidateState.value.copy(
+            expandedCandidates = all,
+            expandedActions = emptyList()
+        )
         android.util.Log.d(
             "CandidatePerf",
             "refreshExpandedCandidates: count=${all.size} cost=${android.os.SystemClock.elapsedRealtime() - perfT0}ms"
@@ -509,7 +535,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     applyWindowBackground()
                 }
                 "stt_enabled" -> {
-                    uiState.value = uiState.value.copy(isSttEnabled = SettingsPreferences.isSttEnabled(this@XimeInputMethodService))
+                    val sttEnabled = SettingsPreferences.isSttEnabled(this@XimeInputMethodService)
+                    uiState.value = uiState.value.copy(isSttEnabled = sttEnabled)
+                    // 关闭开关时结束进行中的语音会话
+                    if (!sttEnabled && (uiState.value.isVoiceMode || voiceRecordingStarted)) {
+                        endVoiceSession()
+                    }
                 }
                 SettingsPreferences.KEY_STT_KEEP_ENGINE_ALIVE -> {
                     // 开启时立即预热模型常驻待命（走 AsrSupport.warmup 注册常驻后端）；
@@ -593,6 +624,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         
         
         FileLogger.init(this)
+        KeyTapLogger.init(this)
+        KeyTapLogger.enabled = SettingsPreferences.isKeyTapLogEnabled(this)
+        KeyTapLogger.schemaProvider = { uiState.value.currentSchemaId }
         FileLogger.i(TAG, "XimeInputMethodService created")
         // 候选排序词频表：在 onCreate（context 已 attach）加载，字段初始化时不可用
         candidateOrderTable = CandidateOrderStore.load(this)
@@ -704,6 +738,85 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 notifyDeploymentStatus(false, "")
 
                 applyInitialSchemaAfterInit()
+
+                // 恢复备份时若引擎未就绪，自造词快照只落了盘没合并：此处补做一次 sync
+                // （librime 按时间戳合并，不会吃掉本机新词）。失败保留标记，下次引擎就绪再试。
+                if (SettingsPreferences.isPendingDictMerge(this@XimeInputMethodService)) {
+                    val merged = SyncManager.syncNow(this@XimeInputMethodService).isSuccess
+                    FileLogger.i(TAG, "initRimeEngine: pending 自造词快照合并=$merged")
+                    if (merged) SettingsPreferences.setPendingDictMerge(this@XimeInputMethodService, false)
+                }
+
+                withContext(Dispatchers.Main) {
+                    val savedSchema = SettingsPreferences.getCurrentSchema(this@XimeInputMethodService)
+                    val availableSchemas = rimeEngine.getAvailableSchemas()
+                    val currentSchema = rimeEngine.getCurrentSchema()
+                    Log.d(TAG, "initRimeEngine: currentSchema=$currentSchema, savedSchema=$savedSchema, availableSchemas=${availableSchemas.joinToString()}")
+                    
+                    when {
+                        isHandwritingSchema(savedSchema) -> {
+                            // 手写方案：不要调 rimeEngine.switchSchema（Rime 没有手写引擎），
+                            // 也不要覆盖 savedSchema（由 onStartInput 恢复 UI）
+                            Log.d(TAG, "initRimeEngine: savedSchema is handwriting, keeping current Rime schema")
+                            // UI 布局恢复：冷启动时第一次 onStartInput 先于引擎初始化完成，
+                            // RimeEngine.isInitialized()=false 会跳过 handwriting UI 恢复，
+                            // 此处必须补切，否则第一次弹出键盘停留在默认全键盘
+                            val hwDir = com.kingzcheung.xime.model.ModelStorage.getModelDir(
+                                this@XimeInputMethodService, "ochwpro"
+                            )
+                            com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(
+                                this@XimeInputMethodService, "ochwpro"
+                            )
+                            val modelOk = java.io.File(hwDir, "ochwpro.onnx").exists() &&
+                                java.io.File(hwDir, "char_index.json").exists()
+                            if (modelOk) {
+                                val page = keyboardViewModel.page.value
+                                val alreadyHandwriting = page is com.kingzcheung.xime.keyboard.KeyboardPage.Main &&
+                                    page.type == com.kingzcheung.xime.keyboard.MainType.HANDWRITING
+                                if (!alreadyHandwriting) {
+                                    keyboardViewModel.switchMain(com.kingzcheung.xime.keyboard.MainType.HANDWRITING)
+                                }
+                                // 手写模型按"用键盘时加载"管理：不在此预载，
+                                // HandwritingKeyboardLayout 创建时（LaunchedEffect）负责加载
+                            } else {
+                                FileLogger.w(TAG, "initRimeEngine: handwriting model missing, keep full keyboard")
+                                android.widget.Toast.makeText(
+                                    this@XimeInputMethodService,
+                                    "请先下载手写模型",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                        savedSchema in availableSchemas -> {
+                            // 即使 savedSchema == currentSchema 也要调用 switchSchema，
+                            // 因为 nativeCreateSession 后 schema 的 processor/translator 等
+                            // 可能未完全初始化，switchSchema 会触发完整的初始化流程
+                            Log.d(TAG, "initRimeEngine: Switching to saved schema: $savedSchema")
+                            schemaController.applyPageSizeSetting(savedSchema)
+                            rimeEngine.switchSchema(savedSchema)
+                        }
+                        SchemaManager.isSchemaCompiled(this@XimeInputMethodService, savedSchema) -> {
+                            Log.d(TAG, "initRimeEngine: Schema compiled but not in get_schema_list, switching anyway")
+                            schemaController.applyPageSizeSetting(savedSchema)
+                            rimeEngine.switchSchema(savedSchema)
+                        }
+                        availableSchemas.isNotEmpty() -> {
+                            // savedSchema 不可用且未编译，退而求其次用第一个可用方案
+                            val fallbackSchema = availableSchemas.first()
+                            Log.d(TAG, "initRimeEngine: savedSchema '$savedSchema' not available, falling back to '$fallbackSchema'")
+                            schemaController.applyPageSizeSetting(fallbackSchema)
+                            rimeEngine.switchSchema(fallbackSchema)
+                            SettingsPreferences.setCurrentSchema(this@XimeInputMethodService, fallbackSchema)
+                        }
+                    }
+                    
+                    sessionController.updateSchemaName()
+                    // onStartInput 在部署进行中会跳过 schema 切换与选项恢复，
+                    // 部署完成后这里补齐 UI 状态，保证键盘可用
+                    sessionController.restorePersistedSchemaOptions()
+                    updateUI()
+                    Log.d(TAG, "initRimeEngine: Rime engine initialized successfully")
+                }
             } catch (e: Exception) {
                 FileLogger.e(TAG, "initRimeEngine: Failed to initialize Rime engine", e)
                 notifyDeploymentStatus(false, "初始化失败")
@@ -2325,6 +2438,96 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
     }
 
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (!shouldBreakCompositionOnSelectionChange(
+                oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
+            )
+        ) {
+            return
+        }
+        if (!hasPendingComposition()) return
+        FileLogger.i(
+            TAG,
+            "onUpdateSelection: 丢弃待上屏组合态 ($oldSelStart,$oldSelEnd)->($newSelStart,$newSelEnd)"
+        )
+        breakPendingCompositionForCaretMove(newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+    }
+
+    /** 是否存在未上屏的组合态（输入框 composing / t9 半提交 / 引擎输入）。 */
+    private fun hasPendingComposition(): Boolean {
+        val state = candidateState.value
+        return inputBoxComposingActive ||
+            t9PartialSegments.isNotEmpty() ||
+            state.isComposing ||
+            state.preeditText.isNotEmpty() ||
+            rimeEngine.getInput().isNotEmpty()
+    }
+
+    /**
+     * 光标移动后丢弃未上屏组合态：引擎输入 / t9 半提交 / 输入框编码全部作废，
+     * 下一键从新光标处重新开始，避免旧编码与新输入合并上屏到错误位置。
+     */
+    private fun breakPendingCompositionForCaretMove(
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        keyRouter.postRimeJob {
+            rimeEngine.clearComposition()
+            withContext(Dispatchers.Main) {
+                mainHandler.post { updateUI() }
+            }
+        }
+        t9PartialSegments.clear()
+        val ic = currentInputConnection
+        val wasInputBoxComposing = inputBoxComposingActive
+        inputBoxComposingActive = false
+        val restoreCaret = restoreCaretAfterInputBoxComposingRemoval(
+            newSelStart, newSelEnd, candidatesStart, candidatesEnd
+        )
+        if (wasInputBoxComposing && ic != null && restoreCaret != null) {
+            // 编码在输入框里以 composing 区域存在：setComposingText("") 原地删除（丢弃），
+            // 随后把被带到编码起点的光标恢复到用户点击位置
+            ic.beginBatchEdit()
+            try {
+                ic.setComposingText("", 0)
+                ic.finishComposingText()
+                ic.setSelection(restoreCaret, restoreCaret)
+            } finally {
+                ic.endBatchEdit()
+            }
+        } else {
+            // 无组合区可删/拖动选区：只 finish 不定案清空（setComposingText("") 会误删光标处选区）
+            ic?.finishComposingText()
+        }
+        uiState.value = uiState.value.copy(
+            t9ResetSignal = uiState.value.t9ResetSignal + 1,
+            t9RightCandidateSelectedCount = 0,
+            t9SelectedCandidatePinyin = ""
+        )
+        candidateState.value = candidateState.value.copy(
+            candidates = emptyList(),
+            candidateComments = emptyList(),
+            inputText = "",
+            preeditText = "",
+            isComposing = false,
+            associationCandidates = emptyList(),
+            hasNextPage = false,
+            hasPrevPage = false,
+            candidateActions = emptyList(),
+            preeditCaretPos = -1
+        )
+    }
+
     override fun onEvaluateFullscreenMode(): Boolean {
         return false
     }
@@ -2858,6 +3061,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 需在主线程调用。
      */
     internal fun commitTextSilently(text: String, isPaste: Boolean = false) {
+        // 会话日志：上屏文本（用于把按键序列与其最终结果对齐）
+        KeyTapLogger.recordCommit(text, isPaste)
         if (uiState.value.quickSendFormFocused) {
             // 焦点在触发编码输入框时路由到编码框，否则路由到快捷发送文本框
             val codeFocused = uiState.value.quickSendCodeFocused

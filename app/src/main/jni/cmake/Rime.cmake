@@ -71,6 +71,22 @@ if(NOT T9_LINK_RESULT STREQUAL "0")
        DESTINATION "${T9_PLUGIN_LINK}")
 endif()
 
+# librime-correction 与 librime-t9 相同：顶层 jni/librime-correction 为权威源码，
+# 以符号链接接入 librime 插件构建（Windows 无权限时回退拷贝）。
+set(CORRECTION_PLUGIN_LINK "${CMAKE_SOURCE_DIR}/librime/plugins/librime-correction")
+if(IS_SYMLINK "${CORRECTION_PLUGIN_LINK}")
+  file(REMOVE "${CORRECTION_PLUGIN_LINK}")
+elseif(EXISTS "${CORRECTION_PLUGIN_LINK}")
+  file(REMOVE_RECURSE "${CORRECTION_PLUGIN_LINK}")
+endif()
+file(CREATE_LINK "../../librime-correction"
+     "${CORRECTION_PLUGIN_LINK}" SYMBOLIC RESULT CORRECTION_LINK_RESULT)
+if(NOT CORRECTION_LINK_RESULT STREQUAL "0")
+  message(STATUS "librime-correction symlink unavailable (${CORRECTION_LINK_RESULT}), using copy")
+  file(COPY "${CMAKE_SOURCE_DIR}/librime-correction/"
+       DESTINATION "${CORRECTION_PLUGIN_LINK}")
+endif()
+
 # librime-lua 需要特殊命名 lua
 file(COPY "${CMAKE_SOURCE_DIR}/librime-lua/"
      DESTINATION "${CMAKE_SOURCE_DIR}/librime/plugins/lua")

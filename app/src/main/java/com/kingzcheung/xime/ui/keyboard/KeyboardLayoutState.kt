@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.ui.keyboard
+package com.kingzcheung.xime.ui.keyboard
 
 import com.kingzcheung.xime.keyboard.MainType
 import com.kingzcheung.xime.settings.KeysConfigHelper
@@ -120,22 +120,22 @@ fun KeyboardLayoutState.toViewState(fallback: KeyboardViewState = KeyboardViewSt
     }
 
 /**
- * 判断是否为九键（T9）方案：仅认 keyboard.t9.schemas 绑定声明
- * （xime.yaml / xime.custom.yaml），未声明的方案一律全键盘。
+ * 判断是否为九键（T9）方案：认 keyboard.<section>.schemas 绑定声明（段 type 为 t9 或段名为
+ * 内置保留名 t9；xime.yaml / xime.custom.yaml），未声明的方案一律全键盘。
  */
 fun isT9Schema(schemaId: String): Boolean =
-    KeysConfigHelper.boundSectionForSchema(schemaId) == "t9"
+    KeysConfigHelper.schemaSectionKind(schemaId) == "t9"
 
 /**
- * 判断是否为笔画方案：仅认 keyboard.stroke.schemas 绑定声明，
- * 未声明的方案一律全键盘。
+ * 判断是否为笔画方案：认 keyboard.<section>.schemas 绑定声明（段 type 为 stroke 或段名为
+ * 内置保留名 stroke），未声明的方案一律全键盘。
  */
 fun isStrokeSchema(schemaId: String): Boolean =
-    KeysConfigHelper.boundSectionForSchema(schemaId) == "stroke"
+    KeysConfigHelper.schemaSectionKind(schemaId) == "stroke"
 
 /**
- * 判断是否为手写方案：仅认 keyboard.handwriting.schemas 绑定声明，
- * 未声明的方案一律全键盘（手写方案不经过 rime 引擎）。
+ * 判断是否为手写方案：认 keyboard.<section>.schemas 绑定声明（段 type 为 handwriting 或段名
+ * 为内置保留名 handwriting），未声明的方案一律全键盘（手写方案不经过 rime 引擎）。
  */
 fun isHandwritingSchema(schemaId: String): Boolean =
-    KeysConfigHelper.boundSectionForSchema(schemaId) == "handwriting"
+    KeysConfigHelper.schemaSectionKind(schemaId) == "handwriting"

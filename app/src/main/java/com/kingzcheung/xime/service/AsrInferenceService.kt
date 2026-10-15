@@ -28,11 +28,21 @@ class AsrInferenceService : Service() {
 
         /** 语音会话结束后，多久无新会话即释放模型。 */
         private const val IDLE_RELEASE_DELAY_MS = 60_000L
+
+        /**
+         * 是否需要重建模型句柄：尚未加载，或已加载句柄对应的模型目录与请求不一致
+         * （用户切换了模型）。忽略目录变化会继续用旧模型识别。
+         */
+        internal fun shouldReloadHandle(handle: Long, loadedDir: String?, requestedDir: String): Boolean =
+            handle == 0L || loadedDir != requestedDir
     }
 
     private var asrHandle: Long = 0L
     private var asrCallback: IInferenceAsrCallback? = null
     private val asrLock = Any()
+
+    /** 当前句柄对应的模型目录。切换模型后目录变化，据此重建句柄。 */
+    private var loadedModelDir: String? = null
     // "保持引擎常驻"：开启时跳过空闲自动释放，模型常驻内存换响应速度
     @Volatile
     private var keepModelAlive = false
@@ -44,6 +54,7 @@ class AsrInferenceService : Service() {
                 AsrNative.nativeRelease(asrHandle)
                 asrHandle = 0L
                 asrCallback = null
+                loadedModelDir = null
                 FileLogger.i(TAG, "ASR model released after idle timeout")
             }
         }
@@ -63,8 +74,21 @@ class AsrInferenceService : Service() {
 
         override fun startAsr(modelDir: String, callback: IInferenceAsrCallback): Boolean {
             cancelIdleRelease()
-            // 模型加载耗时较长，放在 asrLock 外执行，避免阻塞其它 ASR 控制操作
-            if (synchronized(asrLock) { asrHandle } == 0L) {
+            // 已加载句柄对应的是旧模型目录（用户切换了模型）时必须先卸载重建，
+            // 否则会复用旧模型继续识别（文件名相同的模型曾完全无感）
+            val needReload = synchronized(asrLock) {
+                shouldReloadHandle(asrHandle, loadedModelDir, modelDir)
+            }
+            if (needReload) {
+                synchronized(asrLock) {
+                    if (asrHandle != 0L) {
+                        AsrNative.nativeRelease(asrHandle)
+                        asrHandle = 0L
+                        FileLogger.i(TAG, "ASR model dir changed, released old handle")
+                    }
+                    loadedModelDir = null
+                }
+                // 模型加载耗时较长，放在 asrLock 外执行，避免阻塞其它 ASR 控制操作
                 val handle = createAsrHandle(modelDir)
                 if (handle == 0L) {
                     Log.e(TAG, "Failed to create ASR recognizer from $modelDir")
@@ -73,7 +97,8 @@ class AsrInferenceService : Service() {
                 synchronized(asrLock) {
                     if (asrHandle == 0L) {
                         asrHandle = handle
-                        FileLogger.i(TAG, "ASR recognizer created, handle=$handle")
+                        loadedModelDir = modelDir
+                        FileLogger.i(TAG, "ASR recognizer created, handle=$handle, modelDir=$modelDir")
                     } else {
                         AsrNative.nativeRelease(handle)
                     }
@@ -139,6 +164,7 @@ class AsrInferenceService : Service() {
                     asrHandle = 0L
                 }
                 asrCallback = null
+                loadedModelDir = null
             }
         }
 
@@ -155,15 +181,14 @@ class AsrInferenceService : Service() {
         }
     }
 
-    /** 按 AsrModelInfo 权威清单定位模型文件并创建识别器（在 :asr 进程加载模型）。 */
+    /**
+     * 按模型目录名（即模型 id）解析文件清单并创建识别器（在 :asr 进程加载模型）。
+     * 不用 [AsrModelManager.getSelectedModelInfo]：跨进程读偏好可能滞后于刚切换的模型。
+     */
     private fun createAsrHandle(modelDir: String): Long {
         return try {
-            val info = AsrModelManager(this).getSelectedModelInfo()
-                ?: run {
-                    Log.e(TAG, "No selected ASR model")
-                    return 0L
-                }
             val dir = File(modelDir)
+            val info = AsrModelManager(this).getModelInfo(dir.name)
             val encoder = File(dir, info.encoderFile)
             val decoder = File(dir, info.decoderFile)
             val joiner = File(dir, info.joinerFile)
@@ -194,6 +219,7 @@ class AsrInferenceService : Service() {
                 asrHandle = 0L
             }
             asrCallback = null
+            loadedModelDir = null
         }
         super.onDestroy()
     }

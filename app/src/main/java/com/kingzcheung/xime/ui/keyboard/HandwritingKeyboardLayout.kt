@@ -35,6 +35,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kingzcheung.xime.handwriting.HandwritingEngine
@@ -44,6 +45,8 @@ import com.kingzcheung.xime.handwriting.HW_RECOGNIZE_WINDOW_LIMIT
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
 import com.kingzcheung.xime.handwriting.renderStrokes
+import com.kingzcheung.xime.settings.KeysConfigHelper
+import com.kingzcheung.xime.ui.isTablet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -53,6 +56,44 @@ import kotlinx.coroutines.withContext
 
 /** 超长闲置（ms）：停顿变淡后无新笔画达到此时长才真正清空识别窗口。 */
 private const val HW_CLEAR_IDLE_MS = 3000L
+
+/**
+ * 手写键盘「键面」（底栏 / 右侧符号栏）的设备档尺寸（画布本身不受影响）。
+ *
+ * 这几处是定尺的，**不随键盘区高度自动放大**，而平板键盘区高度约为手机的 1.6 倍
+ * （键盘高 = 屏高 × 比例）⇒ 平板上按 [TABLET_HINT_EXTRA_SCALE]（与平板键面提示同档）
+ * 放大，外围留白/圆角/间距与 26 键、面板、九键、笔画完全同档。
+ */
+internal data class HandwritingChrome(
+    /** 右侧符号栏宽度 */
+    val sheetWidthDp: Float,
+    /** 底栏高度 */
+    val barHeightDp: Float,
+    /** 键面内衬（相邻键面间距 = 2×） */
+    val keyPaddingDp: Float,
+    /** 底栏键间距 */
+    val gapDp: Float,
+    /** 键面文字 */
+    val fontSizeSp: Float,
+    /** 键盘区两侧留白（手机 4dp / 平板 16dp，见 [keyboardSidePaddingDp]） */
+    val sidePaddingDp: Float,
+    /** 键面圆角（设备档：手机 8dp / 平板 14dp） */
+    val keyCornerRadius: Dp,
+)
+
+/** 手写键面尺寸档：手机用历史尺寸，平板整体按提示档放大并换到平板外围留白。 */
+internal fun handwritingChromeFor(isTablet: Boolean, keyCornerRadius: Dp): HandwritingChrome {
+    val scale = if (isTablet) TABLET_HINT_EXTRA_SCALE else 1f
+    return HandwritingChrome(
+        sheetWidthDp = 56f * scale,
+        barHeightDp = 48f * scale,
+        keyPaddingDp = 1f * scale,
+        gapDp = 4f * scale,
+        fontSizeSp = 16f * scale,
+        sidePaddingDp = keyboardSidePaddingDp(isTablet),
+        keyCornerRadius = keyCornerRadius,
+    )
+}
 
 @Composable
 fun HandwritingKeyboardLayout(
@@ -91,8 +132,19 @@ fun HandwritingKeyboardLayout(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val sheetWPx = with(density) { 56.dp.toPx() }
-    val barHPx = with(density) { 48.dp.toPx() }
+    // 设备档（与 26 键 / 面板 / 九键 / 笔画同档）：底栏与右侧符号栏是定尺键面，
+    // 按 [handwritingChromeFor] 取手机/平板两档，圆角/间距/外围留白与其它键盘一致。
+    val tablet = isTablet()
+    val keyCornerRadius = keyCornerRadiusFor(KeysConfigHelper.getKeyboardKeyConfig(), "handwriting", tablet)
+    val chrome = handwritingChromeFor(tablet, keyCornerRadius)
+    val sheetWidth = chrome.sheetWidthDp.dp
+    val barHeight = chrome.barHeightDp.dp
+    val keyPadding = chrome.keyPaddingDp.dp
+    val buttonGap = chrome.gapDp.dp
+    val buttonFontSize = chrome.fontSizeSp.sp
+    val sidePadding = chrome.sidePaddingDp.dp
+    val sheetWPx = with(density) { sheetWidth.toPx() }
+    val barHPx = with(density) { barHeight.toPx() }
     val recognizer = remember { OverlappedHandwritingRecognizer() }
     var recognizeJob by remember { mutableStateOf<Job?>(null) }
 
@@ -222,19 +274,20 @@ fun HandwritingKeyboardLayout(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .fillMaxHeight()
-                .width(56.dp)
-                .padding(end = 4.dp, top = 4.dp, bottom = 52.dp),
+                .width(sheetWidth)
+                // 底部让出底栏（含其下边距），与底栏高度同档
+                .padding(end = buttonGap, top = buttonGap, bottom = barHeight + buttonGap),
             verticalArrangement = Arrangement.SpaceEvenly
         ) {
             listOf("，", "。", "？", "！", "删除").forEachIndexed { i, text ->
                 val pressed = pressedButton == i
                 Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(1.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(keyPadding)
+                        .clip(RoundedCornerShape(keyCornerRadius))
                         .background(if (pressed) Color(0x80000000) else Color(0x12000000)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(text, color = keyTextColor, fontSize = 16.sp,
+                    Text(text, color = keyTextColor, fontSize = buttonFontSize,
                         fontWeight = if (text.length <= 1) FontWeight.Normal else FontWeight.Medium,
                         textAlign = TextAlign.Center,
                         fontFamily = AppFonts.keyFontFamily)
@@ -246,9 +299,9 @@ fun HandwritingKeyboardLayout(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(48.dp)
-                .padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                .height(barHeight)
+                .padding(start = sidePadding, end = sidePadding, bottom = buttonGap),
+            horizontalArrangement = Arrangement.spacedBy(buttonGap)
         ) {
             listOf("符号" to "symbol", "123" to "number", "空格" to "space",
                   "ABC" to "ime_switch", "换行" to "enter"
@@ -262,12 +315,12 @@ fun HandwritingKeyboardLayout(
                     else -> 1f
                 }
                 Box(
-                    modifier = Modifier.weight(w).fillMaxSize().padding(1.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                    modifier = Modifier.weight(w).fillMaxSize().padding(keyPadding)
+                        .clip(RoundedCornerShape(keyCornerRadius))
                         .background(if (pressedButton == idx) Color(0x40000000) else bg),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(text, color = txtColor, fontSize = 16.sp,
+                    Text(text, color = txtColor, fontSize = buttonFontSize,
                         fontWeight = if (text.length <= 1) FontWeight.Normal else FontWeight.Medium,
                         textAlign = TextAlign.Center,
                         fontFamily = AppFonts.keyFontFamily)

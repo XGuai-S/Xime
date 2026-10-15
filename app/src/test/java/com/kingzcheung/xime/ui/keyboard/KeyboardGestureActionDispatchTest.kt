@@ -71,6 +71,41 @@ class KeyboardGestureActionDispatchTest {
     }
 
     @Test
+    fun `command 动作走按键路由（由上层把 symbol 等命令名映射为动作）`() {
+        val r = Recorder()
+        dispatchKeyActionOrPress(
+            KeyAction(action = GestureAction.COMMAND, value = "symbol"), null,
+            r.onKeyPress, r.onCommitText, r.onGestureAction,
+        )
+        assertEquals(listOf("symbol"), r.pressed)
+        assertEquals(emptyList<Pair<GestureAction, String>>(), r.gestures)
+    }
+
+    @Test
+    fun `command 未登记的命令名不上屏`() {
+        val r = Recorder()
+        dispatchKeyActionOrPress(
+            KeyAction(action = GestureAction.COMMAND, value = "symobl"), null,
+            r.onKeyPress, r.onCommitText, r.onGestureAction,
+        )
+        assertEquals(emptyList<String>(), r.pressed)
+        assertEquals(emptyList<String>(), r.committed)
+    }
+
+    @Test
+    fun `上滑 command 动作同样走按键路由且不直连上屏`() {
+        val r = Recorder()
+        val handler = swipeUpHandlerFor(
+            KeyAction(action = GestureAction.COMMAND, value = "symbol"), "symbol",
+            r.onKeyPress, r.onCommitText, r.onGestureAction,
+        )
+        handler!!.invoke("符号")
+        assertEquals(listOf("symbol"), r.pressed)
+        assertEquals(emptyList<String>(), r.committed)
+        assertEquals(emptyList<Pair<GestureAction, String>>(), r.gestures)
+    }
+
+    @Test
     fun `tap 的 action none 不触发任何回调`() {
         val r = Recorder()
         dispatchKeyActionOrPress(
@@ -100,14 +135,18 @@ class KeyboardGestureActionDispatchTest {
     }
 
     @Test
-    fun `上滑 action none 视为未绑定`() {
+    fun `上滑 action none 生成吸收处理器且不上屏`() {
         val r = Recorder()
-        assertNull(
-            swipeUpHandlerFor(
-                KeyAction(action = GestureAction.NONE), "1",
-                r.onKeyPress, r.onCommitText, r.onGestureAction,
-            )
+        val handler = swipeUpHandlerFor(
+            KeyAction(action = GestureAction.NONE), "1",
+            r.onKeyPress, r.onCommitText, r.onGestureAction,
         )
+        // 与下滑/左右滑一致：none 吸收上滑，避免竖向拖拽被落点判定误打出字符
+        assertNotNull(handler)
+        handler!!.invoke("1")
+        assertEquals(emptyList<String>(), r.pressed)
+        assertEquals(emptyList<String>(), r.committed)
+        assertEquals(emptyList<Pair<GestureAction, String>>(), r.gestures)
     }
 
     @Test

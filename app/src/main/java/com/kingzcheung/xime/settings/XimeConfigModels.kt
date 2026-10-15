@@ -52,60 +52,6 @@ data class KeyboardShadowConfig(
     val shapeRadius: Int = 8,
 )
 
-/**
- * 单个键盘的间距覆盖配置。
- */
-data class KeyboardSpacingConfig(
-    val spacingX: Float? = null,
-    val spacingY: Float? = null,
-)
-
-/**
- * 键盘按键配置，从 xime.yaml keyboard.key 加载。
- */
-data class KeyboardKeyConfig(
-    val cornerRadius: Int = 8,
-    /** 按键横向间距（dp），未配置时各布局使用自身默认值 */
-    val spacingX: Float? = null,
-    /** 按键竖向间距（dp），未配置时各布局使用自身默认值 */
-    val spacingY: Float? = null,
-    /** 各键盘单独覆盖的间距，key 为键盘名（qwerty/t9/number/stroke/symbol） */
-    val spacingOverrides: Map<String, KeyboardSpacingConfig> = emptyMap(),
-) {
-    /**
-     * 获取指定键盘的有效间距（覆盖值优先，回退全局值）。
-     * @return Pair(横向, 竖向)，null 表示未配置
-     */
-    fun spacingFor(keyboard: String): Pair<Float?, Float?> {
-        val override = spacingOverrides[keyboard]
-        val sx = override?.spacingX ?: spacingX
-        val sy = override?.spacingY ?: spacingY
-        return sx to sy
-    }
-}
-
-/**
- * 键盘颜色配置，从 xime.yaml keyboard.colors 加载。
- * 所有颜色值为 0xRRGGBB 格式（不含 alpha）。
- */
-/** 全局键盘颜色后备，背景色已由 color_schemes 的 keyboard_background 接管。 */
-data class KeyboardColorsConfig(
-    val keyBgColor: Long = 0xFFFFFF,
-    val keyBgColorDark: Long = 0x4A4A4A,
-    val specialKeyBgColor: Long? = null,
-    val specialKeyBgColorDark: Long? = null,
-    val keyTextColor: Long = 0x202124,
-    val keyTextColorDark: Long = 0xE8EAED,
-    val candidateTextColor: Long = 0x1A73E8,
-    val candidateTextColorDark: Long = 0x8AB4F8,
-) {
-    companion object {
-        /** 键盘背景后备色，仅当 color_schemes 无 keyboard_background 时使用。 */
-        const val FALLBACK_BG_LIGHT: Long = 0xE3E4E8
-        const val FALLBACK_BG_DARK: Long = 0x202020
-    }
-}
-
 // ── 原有配置类 ──
 
 /**
@@ -466,4 +412,5 @@ data class KeysConfig(
     val swipeUp: Map<String, String> = emptyMap(),
     val swipeDownEnglish: Map<String, String> = emptyMap()
 )
+
 

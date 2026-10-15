@@ -42,6 +42,7 @@ fun SettingsScreen(
                 onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
                 onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
                 onNavigateToSmartPrediction = { navController.navigate(SettingsRoutes.SmartPrediction) },
+                onNavigateToCorrection = { navController.navigate(SettingsRoutes.Correction) },
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
                 onNavigateToAbout = { navController.navigate(SettingsRoutes.About) },
                 onNavigateToClipboard = { navController.navigate(SettingsRoutes.Clipboard) },
@@ -185,6 +186,11 @@ fun SettingsScreen(
                 }
             )
         }
+        composable(SettingsRoutes.Correction) {
+            CorrectionSettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
         composable(SettingsRoutes.SpeechToText) {
             SpeechToTextSettingsContent(
                 onBack = { navController.popBackStack() },
@@ -242,7 +248,10 @@ fun SettingsScreen(
             BackupSettingsContent(
                 onBack = { navController.popBackStack() },
                 onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
-                onNavigateToMarket = { navController.navigate(SettingsRoutes.MarketPlugins) }
+                onNavigateToMarket = { navController.navigate(SettingsRoutes.MarketPlugins) },
+                onNavigateToPluginSettings = { pluginId ->
+                    navController.navigate("${SettingsRoutes.PluginSettings}/$pluginId")
+                }
             )
         }
         composable(SettingsRoutes.About) {

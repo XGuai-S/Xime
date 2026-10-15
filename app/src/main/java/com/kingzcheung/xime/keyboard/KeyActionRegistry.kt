@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.keyboard
+package com.kingzcheung.xime.keyboard
 
 import android.view.KeyEvent
 
@@ -82,15 +82,12 @@ object KeyActionRegistry {
     )
 
     private val byId = LinkedHashMap<String, Handler>()
-    private val byCommand = LinkedHashMap<String, Handler>()
 
     init {
         register("commit", ActionDomain.SERVICE, GestureAction.COMMIT) { c, v -> c.service.commitText(v) }
         register("send_rime", ActionDomain.SERVICE, GestureAction.SEND_RIME) { c, v -> c.service.dispatchKey(v) }
-        register("command", ActionDomain.SERVICE, GestureAction.COMMAND) { c, v ->
-            val handler = fromCommand(v)
-            if (handler != null) handler.execute(c, v) else c.service.executeCommand(v)
-        }
+        // command 由 UI 手势层按命令名白名单走按键路由；此处仅保留服务域兜底执行体
+        register("command", ActionDomain.SERVICE, GestureAction.COMMAND) { c, v -> c.service.executeCommand(v) }
         register("select_all", ActionDomain.SERVICE, GestureAction.SELECT_ALL) { c, _ ->
             c.service.performEditorMenuAction(android.R.id.selectAll)
         }
@@ -108,6 +105,15 @@ object KeyActionRegistry {
         }
         register("line_end", ActionDomain.SERVICE, GestureAction.LINE_END) { c, _ ->
             c.service.sendKeyEvent(KeyEvent.KEYCODE_MOVE_END)
+        }
+        register("cursor_left", ActionDomain.SERVICE, GestureAction.CURSOR_LEFT) { c, v ->
+            c.service.moveCursor(-cursorSteps(v))
+        }
+        register("cursor_right", ActionDomain.SERVICE, GestureAction.CURSOR_RIGHT) { c, v ->
+            c.service.moveCursor(cursorSteps(v))
+        }
+        register("tab", ActionDomain.SERVICE, GestureAction.TAB) { c, _ ->
+            c.service.sendKeyEvent(KeyEvent.KEYCODE_TAB)
         }
         register("undo", ActionDomain.SERVICE, GestureAction.UNDO) { c, _ ->
             c.service.performEditorMenuAction(android.R.id.undo)
@@ -138,20 +144,7 @@ object KeyActionRegistry {
         }
         register("clear_all", ActionDomain.SERVICE, GestureAction.CLEAR_ALL) { c, _ -> c.service.dispatchKey("clear_all") }
         register("undo_clear", ActionDomain.SERVICE, GestureAction.UNDO_CLEAR) { c, _ -> c.service.dispatchKey("undo_clear") }
-
-        // 光标左右移动（空格键左右滑等）：value 为步数，缺省 1 步
-        register("cursor_left", ActionDomain.SERVICE, GestureAction.CURSOR_LEFT) { c, v ->
-            c.service.moveCursor(-cursorSteps(v))
-        }
-        register("cursor_right", ActionDomain.SERVICE, GestureAction.CURSOR_RIGHT) { c, v ->
-            c.service.moveCursor(cursorSteps(v))
-        }
-
-        // 内置命令：保持与旧命令执行完全一致的语义
-        for (name in listOf("clear_composition", "show_ime_picker")) {
-            registerCommand(Handler(name, ActionDomain.SERVICE, null) { c, v -> c.service.executeCommand(v) })
-        }
-    }
+}
 
     /** 光标移动步数：value 缺省或非法时为 1 步。 */
     private fun cursorSteps(value: String): Int = value.toIntOrNull()?.coerceIn(1, 50) ?: 1
@@ -172,14 +165,6 @@ object KeyActionRegistry {
 
     /** 按 YAML `action` 取值查询动作，未知取值返回 null。 */
     fun fromId(id: String): Handler? = byId[id]
-
-    /** 登记/覆盖一个命令名动作。 */
-    fun registerCommand(handler: Handler) {
-        byCommand[handler.id] = handler
-    }
-
-    /** 按命令名查询命令动作，未登记返回 null。 */
-    fun fromCommand(name: String): Handler? = byCommand[name]
 
     /** 执行一个动作类型。 */
     fun execute(action: GestureAction, context: KeyActionContext, value: String) {

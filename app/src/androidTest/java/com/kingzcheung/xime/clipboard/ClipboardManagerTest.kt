@@ -64,6 +64,16 @@ class ClipboardManagerTest {
     }
 
     @Test
+    fun registersSystemClipboardListenerOnInit() {
+        // b592c882 回归：init 漏调用 startListening() 时，复制图片/文本整体不入库
+        // （监听器未注册 → readClipboard() 永远不被触发）。
+        assertTrue(
+            "ClipboardManager 初始化后必须已注册系统剪贴板监听",
+            clipboardManager.isListeningToSystemClipboard
+        )
+    }
+
+    @Test
     fun clipboardItemsEmptyInitially() {
         assertTrue("Initial clipboard should be empty", clipboardManager.clipboardItems.value.isEmpty())
     }

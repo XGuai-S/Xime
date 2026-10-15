@@ -63,6 +63,7 @@ import com.kingzcheung.xime.service.ExpandedCandidatePager
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.ui.menubar.CandidateReorderView
+import com.kingzcheung.xime.ui.isTablet
 import com.kingzcheung.xime.ui.menubar.ClipboardView
 import com.kingzcheung.xime.ui.menubar.SchemaListView
 import com.kingzcheung.xime.ui.menubar.ToolbarCustomizeView
@@ -176,7 +177,8 @@ fun KeyboardView(
         val prevContext = lastAsciiContext
         val curContext = viewState.asciiContext()
         lastAsciiContext = curContext
-        if (prevContext == null || prevContext == curContext) return@LaunchedEffect
+        // curContext 为 null（符号面板）时不参与同步：不进/退该面板都不碰引擎中英态
+        if (prevContext == null || curContext == null || prevContext == curContext) return@LaunchedEffect
         viewModel.asciiStateMachine.saveMemory(prevContext, state.isAsciiMode)
         val target = viewModel.asciiStateMachine.targetFor(curContext, state.isAsciiMode)
         if (target != null) {
@@ -439,6 +441,10 @@ fun KeyboardView(
                     if (item is ToolbarButtonItem.Builtin && item.button == ToolbarButton.HANDWRITING_LOOKUP) {
                         if (!com.kingzcheung.xime.handwriting.HandwritingEngine.hasModel(LocalContext.current)) return@mapNotNull null
                     }
+                    // 语音转文本开关关闭时隐藏工具栏语音按钮
+                    if (item is ToolbarButtonItem.Builtin && item.button == ToolbarButton.VOICE && !state.isSttEnabled) {
+                        return@mapNotNull null
+                    }
                     val toolbarContext = LocalContext.current
                     val onClick: () -> Unit = when (item) {
                         is ToolbarButtonItem.Builtin -> when (item.button) {
@@ -672,11 +678,12 @@ fun KeyboardView(
                 }
                 // 九键左栏复刻：输入/选择态显示音节拼音候选（与键盘左栏同源，
                 // 点击切换音节后服务层重拉全量候选刷新本页），空闲态回落 side_symbols；
-                // 左栏宽度与九键键盘左栏视觉同宽：九键竖屏根容器有左右各 4dp 边距
-                // （padding start/end 4dp），Row 内 spacedBy(2dp)×2，weight 基数 =
-                // 页宽-8-4；左栏列 = 基数×0.8/5，面板再带 LocalKeyVisualPadding
-                // 水平缩进（keySpacingX ?: 2dp）——展开页左栏为全宽背景，同额扣除
-                // （横屏九键无左栏不缩放）。
+                // 左栏宽度 = 九键键盘左栏列宽（与键盘态同一条公式 [t9LeftRailWidthDp]）：
+                // 键位区基数 = 页宽 − 两侧外围留白（手机 4dp / 平板 16dp）− 2 个列间隙(2dp)，
+                // 左栏列 = 基数×0.8/5（浮点不取整，取整会有 ±1dp 背景宽度差）。
+                // 水平缩进（keySpacingX）由展开页容器自理——与键盘态面板的
+                // LocalKeyVisualPadding 同源，展开/收起切换背景块尺寸不变
+                // （手机横屏九键无左栏不缩放；平板横屏与竖屏同款，有左栏）。
                 // 页宽基准：悬浮模式展开页渲染在卡片内（0.85×短边宽），必须按卡片宽
                 // 计算——此前用全屏 screenWidthDp，横屏悬浮下左栏 ≈0.16×长边，占掉
                 // 窄卡片四成宽度，中间候选区被压成细条（候选字裁成"细线"）
@@ -686,15 +693,23 @@ fun KeyboardView(
                     else -> screenW
                 }
                 val isT9Layout = keyboardState is KeyboardLayoutState.T9Pinyin
-                val t9RailWidthDp = if (isT9Layout && !isLandscape) {
-                    val railInset = kbKey.spacingFor("t9").first ?: 2f
-                    ((expandedPageWidthDp - 12) * 0.8f / 5f -
-                        railInset * 2f + 0.5f).toInt().coerceAtLeast(32)
-                } else 0
+                val hasT9LeftRail = isT9Layout && t9HasLeftRail(isLandscape, isTablet())
+                val t9RailWidthDp = if (hasT9LeftRail) {
+                    t9LeftRailWidthDp(expandedPageWidthDp.toFloat(), isTablet())
+                } else 0f
                 // 左栏垂直缩进与九键左栏面板同源（keySpacingY ?: 2dp），展开/收起
                 // 切换时左栏顶部不跳位；其余布局 6dp = 原 Row 垂直边距
-                val t9RailInsetDp = if (isT9Layout && !isLandscape)
+                val t9RailInsetDp = if (hasT9LeftRail)
                     (kbKey.spacingFor("t9").second ?: 2f).toInt() else 6
+                // 左栏水平缩进与九键面板 LocalKeyVisualPadding 同源（keySpacingX ?: 2dp）
+                val t9RailInsetXDp = if (hasT9LeftRail)
+                    kbKey.spacingFor("t9").first ?: 2f else 0f
+                // 键位视觉缩进垂直分量（keySpacingY ?: 2dp）：列表容器/切换键在键位区内缩
+                val t9RailInsetYDp = if (hasT9LeftRail)
+                    kbKey.spacingFor("t9").second ?: 2f else 0f
+                // 键位区底部留白 = 九键键盘根容器的 bottom=8dp（T9KeyboardLayout 竖屏分支），
+                // 对齐其符号键底边
+                val t9RailBottomInsetDp = if (hasT9LeftRail) 8 else 0
                 val railPinyinOptions =
                     if (isT9Layout) t9Controller.firstOptions.map { it.pinyin } else emptyList()
                 val railSelectedPinyinIndex =
@@ -736,6 +751,15 @@ fun KeyboardView(
                         railSymbols = customRailSymbols.orEmpty(),
                         leftRailWidthDp = t9RailWidthDp,
                         leftRailInsetDp = t9RailInsetDp,
+                        leftRailInsetXDp = t9RailInsetXDp,
+                        leftRailInsetYDp = t9RailInsetYDp,
+                        leftRailBottomInsetDp = t9RailBottomInsetDp,
+                        // 右栏列宽与九键右列同公式（右列/左列同为 0.8/5 权重）
+                        rightRailWidthDp = t9RailWidthDp,
+                        // 阴影仅九键竖屏左栏复刻（其余布局左栏历来无阴影，保持原样）
+                        railShadowEnabled = hasT9LeftRail && kbShadow.enabled,
+                        railShadowElevationDp = kbShadow.elevation.toFloat(),
+                        railShadowRadiusDp = kbShadow.shapeRadius.toFloat(),
                         railPinyinOptions = railPinyinOptions,
                         railSelectedPinyinIndex = railSelectedPinyinIndex,
                         railAccentColor = accentColor,
@@ -916,6 +940,8 @@ fun KeyboardView(
                                     ))
                                 }
                                 "emoji" -> viewModel.showOverlay(OverlayRoute.Emoji)
+                                // 与 emoji 同档：command: symbol / 自定义键发 "symbol" 时打开符号面板
+                                "symbol" -> viewModel.showOverlay(OverlayRoute.Symbol)
                                 else -> {
                                     callbacks.onKeyPress(key, isShifted)
                                     viewModel.onCharacterTyped()
@@ -924,6 +950,9 @@ fun KeyboardView(
                         }
                         val numberOnKeyPress: (String) -> Unit = { key ->
                             when (key) {
+                                // 面板上的 shift/caps 键（caps 功能键 id 发 "shift_caps"）：
+                                // 接入 26 键同款 shift 状态机，避免字符串落到引擎被当成编码
+                                "shift", "shift_single", "shift_caps" -> viewModel.consumeShiftKey(key)
                                 "abc" -> {
                                     callbacks.onKeyPress("abc", false)
                                     if (page is KeyboardPage.Panel) {
@@ -972,6 +1001,7 @@ fun KeyboardView(
                         }
                         val commonSymbolOnKeyPress: (String) -> Unit = { key ->
                             when (key) {
+                                "shift", "shift_single", "shift_caps" -> viewModel.consumeShiftKey(key)
                                 "abc" -> {
                                     // 返回主键盘：面板内 ascii 模式不应影响主键盘布局，
                                     // 用主键盘记忆（或恢复进入面板前状态），避免"先英文后切回中文"闪变。
@@ -1208,10 +1238,15 @@ fun KeyboardView(
             val isPanelKeyboard = page is KeyboardPage.Panel
             if (isPanelKeyboard) {
                 val panelType = (page as KeyboardPage.Panel).type
+                // 面板圆角与平板 26 键共用同一条规则（yaml 按键盘覆盖优先 → 设备档默认，
+                // 平板用大键面档）：xime.yaml 写 keyboard.key.number/symbol.corner_radius 可单独调
+                val numberPanelRadius = keyCornerRadiusFor(kbKey, "number", isTablet())
+                val symbolPanelRadius = keyCornerRadiusFor(kbKey, "symbol", isTablet())
                 when (panelType) {
                     PanelType.NUMBER -> NumberKeyboardLayout(
                         onKeyPress = { key ->
                             when (key) {
+                                "shift", "shift_single", "shift_caps" -> viewModel.consumeShiftKey(key)
                                 "abc" -> viewModel.exitPanel()
                                 "symbol" -> {
                                     viewModel.showOverlay(OverlayRoute.Symbol)
@@ -1229,10 +1264,11 @@ fun KeyboardView(
                         keyboardBackgroundColor = keyboardBgColor,
                         shadowEnabled = kbShadow.enabled,
                         shadowElevation = kbShadow.elevation.dp,
-                        shadowShapeRadius = kbShadow.shapeRadius.dp,
-                        keyCornerRadius = kbKey.cornerRadius.dp,
-                        keySpacingX = kbKey.spacingFor("number").first?.dp,
-                        keySpacingY = kbKey.spacingFor("number").second?.dp,
+                        // 平板参数档：阴影圆角不小于键圆角（与主键盘同规则）
+                        shadowShapeRadius = maxOf(kbShadow.shapeRadius.dp, numberPanelRadius),
+                        keyCornerRadius = numberPanelRadius,
+                        keySpacingX = kbKey.spacingFor("number").first?.dp ?: if (isTablet()) 4.dp else null,
+                        keySpacingY = kbKey.spacingFor("number").second?.dp ?: if (isTablet()) 6.dp else null,
                         onKeyPressDown = callbacks.onKeyPressDown,
                         isFloatingMode = state.isFloatingMode,
                         specialKeyTextColor = specialKeyTextColor,
@@ -1242,9 +1278,11 @@ fun KeyboardView(
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
 
-                    PanelType.COMMON_SYMBOL -> CommonSymbolKeyboardLayout(
+                    PanelType.COMMON_SYMBOL -> PanelKeyboardLayout(
+                        section = "common_symbols",
                         onKeyPress = { key ->
                             when (key) {
+                                "shift", "shift_single", "shift_caps" -> viewModel.consumeShiftKey(key)
                                 "abc" -> {
                                     viewModel.exitPanel()
                                 }
@@ -1260,10 +1298,10 @@ fun KeyboardView(
                                 else -> callbacks.onKeyPress(key, false)
                             }
                         },
+                        viewModel = viewModel,
+                        callbacks = callbacks,
+                        uiState = state,
                         isAsciiMode = state.isAsciiMode,
-                        initialAsciiMode = viewModel.asciiStateMachine.targetFor(
-                            AsciiKeyboardContext.SYMBOL_PANEL, state.isAsciiMode
-                        ) ?: state.isAsciiMode,
                         keyBackgroundColor = keyBgColor,
                         keyTextColor = keyTextColor,
                         specialKeyBackgroundColor = specialKeyBgColor,
@@ -1271,13 +1309,14 @@ fun KeyboardView(
                         keyboardBackgroundColor = keyboardBgColor,
                         shadowEnabled = kbShadow.enabled,
                         shadowElevation = kbShadow.elevation.dp,
-                        shadowShapeRadius = kbShadow.shapeRadius.dp,
-                        keyCornerRadius = kbKey.cornerRadius.dp,
-                        keySpacingX = kbKey.spacingFor("symbol").first?.dp,
-                        keySpacingY = kbKey.spacingFor("symbol").second?.dp,
+                        shadowShapeRadius = maxOf(kbShadow.shapeRadius.dp, symbolPanelRadius),
+                        keyCornerRadius = symbolPanelRadius,
+                        keySpacingX = kbKey.spacingFor("symbol").first?.dp ?: if (isTablet()) 4.dp else null,
+                        keySpacingY = kbKey.spacingFor("symbol").second?.dp ?: if (isTablet()) 6.dp else null,
                         onKeyPressDown = callbacks.onKeyPressDown,
                         isFloatingMode = state.isFloatingMode,
                         specialKeyTextColor = specialKeyTextColor,
+                        landscapeSplit = SettingsPreferences.isLandscapeSplitKeyboardEnabled(LocalContext.current),
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
 
@@ -1548,6 +1587,9 @@ fun KeyboardView(
                         },
                         onPullRemote = callbacks.onClipboardPullRemote,
                         pullRemoteAvailable = state.clipboardSyncEnabled,
+                        // 拖拽发送启动成功后收起键盘：露出目标应用输入框（Gboard 式体验），
+                        // 复用系统隐藏链路（clearInputState + requestHideSelf）
+                        onDragSendStarted = callbacks.onHideKeyboard,
                     )
                     is OverlayRoute.ToolbarCustomize -> ToolbarCustomizeView(
                         toolbarButtons = state.toolbarButtons,
@@ -1577,7 +1619,7 @@ fun KeyboardView(
                             accentColor = accentColor,
                             keyBgColor = keyBgColor,
                             bottomPaddingDp = state.keyboardBottomPaddingDp,
-                            keyCornerRadius = kbKey.cornerRadius.dp,
+                            keyCornerRadius = overlayKeyCornerRadius(kbKey, isTablet()),
                             shadowEnabled = kbShadow.enabled,
                             shadowElevation = kbShadow.elevation.dp,
                             shadowShapeRadius = kbShadow.shapeRadius.dp,
@@ -1616,6 +1658,8 @@ fun KeyboardView(
                         textColor = keyTextColor,
                         accentColor = accentColor,
                         keyBgColor = keyBgColor,
+                        specialKeyBgColor = specialKeyBgColor,
+                        specialKeyTextColor = specialKeyTextColor,
                         bottomPaddingDp = state.keyboardBottomPaddingDp,
                         modifier = Modifier.fillMaxWidth().fillMaxHeight(),
                         onHapticFeedback = onHapticFeedback,
@@ -1676,3 +1720,21 @@ private data class ReorderOverlayData(
     val code: String,
     val initialOrder: List<String>,
 )
+
+/**
+ * 面板类键盘（数字 / 常用符号）上的 shift / caps 键：`caps` 功能键 id 会发 "shift_caps"，
+ * 而面板没有可作用的字符，这里接到与 26 键相同的 shift 状态机（大写锁定保留，回 26 键生效），
+ * 返回 true 表示已消费——否则这些字符串会继续走到引擎被当成编码输入。
+ */
+private fun KeyboardViewModel.consumeShiftKey(key: String): Boolean = when (key) {
+    "shift" -> {
+        toggleShift(); true
+    }
+    "shift_single" -> {
+        singleTapShift(); true
+    }
+    "shift_caps" -> {
+        doubleTapShift(); true
+    }
+    else -> false
+}

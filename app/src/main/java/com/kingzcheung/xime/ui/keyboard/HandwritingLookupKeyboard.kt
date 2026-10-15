@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.ui.keyboard
+package com.kingzcheung.xime.ui.keyboard
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -23,6 +23,8 @@ import com.kingzcheung.xime.handwriting.HandwritingStrokeFx
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
 import com.kingzcheung.xime.handwriting.renderStrokes
+import com.kingzcheung.xime.keyboard.KeyboardDimensions
+import com.kingzcheung.xime.ui.isTablet
 import com.kingzcheung.xime.viewmodel.KeyboardUiState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,6 +49,8 @@ fun HandwritingLookupKeyboard(
     onExit: () -> Unit,
     clearSignal: Int,
     modifier: Modifier = Modifier,
+    /** 键面圆角（设备档：平板 14dp）——与 26 键/面板/主手写键盘同档。 */
+    keyCornerRadius: androidx.compose.ui.unit.Dp = 8.dp,
 ) {
     val strokes = remember { mutableStateListOf<List<StrokePoint>>() }
     // 与主手写键盘一致的叠写视觉状态（三段前缀渲染 + 识别窗口），见 HandwritingStrokeFx
@@ -130,6 +134,7 @@ fun HandwritingLookupKeyboard(
         }
     }
 
+    CompositionLocalProvider(LocalKeyCornerRadius provides keyCornerRadius) {
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -206,12 +211,18 @@ fun HandwritingLookupKeyboard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(start = 4.dp, end = 4.dp, bottom = 8.dp)
+                    // 两侧留白与外围档同源（手机 4dp / 平板 16dp），与其它键盘键面对齐
+                    .padding(
+                        start = keyboardSidePaddingDp(isTablet()).dp,
+                        end = keyboardSidePaddingDp(isTablet()).dp,
+                        bottom = 8.dp,
+                    )
             ) {
                 KeyButton("返回", { onExit() }, specialKeyBgColor, specialKeyTextColor, Modifier.weight(1f), onPress = { onButtonFeedback?.invoke("exit") }, shadowEnabled = shadowEnabled, shadowElevation = shadowElevation, shadowShapeRadius = shadowShapeRadius)
                 Spacer(Modifier.weight(4f))
                 KeyButton("回车", { onKeyPress("enter") }, specialKeyBgColor, specialKeyTextColor, Modifier.weight(1f), onPress = { onButtonFeedback?.invoke("enter") }, shadowEnabled = shadowEnabled, shadowElevation = shadowElevation, shadowShapeRadius = shadowShapeRadius)
             }
         }
+    }
     }
 }

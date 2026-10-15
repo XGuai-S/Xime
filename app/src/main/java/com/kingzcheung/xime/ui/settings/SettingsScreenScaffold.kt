@@ -9,6 +9,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -27,6 +29,7 @@ import androidx.compose.ui.graphics.Color
  * @param containerColor Scaffold 底色。默认取 [MaterialTheme.colorScheme.surface]
  *   （多数页面如此）；少数页面沿用 Material3 Scaffold 的默认值
  *   [MaterialTheme.colorScheme.background]，迁移时按原值显式传入以保持行为不变。
+ * @param snackbarHost Snackbar 宿主；需要即时反馈（如备份/删除结果）的页面传入。
  * @param actions 标题栏右侧动作区，默认空（与 [TopAppBar] 自身默认一致）。
  * @param floatingActionButton 右下角悬浮按钮，默认空（与 [Scaffold] 自身默认一致）。
  */
@@ -36,12 +39,14 @@ internal fun SettingsScreenScaffold(
     title: String,
     onBack: () -> Unit,
     containerColor: Color = MaterialTheme.colorScheme.surface,
+    snackbarHost: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
     Scaffold(
         containerColor = containerColor,
+        snackbarHost = snackbarHost,
         topBar = {
             TopAppBar(
                 title = { Text(title) },

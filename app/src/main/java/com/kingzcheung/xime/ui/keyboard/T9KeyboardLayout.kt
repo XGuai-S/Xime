@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.ui.keyboard
+package com.kingzcheung.xime.ui.keyboard
 
 import android.annotation.SuppressLint
 import android.content.res.Configuration
@@ -39,6 +39,7 @@ import com.kingzcheung.xime.keyboard.GestureAction
 import com.kingzcheung.xime.settings.DisplayMode
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.swipeHandlerFor
+import com.kingzcheung.xime.ui.isTablet
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -159,6 +160,29 @@ fun T9KeyboardLayout(
 }
 
 
+// ─── 九键左栏（候选/符号列）几何：键盘态与候选展开页共用同一公式 ────────
+
+/** 九键三列之间的 `Arrangement.spacedBy`（共 2 个间隙）。 */
+internal const val T9_COLUMN_GAP_DP = 2f
+
+/**
+ * 九键左栏是否显示：竖屏一直有；手机横屏键矮，左栏让位给顶部候选栏；
+ * 平板横屏键盘区足够高，与竖屏同款（见 [T9KeyboardSwipeOverlay] 的 compactLandscape）。
+ */
+internal fun t9HasLeftRail(isLandscape: Boolean, isTablet: Boolean): Boolean = !isLandscape || isTablet
+
+/**
+ * 九键左栏列宽（dp）：与键盘态左栏同一条公式，供候选展开页复刻左栏
+ * （展开/收起时左栏不横移）。
+ *
+ * 键位区基数 = 页宽 − 两侧外围留白（[keyboardSidePaddingDp]）− 2 个列间隙；
+ * 左栏权重 0.8 / 三列总权重 5。
+ */
+internal fun t9LeftRailWidthDp(pageWidthDp: Float, isTablet: Boolean): Float {
+    val base = pageWidthDp - 2 * keyboardSidePaddingDp(isTablet) - 2 * T9_COLUMN_GAP_DP
+    return (base * 0.8f / 5f).coerceAtLeast(32f)
+}
+
 // ─── 滑动气泡覆盖层（隔离 swipeState 作用域，避免全键盘重组） ────────
 
 @Composable
@@ -190,6 +214,11 @@ private fun T9KeyboardSwipeOverlay(
 ) {
     val swipeBubble = rememberSwipeBubbleController()
     var keyboardBounds by remember { mutableStateOf(Rect(0f, 0f, 0f, 0f)) }
+    // 设备档：平板键盘区高度约为手机的 1.6 倍（键盘高 = 屏高 × 比例），所以
+    // ① 横屏紧凑档（去掉左栏 + 收小字号）只在手机横屏生效，平板横屏用竖屏同款布局；
+    // ② 外围留白/提示档按设备档（`panelOuterPadding` 与 26 键、面板共用同一条）。
+    val tablet = isTablet()
+    val compactLandscape = isLandscape && !tablet
 
     val isDarkTheme = keyTextColor == Color(0xFFE8EAED)
 
@@ -203,7 +232,15 @@ private fun T9KeyboardSwipeOverlay(
         keyboardWidth = keyboardBounds.width
     )
 
-    CompositionLocalProvider(LocalKeyCornerRadius provides keyCornerRadius) {
+    // 外围留白与设备档（面板/26 键同源）：手机竖屏 4/4/8、手机横屏 50/2、平板 16/16/8
+    val outerPadding = panelOuterPadding(isLandscape = isLandscape, isTablet = tablet)
+
+    CompositionLocalProvider(
+        LocalKeyCornerRadius provides keyCornerRadius,
+        // 键面提示与主键盘同一档：手机横屏/平板画到键角，平板放大加深
+        LocalSwipeHintCorner provides swipeHintCornerFor(isLandscape, tablet),
+        LocalHintExtraScale provides hintExtraScaleFor(tablet),
+    ) {
     Box(
         modifier = modifier
             .onGloballyPositioned { coordinates ->
@@ -214,8 +251,8 @@ private fun T9KeyboardSwipeOverlay(
                 bubbleData?.let { drawSwipeBubble(it) }
             }
             .padding(bottom = if (isFloatingMode || isLandscape) 0.dp else 0.dp)) {
-        if (isLandscape) {
-            // 横屏：去除原左侧候选大面板（候选已在顶部候选栏展示），
+        if (compactLandscape) {
+            // 手机横屏：去除原左侧候选大面板（候选已在顶部候选栏展示），
             // 九键布局撑满键盘区域（与全键盘横屏同款 50dp 边距）
             CompositionLocalProvider(
                 LocalKeyVisualPadding provides PaddingValues(
@@ -226,7 +263,7 @@ private fun T9KeyboardSwipeOverlay(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(vertical = 2.dp, horizontal = 50.dp),
+                        .padding(outerPadding),
                 ) {
                     T9KeyboardContent(
                         onKeyPress = onKeyPress,
@@ -260,7 +297,7 @@ private fun T9KeyboardSwipeOverlay(
                     modifier = Modifier
                         .fillMaxWidth()
                         .fillMaxHeight()
-                        .padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
+                        .padding(outerPadding),
                 ) {
                     T9KeyboardContent(
                         onKeyPress = onKeyPress,
@@ -331,6 +368,8 @@ private fun T9KeyboardContent(
         val gesture = KeysConfigHelper.getT9KeyGesture(id) ?: return T9KeySwipes()
         val upHint = gesture.swipeUp?.let { it.label.ifEmpty { it.value } }
         val downHint = gesture.swipeDown?.let { it.label.ifEmpty { it.value } }
+        val leftHint = gesture.swipeLeft?.let { it.label.ifEmpty { it.value } }
+        val rightHint = gesture.swipeRight?.let { it.label.ifEmpty { it.value } }
         // display 只管静态键面提示位置（bubble 不画键面，用空串压制回退）；
         // 运行时气泡由 bubble 独立控制。手势回调与二者无关。
         val swipeUpKeyLabel = when {
@@ -343,13 +382,27 @@ private fun T9KeyboardContent(
             gesture.swipeDown?.display == DisplayMode.BUBBLE -> ""
             else -> downHint
         }
+        val swipeLeftKeyLabel = when {
+            !hintsActive -> null
+            gesture.swipeLeft?.display == DisplayMode.BUBBLE -> ""
+            else -> leftHint
+        }
+        val swipeRightKeyLabel = when {
+            !hintsActive -> null
+            gesture.swipeRight?.display == DisplayMode.BUBBLE -> ""
+            else -> rightHint
+        }
         return T9KeySwipes(
             onSwipeUp = swipeHandlerFor(gesture.swipeUp, commitDirect, onGestureAction),
             onSwipeDown = swipeHandlerFor(gesture.swipeDown, commitDirect, onGestureAction),
+            onSwipeLeft = swipeHandlerFor(gesture.swipeLeft, commitDirect, onGestureAction),
+            onSwipeRight = swipeHandlerFor(gesture.swipeRight, commitDirect, onGestureAction),
             swipeUpText = if (hintsActive && (gesture.swipeUp?.bubble ?: true)) upHint else null,
             swipeDownText = if (hintsActive && (gesture.swipeDown?.bubble ?: true)) downHint else null,
             swipeUpKeyLabel = swipeUpKeyLabel,
             swipeDownKeyLabel = swipeDownKeyLabel,
+            swipeLeftKeyLabel = swipeLeftKeyLabel,
+            swipeRightKeyLabel = swipeRightKeyLabel,
         )
     }
 
@@ -581,11 +634,6 @@ private fun T9KeyboardContent(
         val longPressConfig = binding?.longPress
         val longPressItems = longPressConfig?.let { KeysConfigHelper.longPressDisplayItems(it) }
         val longPressActionMap = longPressConfig?.let { KeysConfigHelper.longPressActionMap(it) }
-        // 左右滑与上滑共用 SwipeableKeyButton 的 onSwipe，必须按方向参数分派：
-        // 此前忽略方向（恒跑上滑处理器）→ 左/右滑会误触发上滑动作。
-        // 三者都没配置时仍传 null，保持「无手势绑定」的原判定（不影响点击/拖拽判定）。
-        val swipeLeftHandler = swipeHandlerFor(binding?.swipeLeft, commitDirect, onGestureAction)
-        val swipeRightHandler = swipeHandlerFor(binding?.swipeRight, commitDirect, onGestureAction)
         SwipeableKeyButton(
             text = label,
             // tap.bubble: false → 不弹按压气泡（默认 true，行为与改动前一致）
@@ -605,16 +653,12 @@ private fun T9KeyboardContent(
             swipeDownText = swipes.swipeDownText,
             swipeUpKeyLabel = swipes.swipeUpKeyLabel,
             swipeDownKeyLabel = swipes.swipeDownKeyLabel,
-            onSwipe = if (swipes.onSwipeUp != null || swipeLeftHandler != null || swipeRightHandler != null) {
-                { dir ->
-                    when (dir) {
-                        "left" -> swipeLeftHandler?.invoke()
-                        "right" -> swipeRightHandler?.invoke()
-                        else -> swipes.onSwipeUp?.invoke()
-                    }
-                }
-            } else null,
+            swipeLeftKeyLabel = swipes.swipeLeftKeyLabel,
+            swipeRightKeyLabel = swipes.swipeRightKeyLabel,
+            onSwipe = swipes.onSwipeUp?.let { handler -> { _: String -> handler() } },
             onSwipeDown = swipes.onSwipeDown?.let { handler -> { _: String -> handler() } },
+            onSwipeLeft = swipes.onSwipeLeft,
+            onSwipeRight = swipes.onSwipeRight,
             onLongPressSelect = { selected ->
                 dispatchLongPressSelection(selected, longPressActionMap, onKeyPress, callbacks.onCommitText, onGestureAction)
             },
@@ -740,7 +784,7 @@ private fun T9KeyboardContent(
     Row(
         modifier = Modifier
             .fillMaxSize(),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
+        horizontalArrangement = Arrangement.spacedBy(T9_COLUMN_GAP_DP.dp)
     ) {
         // ── 第1列：左列（keyboard.t9.layout.left，candidates 为拼音候选面板占位） ──
         Column(
@@ -811,6 +855,10 @@ private val DEFAULT_T9_DIGIT_LONG_PRESS: Map<String, List<String>> = mapOf(
 private data class T9KeySwipes(
     val onSwipeUp: (() -> Unit)? = null,
     val onSwipeDown: (() -> Unit)? = null,
+    /** 左滑动作（keyboard.t9.keys.<id>.swipe_left，未配置为 null：横向滑动仍移动光标） */
+    val onSwipeLeft: (() -> Unit)? = null,
+    /** 右滑动作（keyboard.t9.keys.<id>.swipe_right，未配置为 null：横向滑动仍移动光标） */
+    val onSwipeRight: (() -> Unit)? = null,
     /** 上滑滑动气泡文本（display: key 时不传） */
     val swipeUpText: String? = null,
     /** 下滑滑动气泡文本（display: key 时不传） */
@@ -818,6 +866,10 @@ private data class T9KeySwipes(
     /** 上滑键面提示（空串 = 显式不印键面，bubble 模式用；null = 不显示） */
     val swipeUpKeyLabel: String? = null,
     val swipeDownKeyLabel: String? = null,
+    /** 左滑键面提示（空串 = 显式不印键面，bubble 模式用；null = 不显示） */
+    val swipeLeftKeyLabel: String? = null,
+    /** 右滑键面提示（空串 = 显式不印键面，bubble 模式用；null = 不显示） */
+    val swipeRightKeyLabel: String? = null,
 )
 
 /**
@@ -865,11 +917,12 @@ private fun T9DigitKey(
         swipeDownText = currentSwipes.swipeDownText,
         swipeUpKeyLabel = currentSwipes.swipeUpKeyLabel,
         swipeDownKeyLabel = currentSwipes.swipeDownKeyLabel,
-        onSwipe = if (currentSwipes.onSwipeUp != null) {
-            // 横向滑动不得落到上滑处理器（此前忽略方向 → 左/右滑会误输入上滑内容）
-            { dir -> if (dir != "left" && dir != "right") currentSwipes.onSwipeUp?.invoke() }
-        } else null,
+        swipeLeftKeyLabel = currentSwipes.swipeLeftKeyLabel,
+        swipeRightKeyLabel = currentSwipes.swipeRightKeyLabel,
+        onSwipe = currentSwipes.onSwipeUp?.let { handler -> { _: String -> handler() } },
         onSwipeDown = currentSwipes.onSwipeDown?.let { handler -> { _: String -> handler() } },
+        onSwipeLeft = currentSwipes.onSwipeLeft,
+        onSwipeRight = currentSwipes.onSwipeRight,
         shadowEnabled = shadowEnabled,
         shadowElevation = shadowElevation,
         shadowShapeRadius = shadowShapeRadius,
@@ -967,11 +1020,12 @@ private fun NineKeyButton(
         swipeDownText = swipes.swipeDownText,
         swipeUpKeyLabel = swipes.swipeUpKeyLabel,
         swipeDownKeyLabel = swipes.swipeDownKeyLabel,
-        onSwipe = if (swipes.onSwipeUp != null) {
-            // 横向滑动不得落到上滑处理器（此前忽略方向 → 左/右滑会误输入上滑内容）
-            { dir -> if (dir != "left" && dir != "right") swipes.onSwipeUp.invoke() }
-        } else null,
+swipeLeftKeyLabel = swipes.swipeLeftKeyLabel,
+        swipeRightKeyLabel = swipes.swipeRightKeyLabel,
+        onSwipe = swipes.onSwipeUp?.let { handler -> { _: String -> handler() } },
         onSwipeDown = swipes.onSwipeDown?.let { handler -> { _: String -> handler() } },
+        onSwipeLeft = swipes.onSwipeLeft,
+        onSwipeRight = swipes.onSwipeRight,
         shadowEnabled = shadowEnabled,
         shadowElevation = shadowElevation,
         shadowShapeRadius = shadowShapeRadius,
@@ -1025,7 +1079,7 @@ private fun T9SpaceKey(
         modifier = modifier
             .fillMaxHeight()
             .padding(horizontal = 2.dp, vertical = 2.dp)
-            .pointerInput(voiceSticky) {
+            .pointerInput(voiceSticky, isSttEnabled) {
                 detectTapGestures(
                     onPress = {
                         if (voiceSticky) {
@@ -1044,6 +1098,8 @@ private fun T9SpaceKey(
                     },
                     onLongPress = {
                         if (voiceSticky) return@detectTapGestures
+                        // 语音转文本开关关闭时长按不触发语音
+                        if (!isSttEnabled) return@detectTapGestures
                         view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                         if (!PermissionHelper.hasRecordAudioPermission(context)) {
                             Toast.makeText(context, "需要麦克风权限才能使用语音输入", Toast.LENGTH_SHORT).show()

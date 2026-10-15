@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.keyboard
+package com.kingzcheung.xime.keyboard
 
 import android.view.KeyEvent
 
@@ -93,6 +93,15 @@ enum class GestureAction(val value: String) {
     /** 移动到行尾。 */
     LINE_END("line_end"),
 
+    /** Tab 键：发送 KEYCODE_TAB（缩进/焦点切换，平板布局行 1 左端用）。 */
+    TAB("tab"),
+
+    /** 光标左移一步（组合态移编码编辑光标，空闲态移编辑器光标）。 */
+    CURSOR_LEFT("cursor_left"),
+
+    /** 光标右移一步（组合态移编码编辑光标，空闲态移编辑器光标）。 */
+    CURSOR_RIGHT("cursor_right"),
+
     /** 撤销。 */
     UNDO("undo"),
 
@@ -142,13 +151,7 @@ enum class GestureAction(val value: String) {
      * 按住持续删除（删除键左滑）：单次执行等同一次删除；「持续」由按键手势层在按住期间
      * 按滑动幅度决定的间隔重复触发本动作实现，抬手即停。幅度映射见 [SwipeRepeatSpeed]。
      */
-    REPEAT_DELETE("repeat_delete"),
-
-    /** 光标左移（如空格键左滑）：value 为步数，缺省 1。 */
-    CURSOR_LEFT("cursor_left"),
-
-    /** 光标右移（如空格键右滑）：value 为步数，缺省 1。 */
-    CURSOR_RIGHT("cursor_right");
+    REPEAT_DELETE("repeat_delete");
 
     companion object {
         /** 根据 YAML 字符串值查找对应的枚举，找不到返回 null。 */

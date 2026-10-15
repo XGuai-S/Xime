@@ -26,3 +26,33 @@ internal fun switchRouteOverlay(value: String): OverlayRoute? = when (value) {
         null
     }
 }
+
+/**
+ * `action: command` 支持的命令名（对齐文档《全键盘配置教程（新版）》的 `command` 表，闭集）。
+ *
+ * 命令值走键盘按键路由，与「点击对应按键」等价。
+ */
+internal val SUPPORTED_COMMAND_NAMES: Set<String> = setOf(
+    "clear_composition",
+    "show_ime_picker",
+    "mode_change",
+    "mode_change_number",
+    "mode_change_common_symbol",
+    "shift_single",
+    "shift_caps",
+    "emoji",
+    "symbol",
+)
+
+/**
+ * `command` 值 → 按键路由（唯一入口：tap/上滑与手势分发两条链共用）。
+ *
+ * 不在 [SUPPORTED_COMMAND_NAMES] 内的值只告警不上屏——否则会被按键路由当成普通文本/编码打出。
+ */
+internal fun dispatchCommandAction(value: String, onKeyPress: (String) -> Unit) {
+    if (value in SUPPORTED_COMMAND_NAMES) {
+        onKeyPress(value)
+    } else {
+        FileLogger.w("XimeKeyboard", "command 未知 value: \"$value\"（已忽略，不上屏）")
+    }
+}

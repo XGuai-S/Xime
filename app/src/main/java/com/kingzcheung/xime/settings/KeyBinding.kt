@@ -50,3 +50,19 @@ class KeyBinding(
     val swipeRight: KeyAction? = null,
     val width: Float? = null,
 )
+
+/**
+ * 面板段（数字/常用符号键盘）的布局描述。
+ *
+ * @param columns true = 三列模式（数字键盘：[left] 键柱列 / [rows] 数字区 / [right] 功能列）；
+ *   false = 行模式（常用符号：[rows] 逐行渲染）
+ * @param rows 行模式的全部行；三列模式的中列（数字区）行
+ * @param left 三列模式左列：每项 = 单键（单元素列表）或纵向键柱（多元素列表，如加减乘除四键一柱）
+ * @param right 三列模式右列：每项 = 单键
+ */
+data class PanelLayoutConfig(
+    val columns: Boolean,
+    val rows: List<List<String>> = emptyList(),
+    val left: List<List<String>> = emptyList(),
+    val right: List<List<String>> = emptyList(),
+)

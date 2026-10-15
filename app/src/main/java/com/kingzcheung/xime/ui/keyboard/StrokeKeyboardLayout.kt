@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.ui.keyboard
+package com.kingzcheung.xime.ui.keyboard
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -35,6 +35,7 @@ import com.kingzcheung.xime.settings.DisplayMode
 import com.kingzcheung.xime.settings.KeyAction
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.swipeHandlerFor
+import com.kingzcheung.xime.ui.isTablet
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,7 +56,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.kingzcheung.xime.util.SubcharHelper
 
 /**
  * 笔画键盘布局 — 参照 [T9KeyboardLayout] 结构。
@@ -134,6 +134,10 @@ onKeyPressDown: ((String) -> Unit)?,
 ) {
     val configuration = LocalConfiguration.current
     val isLandscape = !isFloatingMode && configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    // 设备档：与九键同款——手机横屏键矮走紧凑档（去掉左侧符号栏、字号收小），
+    // 平板键盘区足够高，横竖屏都用完整布局 + 平板留白（见 [panelOuterPadding]）。
+    val tablet = isTablet()
+    val compactLandscape = isLandscape && !tablet
 
     val swipeBubble = rememberSwipeBubbleController()
     var keyboardBounds by remember { mutableStateOf(Rect(0f, 0f, 0f, 0f)) }
@@ -150,7 +154,15 @@ onKeyPressDown: ((String) -> Unit)?,
         keyboardWidth = keyboardBounds.width
     )
 
-    CompositionLocalProvider(LocalKeyCornerRadius provides keyCornerRadius) {
+    // 外围留白与设备档（面板/26 键/九键同源）：手机竖屏 4/4/8、手机横屏 50/2、平板 16/16/8
+    val outerPadding = panelOuterPadding(isLandscape = isLandscape, isTablet = tablet)
+
+    CompositionLocalProvider(
+        LocalKeyCornerRadius provides keyCornerRadius,
+        // 键面提示与主键盘同一档：手机横屏/平板画到键角，平板放大加深
+        LocalSwipeHintCorner provides swipeHintCornerFor(isLandscape, tablet),
+        LocalHintExtraScale provides hintExtraScaleFor(tablet),
+    ) {
     Box(
         modifier = modifier
             .onGloballyPositioned { coordinates ->
@@ -162,8 +174,8 @@ onKeyPressDown: ((String) -> Unit)?,
             }
             .padding(bottom = if (isFloatingMode || isLandscape) 0.dp else 0.dp),
     ) {
-        if (isLandscape) {
-            // 横屏：去除原左侧符号面板（符号走符号键盘），
+        if (compactLandscape) {
+            // 手机横屏：去除原左侧符号面板（符号走符号键盘），
             // 笔画布局撑满键盘区域（与全键盘横屏同款 50dp 边距）
             CompositionLocalProvider(
                 LocalKeyVisualPadding provides PaddingValues(
@@ -174,7 +186,7 @@ onKeyPressDown: ((String) -> Unit)?,
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(vertical = 2.dp, horizontal = 50.dp),
+                        .padding(outerPadding),
                 ) {
                     StrokeKeyboardContent(
                         onKeyPress = onKeyPress,
@@ -202,7 +214,7 @@ onKeyPressDown: ((String) -> Unit)?,
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
+                        .padding(outerPadding),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     StrokeKeyboardContent(

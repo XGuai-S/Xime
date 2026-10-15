@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.keyboard
+package com.kingzcheung.xime.keyboard
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -73,28 +73,20 @@ class KeyActionRegistryTest {
     }
 
     @Test
-    fun `既有命令已登记为服务域动作`() {
-        assertEquals(ActionDomain.SERVICE, KeyActionRegistry.fromCommand("clear_composition")!!.domain)
-        assertEquals(ActionDomain.SERVICE, KeyActionRegistry.fromCommand("show_ime_picker")!!.domain)
+    fun `光标动作按方向分发 moveCursor`() {
+        assertEquals(ActionDomain.SERVICE, KeyActionRegistry.fromId("cursor_left")!!.domain)
+        assertEquals(ActionDomain.SERVICE, KeyActionRegistry.fromId("cursor_right")!!.domain)
+        val executor = RecordingExecutor()
+        KeyActionRegistry.execute(GestureAction.CURSOR_LEFT, KeyActionContext(executor), "")
+        KeyActionRegistry.execute(GestureAction.CURSOR_RIGHT, KeyActionContext(executor), "")
+        assertEquals(listOf(-1, 1), executor.cursorMoves)
     }
 
     @Test
-    fun `未登记命令返回 null`() {
-        assertNull(KeyActionRegistry.fromCommand("no_such_command"))
-    }
-
-    @Test
-    fun `command 动作经注册表分发已登记命令`() {
+    fun `command 动作由服务域兜底执行`() {
         val executor = RecordingExecutor()
         KeyActionRegistry.execute(GestureAction.COMMAND, KeyActionContext(executor), "clear_composition")
         assertEquals(listOf("clear_composition"), executor.commands)
-    }
-
-    @Test
-    fun `command 动作对未登记命令走旧兜底路径`() {
-        val executor = RecordingExecutor()
-        KeyActionRegistry.execute(GestureAction.COMMAND, KeyActionContext(executor), "legacy_unknown")
-        assertEquals(listOf("legacy_unknown"), executor.commands)
     }
 
     @Test
