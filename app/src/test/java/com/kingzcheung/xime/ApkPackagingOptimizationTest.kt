@@ -79,8 +79,10 @@ class ApkPackagingOptimizationTest {
     @Test
     fun `保留按 ABI 分包与 universal 包`() {
         // 单架构包才是真正省流量的手段：libonnxruntime.so 单 arm64 就 28MB，
-        // universal 包会把四份带在一起
-        assertTrue("应启用 ABI 分包", buildGradle.contains("isEnable = true"))
+        // universal 包会把四份带在一起。
+        // 本地可在 local.properties 写 xime.abi 只编一个架构（此时改由 ndk.abiFilters 收敛、
+        // 关掉分包，因为 AGP 禁止两者同时生效）；默认（CI/发布）仍必须是分包 + universal。
+        assertTrue("默认应启用 ABI 分包", buildGradle.contains("isEnable = localAbi == null"))
         assertTrue("应保留 universal 包", buildGradle.contains("isUniversalApk = true"))
         assertTrue("应包含 arm64-v8a", buildGradle.contains("\"arm64-v8a\""))
     }

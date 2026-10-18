@@ -76,11 +76,15 @@ class DictionarySettingsViewModel(application: Application) : AndroidViewModel(a
                 DictionaryHelper.loadDictionary(context, schemaId)
             }
 
-            _uiState.update { it.copy(
-                allEntries = entries,
-                displayedEntries = entries.take(50),
-                isLoading = false
-            )}
+            _uiState.update {
+                // 读取期间可能已切到别的方案，丢弃过期结果（与 UserDictViewModel 同一策略）
+                if (it.selectedSchema != schemaId) it
+                else it.copy(
+                    allEntries = entries,
+                    displayedEntries = entries.take(50),
+                    isLoading = false
+                )
+            }
         }
     }
 

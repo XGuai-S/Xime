@@ -148,13 +148,18 @@ internal fun parseKeyBinding(
 }
 
 /**
- * 解析 long_press。统一为一种形式：`{ display?, values: [...] }`。
+ * 解析 long_press。支持两种写法：`{ display?, values: [...] }` 与单项直写 `{ action?, value?, ... }`。
  *
  * - [display] 缺省为 `bubble`（长按弹出气泡滑动选择）；设为 `key` 则显示在键面，不弹气泡；
- * - [values] 为候选动作列表（单动作也写成单元素列表）。
+ * - [values] 为候选动作列表（单动作也写成单元素列表）；
+ * - 不写 `values` 而直接给 `action`/`value`/`label`/`icon`/`use` 时，等价于只含这一项的列表；
+ *   配合 `bubble: false` 即为「不弹气泡、长按直接执行该动作」。
  */
 /** 长按气泡最多展示的候选数（气泡按此宽度布局）。 */
 private const val MAX_LONG_PRESS_VALUES = 10
+
+/** long_press 单项直写形式（不写 `values`）认可的字段。 */
+private val LONG_PRESS_DIRECT_FIELDS = setOf("action", "value", "label", "icon", "use")
 
 private fun parseLongPress(
     node: com.charleskorn.kaml.YamlNode,
@@ -166,7 +171,16 @@ private fun parseLongPress(
         }
         return null
     }
-    val valuesNode = node.opt<YamlList>("values") ?: return null
+    val valuesNode = node.opt<YamlList>("values")
+    if (valuesNode == null) {
+        // 单项直写：long_press: { action: "voice", value: "5", bubble: false }
+        val fields = node.entries.keys.mapNotNull { (it as? YamlScalar)?.content }.toSet()
+        if (fields.none { it in LONG_PRESS_DIRECT_FIELDS }) return null
+        return LongPressAction(
+            display = DisplayMode.BUBBLE,
+            values = listOf(parseKeyAction(node, GestureAction.COMMIT, presets)),
+        )
+    }
     var display = node.opt<YamlScalar>("display")?.content
         ?.let { DisplayMode.fromValue(it) }
         ?: DisplayMode.BUBBLE
@@ -185,6 +199,9 @@ private fun parseLongPress(
     val values = valuesNode.items.map { parseKeyAction(it, GestureAction.COMMIT, presets) }.take(MAX_LONG_PRESS_VALUES)
     if (values.any { it.label.ifEmpty { it.value }.isEmpty() }) {
         Log.w("KeysConfigHelper", "long_press 存在既无 label 也无 value 的项：该项无法在气泡中展示，也不会生效")
+    }
+    if (values.size > 1 && values.any { !it.bubble }) {
+        Log.w("KeysConfigHelper", "long_press 多项时不支持 bubble: false（会让该项无法选中），已忽略")
     }
     return LongPressAction(
         display = display,
@@ -595,6 +612,10 @@ object KeysConfigHelper {
 
     /** 当前生效的组合键表（只读）。 */
     fun getKeyboardCombos(): List<KeyboardCombo> = keyboardCombos
+
+    /** 当前生效的自动造词配置（只读）；未配置时用默认值。 */
+    fun getAutoWordConfig(): AutoWordConfig =
+        mergedConfigCache?.autoWord ?: AutoWordConfig()
 
     /**
      * 按输入编码匹配组合键：返回编码与输入**完全相等**的条目。
@@ -1855,6 +1876,8 @@ object KeysConfigHelper {
             metadata = custom.metadata ?: default.metadata,
             // backup 段：custom 显式配置时优先，否则沿用内置默认（默认全开，与历史行为一致）
             backup = custom.backup ?: default.backup,
+            // auto_word 段：custom 显式配置时优先，否则沿用内置默认
+            autoWord = custom.autoWord ?: default.autoWord,
         )
     }
 
@@ -1953,7 +1976,7 @@ object KeysConfigHelper {
     /**
      * 从用户数据目录读取文件。
      *
-     * 配置类文件额外**优先**读 `/storage/emulated/0/Xime/`：该目录用户可用系统「文件」App、
+     * 配置类文件额外**优先**读 `/storage/emulated/0/rime/xime/`：该目录用户可用系统「文件」App、
      * 电脑 USB 或第三方编辑器直接打开修改，是首选的编辑入口；私有目录 `files/rime/` 保留给
      * 内置文件管理器与无线导入写入。两者同时存在时以可见目录为准，保证「用户在文件管理器里
      * 改的那份」一定生效。
@@ -1981,7 +2004,7 @@ object KeysConfigHelper {
 
     /**
      * 读取自定义配置文本，优先级：
-     * `/storage/emulated/0/Xime/xime.yaml` → 同目录 `xime.txt` → 同目录 `xime.custom.yaml`
+     * `/storage/emulated/0/rime/xime/xime.yaml` → 同目录 `xime.txt` → 同目录 `xime.custom.yaml`
      * → `files/rime/`（内置文件管理器/无线导入） → assets 内置。各级都不存在时返回 null，
      * 调用方沿用内置默认值。
      */
@@ -2066,19 +2089,27 @@ object KeysConfigHelper {
     /**
      * 长按气泡的显示项文本：`label` 为空时回退 `value`；两者皆空的项无法展示，丢弃。
      *
+     * 单项且该项标了 `bubble: false` 时返回 null：不弹气泡，长按直接执行该项动作；
+     * 多项时不支持 `bubble: false`（会让该项无法选中），一律按气泡展示。
+     *
      * 26 键字母区（标准/横屏紧凑）、逗号键、中英键、九键共用，保证各处 label 处理一致。
      */
-    fun longPressDisplayItems(config: LongPressAction?): List<String>? =
-        config?.values
-            ?.map { longPressItemKey(it) }
-            ?.filter { it.isNotEmpty() }
-            ?.takeIf { it.isNotEmpty() }
+    fun longPressDisplayItems(config: LongPressAction?): List<String>? {
+        val values = config?.values ?: return null
+        if (isBubbleOffSingleValue(values)) return null
+        return values.map { longPressItemKey(it) }.filter { it.isNotEmpty() }.takeIf { it.isNotEmpty() }
+    }
 
     /** 长按气泡的「显示项文本 → 动作」映射；键与 [longPressDisplayItems] 完全一致（不可展示的项不进入映射）。 */
-    fun longPressActionMap(config: LongPressAction?): Map<String, KeyAction>? =
-        config?.values
-            ?.filter { longPressItemKey(it).isNotEmpty() }
-            ?.associateBy { longPressItemKey(it) }
+    fun longPressActionMap(config: LongPressAction?): Map<String, KeyAction>? {
+        val values = config?.values ?: return null
+        if (isBubbleOffSingleValue(values)) return emptyMap()
+        return values.filter { longPressItemKey(it).isNotEmpty() }.associateBy { longPressItemKey(it) }
+    }
+
+    /** 单项 long_press 标了 `bubble: false`：不弹气泡，该项作为直接长按动作。 */
+    private fun isBubbleOffSingleValue(values: List<KeyAction>): Boolean =
+        values.size == 1 && !values.first().bubble
 
     /** 长按气泡条目的显示文本与查找键（label 优先，缺省 value）。 */
     private fun longPressItemKey(action: KeyAction): String = action.label.ifEmpty { action.value }

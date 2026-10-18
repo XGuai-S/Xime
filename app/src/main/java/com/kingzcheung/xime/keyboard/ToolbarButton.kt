@@ -47,6 +47,25 @@ enum class ToolbarButton(
     }
 }
 
+/**
+ * 内置工具栏按钮当前是否可用。
+ *
+ * 不可用的按钮既要从候选栏隐藏（KeyboardView），也要从定制列表里去掉
+ * （ToolbarCustomizeView）——两处必须同一口径，否则会出现「定制里能勾选、
+ * 键盘上却不显示」的幽灵按钮。
+ *
+ * [hasHandwritingModel] 按需取值：只有「手写找字」需要探测本地模型。
+ */
+fun isBuiltinToolbarButtonAvailable(
+    button: ToolbarButton,
+    isSttEnabled: Boolean,
+    hasHandwritingModel: () -> Boolean,
+): Boolean = when (button) {
+    ToolbarButton.HANDWRITING_LOOKUP -> hasHandwritingModel()
+    ToolbarButton.VOICE -> isSttEnabled
+    else -> true
+}
+
 data class ToolbarAction(
     val item: ToolbarButtonItem,
     val onClick: () -> Unit

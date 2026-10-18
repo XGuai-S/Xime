@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.settings
+package com.kingzcheung.xime.settings
 
 import android.content.Context
 import com.kingzcheung.xime.RepoFiles
@@ -56,10 +56,13 @@ class UserConfigDirContractTest {
     }
 
     @Test
-    fun `配置目录位于内部存储根的 Xime 目录`() {
+    fun `配置目录位于内部存储根的 rime_xime 子目录`() {
+        // 旧根目录名保留为迁移源（见 migrateOldRootDir），新目录是 rime/xime
         assertEquals("Xime", UserConfigDir.DIR_NAME)
+        assertEquals("rime/xime", UserConfigDir.DIR_SUB_PATH)
         // 单测 JVM 里 Environment 返回 null，路径层级只能在源码层锁定
-        assertEquals("Xime", UserConfigDir.absoluteDir.name)
+        assertEquals("xime", UserConfigDir.absoluteDir.name)
+        assertEquals("Xime", UserConfigDir.oldRootDir.name)
         assertEquals("Xime", UserConfigDir.legacyDir.name)
 
         val absolute = propertyOf(userConfigDirSource, "val absoluteDir: File")
@@ -67,10 +70,17 @@ class UserConfigDirContractTest {
             "新目录应挂在内部存储根下（而不是 Documents 等公共集合）",
             absolute.contains("Environment.getExternalStorageDirectory()"),
         )
-        assertTrue("新目录应使用 DIR_NAME", absolute.contains("DIR_NAME"))
+        assertTrue("新目录应使用 DIR_SUB_PATH", absolute.contains("DIR_SUB_PATH"))
         assertTrue(
             "新目录不得再使用公共集合目录",
             !absolute.contains("getExternalStoragePublicDirectory"),
+        )
+
+        val oldRoot = propertyOf(userConfigDirSource, "val oldRootDir: File")
+        assertTrue(
+            "旧根目录应在内部存储根下、仅用于迁移",
+            oldRoot.contains("Environment.getExternalStorageDirectory()") &&
+                oldRoot.contains("DIR_NAME"),
         )
 
         val legacy = propertyOf(userConfigDirSource, "val legacyDir: File")
@@ -166,10 +176,9 @@ class UserConfigDirContractTest {
         val schema = sourceOf("SchemaSettingsScreen.kt")
         assertTrue("输入方案页缺少「打开配置目录」入口", schema.contains("打开配置目录"))
         assertTrue("入口应调用内置文件管理器", schema.contains("onNavigateToRimeFileBrowser"))
-        assertTrue("入口应展示配置目录路径", schema.contains("UserConfigDir.DISPLAY_PATH"))
         assertTrue(
-            "输入方案页缺少待授权提示",
-            schema.contains("UserConfigDir.ReleaseState.PERMISSION_REQUIRED"),
+            "入口应展示打开的 rime 工作目录路径（方案词典与词库所在目录）",
+            schema.contains("SchemaManager.getRimeDir(context)"),
         )
         val theme = sourceOf("ThemeSettingsScreen.kt")
         assertFalse("主题与定制页不应再保留配置文件区块", theme.contains("打开配置目录"))

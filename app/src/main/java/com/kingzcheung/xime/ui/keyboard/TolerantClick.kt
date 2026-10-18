@@ -11,7 +11,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.unit.dp
@@ -107,4 +110,93 @@ fun Modifier.tolerantClick(
             }
         }
     )
+}
+
+/**
+ * 容差点击检测：语义同 [detectTapGestures]，但取消口径改为「累计位移超过容差」，
+ * **不再因为指针越出节点矩形而取消**。
+ *
+ * 背景：`detectTapGestures` 内部的 `waitForUpOrCancellation` 遇到
+ * `isOutOfBounds(size, extendedTouchPadding)` 会立刻取消点击，而越界容差只来自
+ * `minimumTouchTargetSize`（键格 ≥48dp 的方向上为 0）；键盘按键的兜底点击只写在拖拽的
+ * `onDragEnd` 里，拖拽又要位移超过 touch slop 才激活。于是「刚越界、位移又不到 touch slop」
+ * 的区间里两条路都不响应：按下有反馈、松手无输入，也没有任何日志（敏感屏采样抖动大、
+ * 按在键格边缘时最易命中）。
+ *
+ * 这里把取消口径与拖拽对齐：位移超过 [slopPx] 即视为滑动（此刻拖拽已激活并消费事件，
+ * 由 `onDragEnd` 兜底点击），否则一律算点击；事件被其它手势消费时同样取消。
+ *
+ * @param onPress 按下瞬间（相当于原 `onPress` 的前半段）
+ * @param onPressEnd 手势结束时回调，[released] 为 true 表示正常抬起
+ * @param onTap 松手且未取消时触发
+ * @param onLongPress 非空时启用长按（按住超过系统长按超时且位移未超容差时触发一次）
+ * @param slopPx 位移容差，默认系统 touch slop（与拖拽激活阈值一致，避免反向死区）
+ */
+internal suspend fun PointerInputScope.detectTolerantTapGestures(
+    onPress: (Offset) -> Unit = {},
+    onPressEnd: (released: Boolean) -> Unit = {},
+    onTap: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+    slopPx: Float = viewConfiguration.touchSlop,
+) = awaitEachGesture {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    down.consume()
+    onPress(down.position)
+
+    val longPressTimeoutMs = viewConfiguration.longPressTimeoutMillis
+    var travelled = 0f
+    var longPressFired = false
+    var awaitingLongPress = onLongPress != null
+    var lastEventTime = down.uptimeMillis
+    var released = false
+    var cancelled = false
+
+    while (true) {
+        // 长按窗口内按住不动（无事件）超时即判定长按
+        val event = if (awaitingLongPress) {
+            val remaining = longPressTimeoutMs - (lastEventTime - down.uptimeMillis)
+            withTimeoutOrNull(remaining.coerceAtLeast(0L)) { awaitPointerEvent() }
+        } else {
+            awaitPointerEvent()
+        }
+
+        if (event == null) {
+            longPressFired = true
+            awaitingLongPress = false
+            onLongPress?.invoke()
+            continue
+        }
+
+        event.changes.firstOrNull()?.let { lastEventTime = it.uptimeMillis }
+        // 只认本手指（多指时其余指针不属于本键，不做兜底取首个，避免误判抬起）
+        val change = event.changes.firstOrNull { it.id == down.id }
+        if (change == null) {
+            cancelled = true
+            break
+        }
+        if (change.isConsumed) {
+            // 被拖拽/父层手势接管
+            cancelled = true
+            break
+        }
+        if (change.changedToUpIgnoreConsumed()) {
+            released = true
+            change.consume()
+            break
+        }
+        if (longPressFired) {
+            // 长按已触发：吞掉后续位移，避免与拖拽手势重复响应（等价 consumeUntilUp）
+            change.consume()
+            continue
+        }
+        travelled += change.positionChange().getDistance()
+        if (travelled > slopPx) {
+            // 位移超容差：交给拖拽手势（onDragEnd 兜底点击），此处不再判定点击
+            cancelled = true
+            break
+        }
+    }
+
+    onPressEnd(released)
+    if (released && !cancelled && !longPressFired) onTap()
 }

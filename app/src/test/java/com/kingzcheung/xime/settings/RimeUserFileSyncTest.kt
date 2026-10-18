@@ -28,6 +28,8 @@ class RimeUserFileSyncTest {
             "pinyin_simp_ext.dict.yaml",
             "wubi86_user.dict.yaml",
             "custom_phrase.txt",
+            "lua/date_translator.lua",
+            "lua/convert_ar_num_to_zh.lua",
         ).forEach {
             assertTrue("$it 应参与同步", RimeUserFileSync.isSyncable(it))
         }
@@ -38,6 +40,7 @@ class RimeUserFileSyncTest {
         listOf(
             "build/pinyin_simp.schema.yaml",
             "build/default.yaml",
+            "build/lua/date_translator.lua",
             "sync/abc/def.yaml",
             "logs/rime.log",
             "installation.yaml",
@@ -48,6 +51,40 @@ class RimeUserFileSyncTest {
             "foo.db",
         ).forEach {
             assertFalse("$it 不应参与同步", RimeUserFileSync.isSyncable(it))
+        }
+    }
+
+    @Test
+    fun `完整镜像补入运行状态与编译产物`() {
+        // 「用其他应用打开」看到的目录内容要与「打开配置目录」（私有工作目录）一致：
+        // sync() 只管可编辑文本，其余由完整镜像单向补齐
+        listOf(
+            "build/XGuai_flypy.table.bin",
+            "build/XGuai_flypy.prism.bin",
+            "build/XGuai_flypy.schema.yaml",
+            "XGuai_flypy.userdb",
+            "pinyin_simp.userdb",
+            "installation.yaml",
+            "user.yaml",
+        ).forEach {
+            assertTrue("$it 应补入镜像", RimeUserFileSync.shouldMirrorRuntime(it))
+        }
+    }
+
+    @Test
+    fun `完整镜像不重复处理文本也不搬运行日志`() {
+        listOf(
+            // 文本归 sync() 双向同步，补镜像不得重复处理
+            "default.custom.yaml",
+            "custom_phrase.txt",
+            "lua/date_translator.lua",
+            // 运行日志与版本库不进镜像
+            "logs/rime.log",
+            "sync/abc/def.yaml",
+            ".git/config",
+            "",
+        ).forEach {
+            assertFalse("$it 不应由完整镜像处理", RimeUserFileSync.shouldMirrorRuntime(it))
         }
     }
 
@@ -89,6 +126,25 @@ class RimeUserFileSyncTest {
         assertFalse(RimeUserFileSync.isSyncable(""))
         assertFalse(RimeUserFileSync.isSyncable("   "))
         assertFalse(RimeUserFileSync.isSyncable("build/.gitkeep"))
+    }
+
+    @Test
+    fun `损坏文件名不参与同步`() {
+        // 中文名被错误编码转换后字节无法解码，文件名含 U+FFFD 替换符；
+        // 同步会把损坏名带进可见目录，正确内容在正常路径下同步即可
+        assertFalse(
+            "乱码说明文档不应镜像",
+            RimeUserFileSync.isSyncable("rime\uFFFD\uFFFD\uFFFD小\uFFFD\uFFFD说\uFFFD\uFFFD.txt"),
+        )
+        assertFalse(
+            "乱码目录里的文件不应镜像",
+            RimeUserFileSync.isSyncable("\uFFFD\uFFFD\uFFFD\uFFFD/rime.lua"),
+        )
+        // 对照组：正常 lua 脚本仍应同步（lua 统一放 rime/lua/ 下）
+        assertTrue(
+            "正常 lua 脚本仍应参与同步",
+            RimeUserFileSync.isSyncable("lua/date_translator.lua"),
+        )
     }
 
     @Test

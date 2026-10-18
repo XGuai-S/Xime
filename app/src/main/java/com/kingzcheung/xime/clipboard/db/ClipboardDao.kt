@@ -121,23 +121,18 @@ interface ClipboardDao {
     }
 
     /**
-     * 图片条目写入（按 [ClipboardEntry.imageHash] 去重）并按数量上限淘汰。
-     * maxImages > 0 时仅在超限时删除最旧的**非置顶**图片条目；
-     * 被删条目的磁盘文件由调用方（ClipboardManager）回收。
+     * 图片条目写入（按 [ClipboardEntry.imageHash] 去重）。
+     * 数量/容量收敛统一交给 [com.kingzcheung.xime.clipboard.ClipboardManager]
+     * 的配额收敛（带保护集）：这里不自行淘汰，否则可能删掉“系统剪贴板仍指向”
+     * 这张受保护图，该行文件随后被孤儿清理误删，另一应用粘贴即失败。
      */
     @Transaction
-    suspend fun upsertImageAndTrim(entry: ClipboardEntry, maxImages: Int) {
+    suspend fun upsertImage(entry: ClipboardEntry) {
         val existing = findImageByHash(entry.imageHash)
         if (existing != null) {
             updateTimestamp(existing.id, entry.timestamp)
         } else {
             insert(entry)
-            if (maxImages > 0) {
-                val count = countImages()
-                if (count > maxImages) {
-                    trimImages(count - maxImages)
-                }
-            }
         }
     }
 

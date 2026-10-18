@@ -3,16 +3,18 @@
     <cache-path name="emoji_cache" path="emoji_cache/" />
     <files-path name="files" path="." />
     <!--
-      用户可见配置目录 /storage/emulated/0/Xime/ 的锚点文件。
+      公开 rime 根目录 /storage/emulated/0/rime/ 的深链锚点。
 
-      「用其他应用打开配置目录」需要把目录里的文件交给 MT 管理器这类第三方 App。
-      真机日志（2026-10-14）证实：直接发 externalstorage DocumentsProvider 的
-      `content://` URI 会被拒——`MANAGE_EXTERNAL_STORAGE` 只授权 File API，
-      不包含 DocumentsProvider 的 URI 访问权（报“UID ... does not have permission”）。
-      FileProvider 是自己进程里的 provider，可以合法地把文件授权给接收方，
-      因此用它把锚点文件转成可授权的 `content://` URI。
+      「用其他应用打开」先把私有 rime 工作目录同步到该公开目录，再用它的
+      default.yaml 当 MT 深链锚点——没有这条声明时 getUriForFile 会抛
+      IllegalArgumentException（Failed to find configured root），锚点 URI 生成失败，
+      MT 深链整条被跳过，只剩标准目录 URI（MT 一概拒绝）→ 表现为「打开了 MT 但没进目录」。
+
+      声明放在 rime/xime/ 之后：两者都包含时 FileProvider 取第一个匹配，
+      配置目录（xime）的文件走 xime_config，其余 rime 文件走 rime_root。
     -->
-    <external-path name="xime_config" path="Xime/" />
+    <external-path name="xime_config" path="rime/xime/" />
+    <external-path name="rime_root" path="rime/" />
     <!--
       日志导出汇总文件：必须显式声明，否则 FileProvider.getUriForFile 会抛
       IllegalArgumentException（Failed to find configured root），导致「导出全部日志」

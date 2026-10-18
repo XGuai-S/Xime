@@ -22,6 +22,16 @@ class T9DigitUserDict {
   // 设置持久化路径并打开 leveldb（仅首次调用生效）。
   static void SetFilePath(const std::string& path);
 
+  // 释放 / 重开 leveldb 句柄（成对使用）。
+  //
+  // librime 的 UserDictManager（备份、还原、导入导出、user_dict_sync）要在**同进程**
+  // 再打开一次 `<user_data_dir>/t9_digit.userdb`，而 leveldb 的 PosixLockTable 对同进程
+  // 二次 Open 直接报 "lock ... already held by process" ⇒ 调用方必须在这些操作前后
+  // ReleaseDb() / AcquireDb()。释放期间 T9 词条写入降级为仅内存（ApplyOps 容忍 db 缺失），
+  // 故成对调用窗口内不应发生输入提交（现网由 rimeLock 保证）。
+  static void ReleaseDb();
+  static void AcquireDb();
+
   // 从 RIME input 构建查找键（"54482" / "54482:ji"）。
   static std::string BuildLookupKey(const std::string& rime_input);
 
@@ -52,6 +62,8 @@ class T9DigitUserDict {
   T9DigitUserDictCore core_;
   LevelDb* db_ = nullptr;
   bool loaded_ = false;
+  // 持久化路径（ReleaseDb/AcquireDb 重开时要用，SetFilePath 记录）
+  std::string path_;
 };
 
 }  // namespace rime

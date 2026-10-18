@@ -26,7 +26,7 @@ import kotlinx.coroutines.withContext
 /**
  * 「新安装 / 升级后是否覆盖已有配置」启动弹窗。
  *
- * 背景：`/storage/emulated/0/Xime/xime.yaml` 是用户可直接编辑的**完整快照**，首次释放后
+ * 背景：`/storage/emulated/0/rime/xime/xime.yaml` 是用户可直接编辑的**完整快照**，首次释放后
  * [UnifiedConfigFile.ensureGenerated] 永不覆盖它（保护用户编辑，这是对的）。代价是：装上新
  * 版本后，新版的内置默认值（如新的按键宽度、新增手势、新配色）不会出现在这份快照里，
  * 用户会以为「升级了却没生效」——这正是「安装后新配置为什么没覆盖」的原因。

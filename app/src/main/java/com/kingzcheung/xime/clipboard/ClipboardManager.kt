@@ -329,7 +329,7 @@ class ClipboardManager private constructor(private val context: Context) {
                     Log.e(TAG, "Failed to save clipboard image ($hash.$extension)")
                     return@withLock null
                 }
-                dao.upsertImageAndTrim(
+                dao.upsertImage(
                     ClipboardEntry(
                         text = "",
                         timestamp = now,
@@ -341,7 +341,6 @@ class ClipboardManager private constructor(private val context: Context) {
                         width = width,
                         height = height,
                     ),
-                    limits.maxCount,
                 )
             }
             // 数量上限（DAO 内已裁）与容量上限：统一回收被删行的文件 + 孤儿文件
@@ -727,10 +726,15 @@ class ClipboardManager private constructor(private val context: Context) {
 
     fun clearAll() {
         scope.launch {
-            // 仅清非置顶；图片条目同步回收文件（与 clearClipboard 一致）
-            val paths = dao.allImages().filter { !it.isPinned }.map { it.imagePath }
-            dao.clearUnpinned()
-            paths.forEach { imageStore.delete(it) }
+            // 与图片落盘串行，避免并发采集时清掉刚写入的文件（与 clearClipboardAndWait 一致）；
+            // 清完同步清除保护标记——被删的非置顶图已不存在，系统剪贴板保护不再有意义
+            imageMutex.withLock {
+                // 仅清非置顶；图片条目同步回收文件（与 clearClipboard 一致）
+                val paths = dao.allImages().filter { !it.isPinned }.map { it.imagePath }
+                dao.clearUnpinned()
+                paths.forEach { imageStore.delete(it) }
+                clearSelfClipboardImage()
+            }
         }
     }
 

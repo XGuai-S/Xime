@@ -35,7 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import com.kingzcheung.xime.settings.ConfigDirTarget
-import com.kingzcheung.xime.settings.UserConfigDir
+import com.kingzcheung.xime.settings.RimeUserFileSync
 
 /**
  * 「用其他应用打开配置目录」的选择弹窗：把 [com.kingzcheung.xime.settings.ConfigDirOpener]
@@ -65,9 +65,9 @@ fun ConfigDirOpenDialog(
             Column {
                 Text(
                     text = if (targets.isEmpty()) {
-                        "没有找到可以打开 ${UserConfigDir.DISPLAY_PATH} 的应用"
+                        "没有找到可以打开 ${RimeUserFileSync.mirrorDir(context).absolutePath} 的应用"
                     } else {
-                        "在手机上找到 ${targets.size} 个可打开 ${UserConfigDir.DISPLAY_PATH} 的方式"
+                        "在手机上找到 ${targets.size} 个可打开 ${RimeUserFileSync.mirrorDir(context).absolutePath} 的方式"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

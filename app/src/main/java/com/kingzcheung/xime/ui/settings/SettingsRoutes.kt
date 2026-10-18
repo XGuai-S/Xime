@@ -7,6 +7,7 @@ object SettingsRoutes {
     const val MarketModel = "market_model"
     const val MarketPlugins = "market_plugins"
     const val SchemaLocal = "schema_local"
+    const val SchemaImported = "schema_imported"
     const val ModelLocal = "model_local"
     const val SchemaMarketDetail = "schema_market_detail/{schemeId}"
     const val ModelMarketDetail = "model_market_detail/{modelId}"
@@ -22,6 +23,7 @@ object SettingsRoutes {
     const val PluginSettings = "plugin_settings"
     const val SmartPrediction = "smart_prediction"
     const val Correction = "correction"
+    const val AutoWord = "auto_word"
     const val SpeechToText = "speech_to_text"
     const val About = "about"
     const val Developer = "developer"
@@ -36,6 +38,4 @@ object SettingsRoutes {
     const val Backup = "backup"
     const val SchemaDictBrowser = "schema_dict_browser"
     const val RimeFileBrowser = "rime_file_browser"
-    /** 直接落在用户可见配置目录的浏览入口（区别于通用「文件管理器」）。 */
-    const val UserConfigBrowser = "user_config_browser"
 }

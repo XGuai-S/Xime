@@ -173,8 +173,8 @@ class StoragePermissionFlowTest {
             schemaSource.contains("onClick = onNavigateToRimeFileBrowser"),
         )
         assertTrue(
-            "输入方案页应显示配置目录的真实状态",
-            schemaSource.contains("UserConfigDir.releaseState"),
+            "输入方案页应说明打开的是 rime 工作目录",
+            schemaSource.contains("SchemaManager.getRimeDir(context)"),
         )
         assertFalse(
             "「主题与定制」页不应再保留配置文件区块",

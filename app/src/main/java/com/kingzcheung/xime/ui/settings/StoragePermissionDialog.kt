@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.ui.settings
+package com.kingzcheung.xime.ui.settings
 
 import android.Manifest
 import android.widget.Toast
@@ -21,7 +21,7 @@ import com.kingzcheung.xime.settings.UserConfigDir
 /**
  * 「需要存储权限」启动弹窗。
  *
- * 把配置释放到 `/storage/emulated/0/Xime/` 需要「所有文件访问」权限（API 28/29 为
+ * 把配置释放到 `/storage/emulated/0/rime/xime/` 需要「所有文件访问」权限（API 28/29 为
  * `WRITE_EXTERNAL_STORAGE`）。该权限**没有运行时对话框**——Android 11+ 只能跳系统设置页手动开启，
  * 所以授权入口必须是显式引导，且不宜埋在设置列表里等用户自己找：这里在应用启动后直接弹窗询问。
  *

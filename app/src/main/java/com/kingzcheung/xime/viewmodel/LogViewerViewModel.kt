@@ -102,10 +102,11 @@ class LogViewerViewModel(application: Application) : AndroidViewModel(applicatio
                     file.readText()
                 }
                 
-                _uiState.update { it.copy(
-                    logContent = content,
-                    isLoading = false
-                )}
+                _uiState.update {
+                    // 读取期间可能已选择别的日志文件，丢弃过期结果
+                    if (it.selectedLogFile != file) it
+                    else it.copy(logContent = content, isLoading = false)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error reading log file", e)
                 _uiState.update { it.copy(
@@ -186,9 +187,9 @@ class LogViewerViewModel(application: Application) : AndroidViewModel(applicatio
                         val uri = context.contentResolver.insert(
                             MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
                         ) ?: throw Exception("Failed to create MediaStore entry")
-                        context.contentResolver.openOutputStream(uri)?.use { output ->
-                            file.inputStream().use { it.copyTo(output) }
-                        }
+                        val output = context.contentResolver.openOutputStream(uri)
+                            ?: throw Exception("Failed to open output stream")
+                        output.use { o -> file.inputStream().use { it.copyTo(o) } }
                     } else {
                         val dest = File(
                             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),

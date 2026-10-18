@@ -12,6 +12,14 @@ data class KeyboardCallbacks(
     val onCandidateSelect: (Int) -> Unit,
     /** 当前候选数量；用函数读取以避免键盘回调捕获过期候选状态。 */
     val candidateCount: () -> Int = { 0 },
+    /**
+     * 当前是否处于编码态（已敲入编码、组合未结束）。
+     *
+     * 与 [candidateCount] 分开：编码打不出来时候选数为 0，但用户仍在编码态，
+     * 此时 shift 键同样应转为 esc（点击清空已敲的编码），见
+     * [shouldShiftShowEsc]。英文/ascii 态不计（大小写切换仍要用 shift）。
+     */
+    val isComposing: () -> Boolean = { false },
     // 长按候选删除自造词：index 为候选栏显示索引（候选栏→服务层透传）
     val onCandidateDelete: ((Int) -> Unit)? = null,
     /**

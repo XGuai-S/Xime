@@ -1,13 +1,19 @@
 package com.kingzcheung.xime.settings
 
 import android.content.Context
+import android.os.Environment
 import com.kingzcheung.xime.util.FileLogger
 import java.io.File
 import java.security.MessageDigest
 
 /**
  * 把 Rime 工作目录（私有 `files/rime/`）里**用户可编辑的文本配置**镜像到
- * `/storage/emulated/0/Xime/rime/`，让第三方编辑器（MT管理器等）能直接改方案与词库。
+ * `/storage/emulated/0/rime/`，让第三方编辑器（MT管理器等）能直接改方案与词库。
+ *
+ * 目录层级（与「xime 配置目录」相邻）：`/storage/emulated/0/rime/` 是 rime 方案与词库
+ * 镜像，其子目录 `/storage/emulated/0/rime/xime/` 是 xime 自己的配置（xime.yaml、
+ * 词频/词库等）。同步只处理 rime 镜像，**不**把 `xime/` 配置子目录当 rime 文件同步
+ * （见 [collectSyncable] 里的排除）。
  *
  * ## 为什么是「镜像子集」而不是把工作目录整体搬过去
  *
@@ -19,7 +25,7 @@ import java.security.MessageDigest
  *    手改会损坏数据，且 `userdb` 依赖正常文件锁语义，模拟存储上的行为并不一致；
  * 3. **编译产物**：`build/`、`logs/`、`sync/` —— 部署时整体重写，同步毫无意义。
  *
- * 另外，Rime 工作目录**必须**留在私有空间：`/storage/emulated/0/Xime` 需要
+ * 另外，Rime 工作目录**必须**留在私有空间：`/storage/emulated/0/rime/xime` 需要
  * 「所有文件访问」权限，用户可拒绝、系统可回收，而输入法在开机后与锁屏界面就必须可用。
  * 把工作目录整体搬过去，等于「没授权键盘就打不出字」。
  *
@@ -48,7 +54,7 @@ object RimeUserFileSync {
 
     private const val TAG = "RimeUserFileSync"
 
-    /** 可见目录下的镜像子目录名：`/storage/emulated/0/Xime/rime/`。 */
+    /** 镜像目录名（内部存储根下）：`/storage/emulated/0/rime`，见 [mirrorDir]。 */
     const val MIRROR_DIR_NAME = "rime"
 
     /**
@@ -79,14 +85,18 @@ object RimeUserFileSync {
         ".userdb", ".userdb.txt", ".bin", ".trie", ".db", ".ldb", ".log", ".tmp", CONFLICT_BACKUP_SUFFIX,
     )
 
-    /** 参与同步的后缀：Rime 的文本配置与词表。 */
-    internal val SYNCABLE_SUFFIXES = listOf(".yaml", ".txt")
+    /** 参与同步的后缀：Rime 的文本配置、词表与 lua 脚本。 */
+    internal val SYNCABLE_SUFFIXES = listOf(".yaml", ".txt", ".lua")
 
     /**
      * 判断某个相对路径是否参与同步。
      *
      * 先判排除、再判包含：顺序不能反，否则 `foo.userdb.txt` 会因为以 `.txt` 结尾
      * 而被当成可同步的用户词库（它是 `userdb` 的导出，由 Rime 重新生成）。
+     *
+     * 路径/文件名含 U+FFFD（替换符，表示字节无法按 UTF-8 解码）的条目**不参与同步**：
+     * 历史遗留的中文文件名被错误编码转换后会永久损坏（如 UTF-16 说明文档），
+     * 同步只会把损坏名带进可见目录；正确内容（如 lua 脚本）在正常路径下同步即可。
      */
     internal fun isSyncable(relativePath: String): Boolean {
         val path = relativePath.replace('\\', '/').trim()
@@ -94,6 +104,7 @@ object RimeUserFileSync {
         val segments = path.split('/').filter { it.isNotEmpty() }
         if (segments.isEmpty()) return false
         if (segments.any { it in EXCLUDED_DIRS }) return false
+        if (segments.any { it.contains('\uFFFD') }) return false
         val name = segments.last()
         if (name.startsWith(".")) return false
         if (name in EXCLUDED_NAMES) return false
@@ -188,8 +199,16 @@ object RimeUserFileSync {
 
     // ── 路径 ──
 
-    /** 可见目录下的镜像目录 `/storage/emulated/0/Xime/rime`。 */
-    fun mirrorDir(context: Context): File = File(UserConfigDir.absoluteDir, MIRROR_DIR_NAME)
+    /** 可见目录下的镜像目录 `/storage/emulated/0/rime`。 */
+    fun mirrorDir(context: Context): File =
+        File(Environment.getExternalStorageDirectory(), MIRROR_DIR_NAME)
+
+    /**
+     * 遍历**可见镜像**时应跳过的子目录名：`xime` 配置目录（`/storage/emulated/0/rime/xime`）。
+     * 它里面有 xime.yaml、词频/词库等 .txt，不排除会被当成 rime 文件同步进私有目录。
+     * 私有 rime 目录没有该子目录，不受影响。
+     */
+    internal val EXCLUDED_VISIBLE_DIRS: Set<String> = setOf(UserConfigDir.absoluteDir.name)
 
     private fun baselineFile(context: Context): File = File(context.filesDir, BASELINE_FILE)
 
@@ -251,7 +270,7 @@ object RimeUserFileSync {
 
         val relativePaths = LinkedHashSet<String>()
         collectSyncable(rimeDir, relativePaths)
-        collectSyncable(mirror, relativePaths)
+        collectSyncable(mirror, relativePaths, excludedNames = EXCLUDED_VISIBLE_DIRS)
 
         for (rel in relativePaths) {
             val priv = File(rimeDir, rel)
@@ -333,6 +352,68 @@ object RimeUserFileSync {
     }
 
     /**
+     * 完整镜像不处理的目录：运行日志与版本库（体积不断增长、对用户无意义）。
+     * 注意 `build` 目录不在这——它会被 [mirrorRuntimeFiles] 补进镜像。
+     */
+    internal val RUNTIME_EXCLUDED_DIRS = setOf("sync", "logs", ".git")
+
+    /**
+     * 判断私有工作目录里的某个相对路径是否应由 [mirrorRuntimeFiles] 补镜像。
+     *
+     * 与 [isSyncable] 互补：可编辑文本（`*.custom.yaml`、词库等）归 [sync] 双向同步；
+     * 其余的（`*.userdb` 用户词库数据库、`installation.yaml`/`user.yaml` 安装与用户状态、
+     * `build` 目录下的编译产物）由 [mirrorRuntimeFiles] 单向补过去。
+     */
+    internal fun shouldMirrorRuntime(relativePath: String): Boolean {
+        // 文本已由 sync() 处理，不归这里
+        if (isSyncable(relativePath)) return false
+        val segments = relativePath.replace('\\', '/').split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return false
+        if (segments.any { it in RUNTIME_EXCLUDED_DIRS }) return false
+        if (segments.any { it.contains('\uFFFD') }) return false
+        if (segments.last().startsWith(".")) return false
+        return true
+    }
+
+    /**
+     * 把 [sync] 不管的运行状态与编译产物单向复制到公开镜像。
+     *
+     * 背景：「打开配置目录」打开的是私有工作目录（全部内容），而「用其他应用打开」
+     * 打开的是公开镜像——[sync] 只处理可编辑文本时两边列表不一样，
+     * 用户看到 `build`、`*.userdb`、`installation.yaml`、`user.yaml` 缺席。
+     * 打开前调一次本方法补齐，两个入口看到的目录内容就一致了。
+     *
+     * 单向（私有 → 公开），不写基线、不参与双向：
+     * 这些是引擎的运行状态与编译产物，用户不该在镜像里改它们；
+     * 即使用户改了，下次也以私有的为准覆盖回去。
+     *
+     * @return 本次补入的文件数。
+     */
+    fun mirrorRuntimeFiles(context: Context): Int {
+        if (!UserConfigDir.isSupported) return 0
+        if (!UserConfigDir.hasWritePermission(context)) return 0
+        val rimeDir = SchemaManager.getRimeDir(context)
+        if (!rimeDir.isDirectory) return 0
+        val mirror = mirrorDir(context)
+        var copied = 0
+        runCatching {
+            rimeDir.walkTopDown()
+                .onEnter { it == rimeDir || (it.name !in RUNTIME_EXCLUDED_DIRS && !it.name.startsWith(".")) }
+                .filter { it.isFile }
+                .forEach { file ->
+                    val rel = file.relativeTo(rimeDir).path.replace('\\', '/')
+                    if (!shouldMirrorRuntime(rel)) return@forEach
+                    // 内容指纹比对：不一样才复制（build 下的二进制可达数 MB，避免每次全量写）
+                    val srcHash = hashOrNull(file)
+                    if (srcHash != null && srcHash == hashOrNull(File(mirror, rel))) return@forEach
+                    if (copyFile(file, File(mirror, rel))) copied++
+                }
+        }.onFailure { FileLogger.w(TAG, "完整镜像失败：${it.message}", it) }
+        if (copied > 0) FileLogger.i(TAG, "完整镜像：补入 $copied 个运行状态/编译产物文件")
+        return copied
+    }
+
+    /**
      * 自底向上删除镜像目录里的空目录。
      *
      * 卸载方案会删掉整个子目录（如 `themes/xxx/`），若只删文件就会留下空壳目录，
@@ -349,13 +430,26 @@ object RimeUserFileSync {
         }
     }
 
-    /** 收集一棵目录树里所有可同步文件的相对路径（用 onEnter 剪掉排除目录，避免遍历 build/）。 */
-    private fun collectSyncable(root: File, out: MutableSet<String>) {
+    /**
+     * 收集一棵目录树里所有可同步文件的相对路径（用 onEnter 剪掉排除目录，避免遍历 build/）。
+     *
+     * [excludedNames] 额外跳过指定名字的子目录：遍历可见镜像时要绕开 `xime/` 配置目录，
+     * 否则其中的词频/词库 .txt 会被当作 rime 文件同步进私有工作目录。
+     */
+    private fun collectSyncable(
+        root: File,
+        out: MutableSet<String>,
+        excludedNames: Set<String> = emptySet(),
+    ) {
         if (!root.isDirectory) return
         runCatching {
             root.walkTopDown()
                 .onEnter { dir ->
-                    dir == root || (dir.name !in EXCLUDED_DIRS && !dir.name.startsWith("."))
+                    dir == root || (
+                        dir.name !in EXCLUDED_DIRS &&
+                            dir.name !in excludedNames &&
+                            !dir.name.startsWith(".")
+                        )
                 }
                 .filter { it.isFile }
                 .forEach { file ->

@@ -13,12 +13,15 @@ import androidx.compose.runtime.mutableStateOf
 import java.io.File
 
 /**
- * 用户可见配置目录 `/storage/emulated/0/Xime/`（内部存储根下的 `Xime` 目录）。
+ * 用户可见配置目录 `/storage/emulated/0/rime/xime/`（内部存储根下的 `rime/xime`）。
  *
  * 背景：应用私有目录（`/data/data/<pkg>/files/rime/`）在 Android 11+ 下系统「文件」App 与
  * 第三方编辑器都无法打开，用户改配置只能依赖内置文件管理器或无线导入。本类把配置释放到
- * **内部存储根下的 `Xime/` 目录**，用户在任意文件管理器、USB/MTP 与第三方编辑器里都能直接
+ * **内部存储根下的 `rime/xime/` 目录**，用户在任意文件管理器、USB/MTP 与第三方编辑器里都能直接
  * 打开编辑；设置 →「输入方案」页也提供「打开配置目录」入口（内置文件管理器）。
+ *
+ * 旧版本曾把配置放在根下的 `Xime/` 目录，本类在 [migrateOldRootDir] 里把它整体搬到
+ * `rime/xime/`（见 [DIR_SUB_PATH]），保证升级用户已改好的配置不丢。
  *
  * 权限：内部存储根下的自定义目录不属于 MediaStore 公共集合，写入需要授权——
  * - Android 11（API 30）及以上：「所有文件访问」（`MANAGE_EXTERNAL_STORAGE`），
@@ -38,11 +41,18 @@ object UserConfigDir {
 
     private const val TAG = "UserConfigDir"
 
-    /** 目录名（位于内部存储根下）。 */
+    /** 旧根目录名（内部存储根下的 `Xime`），仅用于首次迁移与清理。 */
     const val DIR_NAME = "Xime"
 
-    /** 配置目录：`/storage/emulated/0/Xime`。 */
+    /** 配置目录相对内部存储根的子路径：`rime/xime`。 */
+    const val DIR_SUB_PATH = "rime/xime"
+
+    /** 配置目录：`/storage/emulated/0/rime/xime`。 */
     val absoluteDir: File
+        get() = File(Environment.getExternalStorageDirectory(), DIR_SUB_PATH)
+
+    /** 旧根目录：`/storage/emulated/0/Xime`（迁移源，见 [migrateOldRootDir]）。 */
+    val oldRootDir: File
         get() = File(Environment.getExternalStorageDirectory(), DIR_NAME)
 
     /** 展示给用户的路径（与真实绝对路径一致，便于在文件管理器里定位）。 */
@@ -284,6 +294,142 @@ object UserConfigDir {
     }
 
     /**
+     * 从旧根目录 `/storage/emulated/0/Xime/` 整体迁移到新结构：
+     *
+     * - `/storage/emulated/0/Xime/rime/` → `/storage/emulated/0/rime/`（rime 镜像在配置目录父级）；
+     * - `/storage/emulated/0/Xime/` 其余文件（xime.yaml、词频/词库、说明.txt）→
+     *   `/storage/emulated/0/rime/xime/`。
+     *
+     * 同时处理上一版中间态：若 `rime/xime/rime/` 存在（上一版把 rime 嵌套在配置目录下），
+     * 把它并进 `/storage/emulated/0/rime/` 后删除。搬完删除旧目录，避免两处各改一半。
+     * 目标目录已有内容时只做旧目录清理，不覆盖。
+     *
+     * 复制失败时**保留**旧目录（宁可不清理也不丢数据）。幂等，每次启动调用都安全。
+     *
+     * @return 旧目录是否已清理干净（不存在也算完成）。
+     */
+    fun migrateOldRootDir(context: Context): Boolean {
+        if (!usable(context)) return false
+        return try {
+            val old = oldRootDir
+            var allMoved = true
+            if (old.isDirectory) {
+                // Xime/rime/ → rime/（目标 rime 镜像，即配置目录父级下的 rime/）
+                val oldRime = File(old, "rime")
+                if (oldRime.isDirectory) {
+                    val targetRime = File(Environment.getExternalStorageDirectory(), "rime")
+                    if (!targetRime.isDirectory && !targetRime.mkdirs()) {
+                        Log.w(TAG, "cannot create rime dir: ${targetRime.absolutePath}")
+                        return false
+                    }
+                    if (targetRime.listFiles()?.isNotEmpty() != true && !copyTree(oldRime, targetRime)) {
+                        Log.w(TAG, "skip old root dir cleanup: rime subtree copy failed")
+                        allMoved = false
+                    }
+                }
+                // Xime/ 其余文件 → rime/xime/
+                if (allMoved) {
+                    val target = absoluteDir
+                    val targetHasFiles = target.isDirectory &&
+                        (target.listFiles()?.isNotEmpty() == true)
+                    if (!targetHasFiles) {
+                        if (!target.isDirectory && !target.mkdirs()) {
+                            Log.w(TAG, "cannot create new config dir: ${target.absolutePath}")
+                            return false
+                        }
+                        val children = old.listFiles().orEmpty()
+                        var ok = true
+                        for (child in children) {
+                            if (child.name == "rime") continue
+                            val dest = File(target, child.name)
+                            if (child.isDirectory) {
+                                if (!dest.isDirectory && !dest.mkdirs()) { ok = false; break }
+                                if (!copyTree(child, dest)) { ok = false; break }
+                            } else {
+                                child.copyTo(dest, overwrite = true)
+                            }
+                        }
+                        if (!ok) {
+                            Log.w(TAG, "skip old root dir cleanup: config copy failed")
+                            allMoved = false
+                        }
+                    }
+                }
+                if (allMoved) {
+                    val deleted = runCatching { old.deleteRecursively() }.getOrDefault(false)
+                    Log.i(
+                        TAG,
+                        "migrated old root dir ${old.absolutePath} -> ${absoluteDir.parentFile?.absolutePath} + /xime",
+                    )
+                    if (!deleted) Log.w(TAG, "old root dir not fully deleted: ${old.absolutePath}")
+                    allMoved = deleted
+                }
+            }
+            // 上一版中间态：rime/xime/rime/ → rime/（配置目录迁移到了父级 rime/ 之后）
+            if (allMoved) {
+                migrateNestedRime(context)
+            }
+            allMoved
+        } catch (t: Throwable) {
+            Log.w(TAG, "migrateOldRootDir failed", t)
+            false
+        }
+    }
+
+    /**
+     * 上一版把 rime 镜像放在配置目录子级（`rime/xime/rime/`）；新版 rime 镜像在配置目录
+     * **父级**（`rime/`）。把残留的 `rime/xime/rime/` 内容并入 `rime/` 后删除该残留。
+     * 目标 rime 已有同名文件时不覆盖（目标优先）。
+     */
+    private fun migrateNestedRime(context: Context) {
+        val nested = File(absoluteDir, "rime")
+        if (!nested.isDirectory) return
+        val targetRime = File(Environment.getExternalStorageDirectory(), "rime")
+        runCatching {
+            if (!targetRime.isDirectory) targetRime.mkdirs()
+            nested.walkTopDown()
+                .filter { it.isFile }
+                .forEach { file ->
+                    val rel = file.relativeTo(nested).path
+                    val dest = File(targetRime, rel)
+                    if (!dest.exists()) {
+                        dest.parentFile?.mkdirs()
+                        file.copyTo(dest, overwrite = false)
+                    }
+                }
+            nested.deleteRecursively()
+        }.onFailure { Log.w(TAG, "migrateNestedRime failed", it) }
+    }
+
+    /** 递归复制目录树；源不是目录或任一文件复制失败即返回 false（调用方保留旧目录）。 */
+    internal fun copyTree(from: File, to: File): Boolean {
+        if (!from.isDirectory) return false
+        return try {
+            val children = from.listFiles().orEmpty()
+            var ok = true
+            for (child in children) {
+                val dest = File(to, child.name)
+                if (child.isDirectory) {
+                    if (!dest.isDirectory && !dest.mkdirs()) {
+                        ok = false
+                        break
+                    }
+                    if (!copyTree(child, dest)) {
+                        ok = false
+                        break
+                    }
+                } else {
+                    child.copyTo(dest, overwrite = true)
+                }
+            }
+            ok
+        } catch (t: Throwable) {
+            Log.w(TAG, "copyTree failed: ${from.absolutePath}", t)
+            false
+        }
+    }
+
+    /**
      * 释放目录说明文件并刷新 [releaseState]。
      *
      * 只负责说明文件与状态判定；配置内容由 [UnifiedConfigFile.ensureGenerated] 生成，
@@ -300,6 +446,7 @@ object UserConfigDir {
             _releaseState.value = ReleaseState.PERMISSION_REQUIRED
             return false
         }
+        migrateOldRootDir(context)
         migrateLegacyDir(context)
         if (!exists(context, README_FILE)) {
             writeText(context, README_FILE, README_TEXT)
@@ -326,11 +473,15 @@ object UserConfigDir {
      * @return 目录最终是否就绪。
      */
     fun releaseUserConfig(context: Context): Boolean {
+        // 目录从根下的 Xime/ 改到 rime/xime/ 后，先把老目录整体搬过来再谈生成，
+        // 否则 ensureGenerated 会先在新目录生成一份默认配置，老目录就不会被迁移。
+        migrateOldRootDir(context)
         migrateLegacyDir(context)
         UnifiedConfigFile.ensureGenerated(context)
         val ready = ensureReleased(context)
-        // 把用户可编辑的 Rime 配置与词库镜像到 `/storage/emulated/0/Xime/rime/`，
-        // 让第三方编辑器（MT管理器等）也能改方案与词库。未授权时内部直接返回，不做任何写入。
+        // 把用户可编辑的 Rime 配置与词库镜像到 `/storage/emulated/0/rime/`（本配置目录
+        // `rime/xime/` 的父级），让第三方编辑器（MT管理器等）也能改方案与词库。
+        // 未授权时内部直接返回，不做任何写入。
         //
         // 放在这里而不是引擎初始化里：引擎初始化有多个触发时机（含输入法服务重启），
         // 而「目录就绪」这件事只应该在启动与授权后各做一次。
@@ -357,12 +508,13 @@ object UserConfigDir {
         $README_FILE
             本文件，可以随意删除，删掉后下次启动会重新生成。
 
-        ${RimeUserFileSync.MIRROR_DIR_NAME}/
+        上一级目录（../rime/）
             输入方案本身：方案配置（default.custom.yaml、*.custom.yaml、*.schema.yaml）、
             词库（*.dict.yaml，如 pinyin_simp、wubi86 等）、标点表（symbols.yaml）
-            与自定义短语（custom_phrase.txt）。
+            与自定义短语（custom_phrase.txt）。本目录所在位置的上一级 `/storage/emulated/0/rime/`
+            就是 rime 方案与词库的镜像目录。
 
-            这些文件与输入法内部的工作目录**双向同步**：在这里改完，回输入法点一次
+            这些文件与输入法内部的工作目录**双向同步**：在那里改完，回输入法点一次
             「部署方案」就生效，不需要重装。第一次生成时会自动补齐，文件很多是正常的。
 
             注意两点：

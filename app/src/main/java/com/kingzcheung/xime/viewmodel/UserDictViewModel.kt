@@ -211,7 +211,9 @@ class UserDictViewModel(application: Application) : AndroidViewModel(application
         }
         _uiState.update { state ->
             if (state.selectedDict != dictName) {
-                state
+                // 已切到别的词库：丢弃过期结果，但写入类操作要复位
+                // isTransferring，否则界面永久停在转圈/隐藏操作入口
+                state.copy(isTransferring = false)
             } else {
                 state.copy(
                     isTransferring = false,

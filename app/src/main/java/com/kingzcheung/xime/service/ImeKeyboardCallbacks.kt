@@ -54,6 +54,11 @@ internal fun rememberImeKeyboardCallbacks(
                 service.keyRouter.selectCandidate(index)
             },
             candidateCount = { service.candidateState.value.candidates.size },
+            // 编码态（不管候选出没出来）：shift 转 esc 用。ascii 态排除——
+            // 英文直接上屏不构成组合态，且 shift 要留给大小写切换。
+            isComposing = {
+                service.candidateState.value.isComposing && !service.uiState.value.isAsciiMode
+            },
             onCandidateDelete = { index ->
                 service.keyRouter.deleteCandidate(index)
             },

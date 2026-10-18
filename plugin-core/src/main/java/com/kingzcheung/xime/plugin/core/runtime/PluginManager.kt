@@ -251,8 +251,15 @@ object PluginManager {
         }
     }
 
-    suspend fun installPluginsFromAssetsForDebug(assetsDir: String = "plugins"): Int {
-        Log.d(TAG, "installPluginsFromAssetsForDebug: $assetsDir")
+    /**
+     * 安装随包内置的插件（`assets/<assetsDir>` 目录下的 xipk 包）。
+     *
+     * debug 与 release 都要调用：内置插件是"开箱可用"的产品决定（如 WebDAV 云备份），
+     * 只在 debug 生效等于发布版没有它。已装同版本会被 [installPluginFromAssets] 的
+     * onlyIfNewer 跳过，因此每次启动调用是幂等的，也不会覆盖用户自行升级的版本。
+     */
+    suspend fun installBundledPluginsFromAssets(assetsDir: String = "plugins"): Int {
+        Log.d(TAG, "installBundledPluginsFromAssets: $assetsDir")
         val context = requireContext().application
         var installedCount = 0
 
@@ -273,7 +280,7 @@ object PluginManager {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "installPluginsFromAssetsForDebug failed", e)
+            Log.e(TAG, "installBundledPluginsFromAssets failed", e)
         }
 
         Log.d(TAG, "Total installed: $installedCount")

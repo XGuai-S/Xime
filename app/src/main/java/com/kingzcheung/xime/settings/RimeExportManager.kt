@@ -110,7 +110,7 @@ object RimeExportManager {
 
             FileOutputStream(archive).use { fileOut ->
                 ZipOutputStream(BufferedOutputStream(fileOut)).use { zos ->
-                    // 可见目录 /storage/emulated/0/Xime/ 里的统一配置才是生效的那份（读取优先级最高），
+                    // 可见目录 /storage/emulated/0/rime/xime/ 里的统一配置才是生效的那份（读取优先级最高），
                     // 单独取出来写入，并让 rime/ 下的旧副本跳过，避免包里出现两份互相矛盾的配置。
                     val visibleCustom = UserConfigDir.readText(context, UserConfigDir.UNIFIED_CONFIG_FILE)
                     val legacyNames = setOf(
@@ -134,10 +134,31 @@ object RimeExportManager {
                         zos.write(visibleCustom.toByteArray(Charsets.UTF_8))
                         zos.closeEntry()
                     }
-                    // 备份范围按 xime.yaml `backup` 段配置：候选排序词频表（candidate_order.txt，
-                    // 与 xime.yaml 同级）。默认开启，换机/恢复后手动排序不丢。
-                    if (KeysConfigHelper.loadBackupConfig(context).candidateOrder) {
-                        packCandidateOrder(context, zos)
+                    // 备份范围按 xime.yaml `backup` 段配置：与 xime.yaml 同级的用户数据表
+                    //（候选排序、自动造词词库、上屏词频）。默认全开，换机/恢复后不丢。
+                    val backupConfig = KeysConfigHelper.loadBackupConfig(context)
+                    if (backupConfig.candidateOrder) {
+                        packUserDataFile(
+                            context, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME, zos
+                        )
+                    }
+                    if (backupConfig.autoWord) {
+                        packUserDataFile(
+                            context, com.kingzcheung.xime.service.AutoWordStore.TEMP_FILE_NAME, zos
+                        )
+                        packUserDataFile(
+                            context, com.kingzcheung.xime.service.AutoWordStore.FIXED_FILE_NAME, zos
+                        )
+                    }
+                    if (backupConfig.wordFreq) {
+                        packUserDataFile(
+                            context, com.kingzcheung.xime.service.WordFreqStore.FILE_NAME, zos
+                        )
+                    }
+                    if (backupConfig.blacklist) {
+                        packUserDataFile(
+                            context, com.kingzcheung.xime.service.WordBlacklistStore.FILE_NAME, zos
+                        )
                     }
                     BackupManager.collectMetaEntries(context).forEach { (entryName, bytes) ->
                         zos.putNextEntry(ZipEntry(entryName))
@@ -228,20 +249,22 @@ object RimeExportManager {
     }
 
     /**
-     * 把候选排序词频表写入备份包（包根 `candidate_order.txt`，与 xime.yaml 同级语义）。
+     * 把一张用户数据表写入备份包（包根 `<fileName>`，与 xime.yaml 同级语义）。
      *
-     * 读取顺序与 [com.kingzcheung.xime.service.CandidateOrderStore.load] 一致：
-     * 优先可见目录（用户可直接查看/备份的那份），缺失时回退私有目录（老版本遗留/未授权
-     * 时的回退副本）。两处都没有则跳过，不报错。
+     * 适用对象：候选排序词频表 `candidate_order.txt`、自动造词临时/固定词库
+     * `auto_word_temp.txt` / `auto_word.txt`、上屏词频表 `word_freq.txt`——
+     * 它们都走同一套「可见目录为主、私有目录为备」的双写策略。
+     *
+     * 读取顺序与各 Store 的 load 一致：优先可见目录（用户可直接查看/备份的那份），
+     * 缺失时回退私有目录（老版本遗留/未授权时的回退副本）。两处都没有则跳过，不报错。
      */
-    private fun packCandidateOrder(context: Context, zos: ZipOutputStream) {
-        val text = UserConfigDir.readText(context, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME)
+    private fun packUserDataFile(context: Context, fileName: String, zos: ZipOutputStream) {
+        val text = UserConfigDir.readText(context, fileName)
             ?: runCatching {
-                File(context.filesDir, com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME)
-                    .takeIf { it.isFile }?.readText()
+                File(context.filesDir, fileName).takeIf { it.isFile }?.readText()
             }.getOrNull()
         if (text == null || text.isBlank()) return
-        zos.putNextEntry(ZipEntry(com.kingzcheung.xime.service.CandidateOrderStore.FILE_NAME))
+        zos.putNextEntry(ZipEntry(fileName))
         zos.write(text.toByteArray(Charsets.UTF_8))
         zos.closeEntry()
     }

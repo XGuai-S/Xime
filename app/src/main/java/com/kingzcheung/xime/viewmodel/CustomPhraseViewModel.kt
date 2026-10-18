@@ -63,7 +63,10 @@ class CustomPhraseViewModel(application: Application) : AndroidViewModel(applica
         if (trimmedWord.isEmpty() || trimmedCode.isEmpty()) return
         viewModelScope.launch {
             val current = _uiState.value.entries
-            val updated = current + DictEntry(trimmedWord, trimmedCode, weight)
+            // 同词同码去重：列表渲染用「词+码」作 key，重复会触发
+            // LazyColumn 重复 key 崩溃；indexOf 反查也会命中错误条目
+            val updated = current.filterNot { it.word == trimmedWord && it.code == trimmedCode } +
+                DictEntry(trimmedWord, trimmedCode, weight)
             withContext(Dispatchers.IO) { PersonalDictManager.saveCustomPhrases(context, schemaId, updated) }
             _uiState.update {
                 val query = it.searchQuery

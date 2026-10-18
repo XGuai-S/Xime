@@ -10,7 +10,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!--
-      用户配置目录 /storage/emulated/0/Xime/ 的写入权限。
+      用户配置目录 /storage/emulated/0/rime/xime/ 的写入权限。
       - API 30+：需要「所有文件访问」，用户在系统设置里手动授予（设置页提供跳转入口）。
       - API 28/29：WRITE_EXTERNAL_STORAGE 运行时权限，仅声明到 29。
       未授权时应用回退私有目录 + 内置文件管理器，功能不缺失。

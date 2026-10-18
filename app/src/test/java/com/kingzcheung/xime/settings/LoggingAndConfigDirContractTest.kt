@@ -326,12 +326,14 @@ class LoggingAndConfigDirContractTest {
     }
 
     @Test
-    fun `配置目录入口走直达路由而文件管理器仍走通用路由`() {
-        assertTrue("应有独立直达路由", routes.contains("const val UserConfigBrowser"))
+    fun `配置目录入口与文件管理器同走 rime 工作目录路由`() {
+        // 「打开配置目录」打开应用私有 rime 工作目录（files/rime，方案词典真正所在），
+        // 与通用「文件管理器」同一路由；xime 配置子目录从列表虚拟入口进。
+        assertFalse("不应有独立的直达路由", routes.contains("const val UserConfigBrowser"))
         assertTrue(
-            "「打开配置目录」应导航到直达路由",
+            "「打开配置目录」应导航到 rime 工作目录浏览路由",
             settingsScreen.contains(
-                "onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.UserConfigBrowser) }",
+                "onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.RimeFileBrowser) }",
             ),
         )
         assertTrue(
@@ -339,10 +341,6 @@ class LoggingAndConfigDirContractTest {
             settingsScreen.contains(
                 "onNavigateToFileManager = { navController.navigate(SettingsRoutes.RimeFileBrowser) }",
             ),
-        )
-        assertTrue(
-            "直达路由必须传 startInUserConfigDir = true",
-            settingsScreen.contains("startInUserConfigDir = true"),
         )
     }
 
@@ -352,8 +350,8 @@ class LoggingAndConfigDirContractTest {
             "app/src/main/java/com/kingzcheung/xime/ui/settings/SchemaSettingsScreen.kt",
         ).readText()
         assertTrue(
-            "「打开配置目录」副标题应说明直达 xime.yaml 所在目录",
-            entry.contains("直接打开 xime.yaml 所在目录"),
+            "「打开配置目录」副标题应说明打开 rime 工作目录（方案词典所在）",
+            entry.contains("方案词典与词库所在目录") && entry.contains("SchemaManager.getRimeDir(context)"),
         )
         assertTrue(
             "工具栏「文件管理器」应走通用回调",

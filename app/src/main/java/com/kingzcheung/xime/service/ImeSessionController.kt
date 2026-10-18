@@ -113,11 +113,20 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
      *
      * 两条来源互斥、优先级明确：
      * - 「候选首词显示在输入框」开启 → 写**第一个候选词**（编码让位，只在候选栏显示）。
-     *   开关开启时绝不写编码，保证 composing 区内容确定——清空/撤回/删除会话要靠
-     *   [SettingsPreferences.isCodeInInputBox] 判断输入框里到底是编码还是候选词。
+     *   此时没有候选（编码打不出词）则用编码兜底：输入框任何时刻都要有内容，
+     *   否则用户敲了码却看到 composing 区空白，以为没输入上。
      * - 否则「编码显示=显示在输入框」→ 写编码。
      *
-     * 两者都不满足时清空 composing 区，避免上一帧的编码/候选词残留在正文里。
+     * 首候选取 [com.kingzcheung.xime.service.XimeInputMethodService.candidateState] 里的候选
+     * （候选栏同源）：候选栏会被用户手动顺序/上屏词频重排（见 [writeDisplayState]），
+     * 用引擎原始 [displayCandidates] 会出现「候选栏首词是快乐、输入框却是况」的不一致。
+     *
+     * 两者都不满足（非组合态、或无内容可写）时清空 composing 区，避免上一帧的
+     * 编码/候选词残留在正文里。
+     *
+     * 消费方（清空/撤回/删除会话）在候选首词模式下都会先 `endComposingInputBox()`
+     * 清掉 composing 区再快照正文，不依赖 composing 区里是编码还是候选词，
+     * 因此兜底写编码不影响 [SettingsPreferences.isCodeInInputBox] 的既有语义。
      */
     private fun syncInputBoxComposition(
         codeInInputBox: Boolean,
@@ -127,9 +136,11 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
     ) {
         val candidateFirst = SettingsPreferences.showCandidateFirstInInputBox(service)
         if (!codeInInputBox && !candidateFirst) return
-        val candidate = displayCandidates.firstOrNull().orEmpty()
+        val candidates = service.candidateState.value.candidates.ifEmpty { displayCandidates }
+        val candidate = candidates.firstOrNull().orEmpty()
             .takeIf { candidateFirst && isComposing && it.isNotEmpty() }
-        val text = candidate ?: displayText.takeIf { codeInInputBox && isComposing && it.isNotEmpty() }
+        // 首候选词优先；无候选时用编码兜底，保证输入框始终有内容
+        val text = candidate ?: displayText.takeIf { isComposing && it.isNotEmpty() }
         if (text == null) {
             service.endComposingInputBox()
             return
@@ -336,28 +347,55 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 用户手动排序（纯引擎路径）：按本地词频表重排候选栏显示顺序。
         // 重排产生的 engine actions 让点选仍落在正确的引擎候选上
         // （selectCandidateAsync 走 pendingAction.engineIndex）。
+        // 手动排序覆盖该编码时优先（用户显式排定的全序）；未手动排过的编码
+        // 用上屏词频表（word_freq.txt）补位——上得多的词排在前面。见
+        // CandidateOrderStore.reorder / WordFreqStore.reorder。
         val reordered = if (shouldApplyCandidateOrder(display.isT9, isAsciiMode, candidateActions)) {
             CandidateOrderStore.reorder(
                 code = rawInputText,
                 candidates = display.candidates,
                 comments = display.comments,
                 table = service.candidateOrderTable,
+            ) ?: WordFreqStore.reorder(
+                code = rawInputText,
+                candidates = display.candidates,
+                comments = display.comments,
+                table = service.wordFreqTable,
             )
         } else {
             null
         }
+        val engineCandidates = reordered?.candidates ?: display.candidates
+        val engineComments = reordered?.comments ?: display.comments
+        val engineActions = reordered?.actions ?: candidateActions
+        // 合并自动造词候选（临时+固定词库按当前编码匹配；造词不经 rime，也不写进快捷短语）
+        val withAutoWords = service.mergeAutoWordCandidates(
+            code = rawInputText,
+            engineCandidates = engineCandidates,
+            engineComments = engineComments,
+            engineActions = engineActions,
+            isT9 = display.isT9,
+            isAscii = isAsciiMode,
+        )
+        // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）
+        val blacklisted = WordBlacklistStore.filter(
+            candidates = withAutoWords?.candidates ?: engineCandidates,
+            comments = withAutoWords?.comments ?: engineComments,
+            actions = withAutoWords?.actions ?: engineActions,
+            blocked = service.wordBlacklist,
+        )
         service.candidateState.value = service.candidateState.value.copy(
             // T9 保持合成显示态同源；非 T9 仅显示层用 preedit 回显，inputText 保留原始键入串
             inputText = if (display.isT9) display.text else rawInputText,
             preeditText = display.text,
-            candidates = reordered?.candidates ?: display.candidates,
-            candidateComments = reordered?.comments ?: display.comments,
+            candidates = blacklisted?.candidates ?: withAutoWords?.candidates ?: engineCandidates,
+            candidateComments = blacklisted?.comments ?: withAutoWords?.comments ?: engineComments,
             isComposing = display.isComposing,
             associationCandidates = if ((isAsciiMode || !service.isChineseMode) && pendingEnglish.isEmpty()) emptyList() else service.candidateState.value.associationCandidates,
             isShowingRecentClipboard = false,
             hasNextPage = hasNextPage,
             hasPrevPage = hasPrevPage,
-            candidateActions = reordered?.actions ?: candidateActions,
+            candidateActions = blacklisted?.actions ?: withAutoWords?.actions ?: engineActions,
             preeditCaretPos = displayCaretOffset(display.text, rawInputText)
         )
     }

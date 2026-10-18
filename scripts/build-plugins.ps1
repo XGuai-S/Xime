@@ -11,8 +11,9 @@ $ErrorActionPreference = "Stop"
 
 $PROJECT_DIR = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
-# 内置插件（debug 构建从 assets 自动安装的集合）
-$BUNDLED_PLUGINS = @("ai-reply", "ai-translate", "ai-write", "webdav-clipboard-sync")
+# 内置插件（随 APK 打包进 assets/plugins，安装后开箱可用；debug 与 release 一致）
+# 必须与实际内置的插件一致：列出不存在的插件目录会让 --with-assets 必然失败
+$BUNDLED_PLUGINS = @("webdav-backup")
 
 $WITH_ASSETS = $false
 $CLI_ARGS = @()

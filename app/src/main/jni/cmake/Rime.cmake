@@ -49,43 +49,61 @@ foreach(plugin ${RIME_PLUGINS})
        DESTINATION "${CMAKE_SOURCE_DIR}/librime/plugins/${plugin}")
 endforeach()
 
-# librime-t9 源码在顶层 jni/librime-t9，这里用符号链接（而非拷贝）接入
-# librime 插件构建，物理上只保留一份：既避免 IDE 双份索引改错文件，也
-# 从根本上消除“改副本被构建静默覆盖”的隐患。幂等：已存在则先删再建。
-set(T9_PLUGIN_LINK "${CMAKE_SOURCE_DIR}/librime/plugins/librime-t9")
-if(IS_SYMLINK "${T9_PLUGIN_LINK}")
-  file(REMOVE "${T9_PLUGIN_LINK}")
-elseif(EXISTS "${T9_PLUGIN_LINK}")
-  file(REMOVE_RECURSE "${T9_PLUGIN_LINK}")
-endif()
-file(CREATE_LINK "../../librime-t9"
-     "${T9_PLUGIN_LINK}" SYMBOLIC RESULT T9_LINK_RESULT)
-if(NOT T9_LINK_RESULT STREQUAL "0")
-  # Windows 未开启开发者模式时，普通用户没有创建符号链接的权限。
-  # 回退为拷贝（与上面 librime-octagram 等插件的同步方式一致）。
-  # 注意：不要用目录联接（junction）替代——junction 会被本文件上面的
-  # file(REMOVE_RECURSE) 以及 Gradle 侧 syncT9Plugin 的递归删除穿透，
-  # 从而删掉权威源码 jni/librime-t9 的内容。
-  message(STATUS "librime-t9 symlink unavailable (${T9_LINK_RESULT}), using copy")
-  file(COPY "${CMAKE_SOURCE_DIR}/librime-t9/"
-       DESTINATION "${T9_PLUGIN_LINK}")
-endif()
+# ── 顶层插件源码接入 librime 插件构建 ──
+# 权威源码在 jni/<name>，这里接入到 librime/plugins/<name> 供 librime 编译。
+#
+# 首选符号链接（物理单份，IDE 不会改错副本），但**不能只信 CREATE_LINK 的返回值**：
+# Windows 未开启开发者模式时 file(CREATE_LINK ... SYMBOLIC) 会返回 0（成功）却
+# 只产出 0 字节文件或空目录。而 librime/plugins/CMakeLists.txt 用
+# file(GLOB "*") + IS_DIRECTORY 发现插件，这种“成功”的坏链接会让插件被
+# **静默跳过**——configure 与编译都过，直到链接 rime_jni 时才报
+# undefined symbol: rime::T9ProcessorRequire() / correction_set_log_file，
+# 报错点在 JNI 侧，很难反查到这里。故链接后必须实测能否读到插件的
+# CMakeLists.txt，读不到就整体回退为拷贝。
+function(rime_link_plugin name)
+  set(_link "${CMAKE_SOURCE_DIR}/librime/plugins/${name}")
 
-# librime-correction 与 librime-t9 相同：顶层 jni/librime-correction 为权威源码，
-# 以符号链接接入 librime 插件构建（Windows 无权限时回退拷贝）。
-set(CORRECTION_PLUGIN_LINK "${CMAKE_SOURCE_DIR}/librime/plugins/librime-correction")
-if(IS_SYMLINK "${CORRECTION_PLUGIN_LINK}")
-  file(REMOVE "${CORRECTION_PLUGIN_LINK}")
-elseif(EXISTS "${CORRECTION_PLUGIN_LINK}")
-  file(REMOVE_RECURSE "${CORRECTION_PLUGIN_LINK}")
-endif()
-file(CREATE_LINK "../../librime-correction"
-     "${CORRECTION_PLUGIN_LINK}" SYMBOLIC RESULT CORRECTION_LINK_RESULT)
-if(NOT CORRECTION_LINK_RESULT STREQUAL "0")
-  message(STATUS "librime-correction symlink unavailable (${CORRECTION_LINK_RESULT}), using copy")
-  file(COPY "${CMAKE_SOURCE_DIR}/librime-correction/"
-       DESTINATION "${CORRECTION_PLUGIN_LINK}")
-endif()
+  # 清掉上一次残留（链接 / 空目录 / 拷贝副本）。
+  # 注意：目录联接（junction）不能用 REMOVE_RECURSE——会穿透链接删空权威源码，
+  # 故 junction 走 IS_SYMLINK 分支用 file(REMOVE) 只删链接本身。
+  if(IS_SYMLINK "${_link}")
+    file(REMOVE "${_link}")
+  elseif(EXISTS "${_link}")
+    file(REMOVE_RECURSE "${_link}")
+  endif()
+
+  file(CREATE_LINK "../../${name}" "${_link}" SYMBOLIC RESULT _link_result)
+
+  # 关键校验：链接是否真的可达（而非只看 _link_result）
+  if(NOT EXISTS "${_link}/CMakeLists.txt")
+    message(STATUS "plugins/${name}: symlink unusable (result=${_link_result}), falling back to copy")
+    if(EXISTS "${_link}")
+      file(REMOVE "${_link}")
+    endif()
+    if(IS_DIRECTORY "${_link}")
+      file(REMOVE_RECURSE "${_link}")
+    endif()
+    file(COPY "${CMAKE_SOURCE_DIR}/${name}/" DESTINATION "${_link}")
+  endif()
+
+  # 兜底断言：拷贝也失败时必须显式报错，不能让插件继续被静默跳过
+  if(NOT EXISTS "${_link}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "plugins/${name}: 无法接入插件源码（符号链接与拷贝均失败），"
+      "请检查 jni/${name} 是否存在且可读")
+  endif()
+endfunction()
+
+# librime-t9：权威源码 jni/librime-t9（Gradle 侧 syncT9Plugin 也会幂等建链接）
+rime_link_plugin(librime-t9)
+# librime-correction：邻键误触纠错插件，权威源码 jni/librime-correction
+rime_link_plugin(librime-correction)
+
+# 注：上游 v3.2.2 在此处另加了一段 librime-correction 的裸 CREATE_LINK。
+# 它会在上面 rime_link_plugin 之后再次删除并重建链接（不带可达性校验），
+# 从而抵消本文件的修复（Windows 无开发者模式时链接不可用 → 插件被静默跳过 →
+# 链接期 undefined symbol: correction_set_log_file）。rime_link_plugin 已完整
+# 覆盖该插件的接入，故不合并上游这段。
 
 # librime-lua 需要特殊命名 lua
 file(COPY "${CMAKE_SOURCE_DIR}/librime-lua/"

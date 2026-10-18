@@ -76,6 +76,7 @@ fun SettingsMainContent(
     onNavigateToModelLocal: () -> Unit = {},
     onNavigateToSmartPrediction: () -> Unit,
     onNavigateToCorrection: () -> Unit = {},
+    onNavigateToAutoWord: () -> Unit = {},
     onNavigateToSpeechToText: () -> Unit,
     onNavigateToAbout: () -> Unit,
     onNavigateToClipboard: () -> Unit = {},
@@ -337,6 +338,18 @@ fun SettingsMainContent(
                         title = "智能纠错（实验性）",
                         subtitle = "按错相邻键时给出纠正候选",
                         onClick = onNavigateToCorrection,
+                        showArrow = true
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    SettingsItem(
+                        icon = Icons.TwoTone.Ballot,
+                        title = "自动造词",
+                        subtitle = "上屏词自动收录，一个月内上满 2 次晋升固定词库出候选",
+                        onClick = onNavigateToAutoWord,
                         showArrow = true
                     )
                     HorizontalDivider(

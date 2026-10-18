@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kingzcheung.xime.keyboard.ToolbarButton
 import com.kingzcheung.xime.keyboard.ToolbarButtonItem
+import com.kingzcheung.xime.keyboard.isBuiltinToolbarButtonAvailable
 import com.kingzcheung.xime.ui.keyboard.ToolbarButtonIcon
 import com.kingzcheung.xime.ui.keyboard.WIDE_CONTAINER_WIDTH
 
@@ -57,6 +58,7 @@ import com.kingzcheung.xime.ui.keyboard.WIDE_CONTAINER_WIDTH
 fun ToolbarCustomizeView(
     toolbarButtons: List<String>,
     pluginButtons: List<ToolbarButtonItem.Plugin> = emptyList(),
+    isSttEnabled: Boolean = true,
     keyTextColor: Color,
     backgroundColor: Color,
     accentColor: Color,
@@ -66,11 +68,17 @@ fun ToolbarCustomizeView(
     bottomPaddingDp: Int = 0,
     modifier: Modifier = Modifier
 ) {
-    val builtinButtons = ToolbarButton.entries.filter { button ->
-        if (button == ToolbarButton.HANDWRITING_LOOKUP) {
-            com.kingzcheung.xime.handwriting.HandwritingEngine.hasModel(LocalContext.current)
-        } else true
-    }.map { ToolbarButtonItem.Builtin(it) }
+    val context = LocalContext.current
+    // 与候选栏显示同一口径：关掉语音转文本、未装手写模型时，定制列表里也不该出现
+    val builtinButtons = ToolbarButton.entries
+        .filter {
+            isBuiltinToolbarButtonAvailable(
+                it,
+                isSttEnabled = isSttEnabled,
+                hasHandwritingModel = { com.kingzcheung.xime.handwriting.HandwritingEngine.hasModel(context) },
+            )
+        }
+        .map { ToolbarButtonItem.Builtin(it) }
     val allButtons = builtinButtons + pluginButtons
     val itemById = remember(allButtons) { allButtons.associateBy { it.id } }
     val originalButtons = remember { toolbarButtons }
@@ -147,7 +155,10 @@ fun ToolbarCustomizeView(
      * 若直接读外部列表会让本视图重组时抖动。
      */
     fun enterReorderMode() {
-        reorderOrder = toolbarButtons.toList()
+        // 只保留网格里可渲染的按钮：排序列表按 itemById 过滤渲染，
+        // 若配置残留不可用 id（如手写模型被清理），不过滤会导致
+        // 渲染下标与 reorderOrder 下标错位（点这行却拖/高亮另一行）
+        reorderOrder = toolbarButtons.filter { it in itemById }
         reorderMode = true
         reorderDraggingIndex = null
         reorderDragAccumY = 0f

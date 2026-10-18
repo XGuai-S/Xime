@@ -153,8 +153,8 @@ fun KeyboardLayout(
     val isSttEnabled = uiState.isSttEnabled
     val isVoiceMode = uiState.isVoiceMode
     val isVoiceSticky = uiState.voiceSticky
-    // 有候选时第三行第一个键（shift）转为 esc：点击清空当前候选
-    val hasCandidates = callbacks.candidateCount() > 0
+    // 有候选或处于编码态时第三行第一个键（shift）转为 esc：点击清空当前编码/候选
+    val hasCandidates = shouldShiftShowEsc(callbacks.candidateCount(), callbacks.isComposing())
     val keyRows = KeysConfigHelper.getKeyRows(isAsciiMode)
     val onKeyPressDown = callbacks.onKeyPressDown
     val onKeyRelease = callbacks.onKeyRelease
@@ -572,7 +572,10 @@ internal class QwertyRowEnv(
     val onGestureAction: ((GestureAction, String) -> Unit)?,
     val onCandidateSelect: ((Int) -> Unit)?,
     val candidateCount: () -> Int,
-    /** 当前是否有候选（编码态）：true 时第三行第一个键（shift）显示 esc、点击清空候选。 */
+    /**
+     * 第三行第一个键（shift）是否显示 esc（有候选或编码态，见 [shouldShiftShowEsc]）：
+     * true 时显示 esc、点击清空当前候选/编码；false 时保留 shift 的大小写切换。
+     */
     val hasCandidates: Boolean = false,
     val onVoiceModeChange: ((Boolean) -> Unit)?,
     val isSttEnabled: Boolean,
@@ -1057,9 +1060,18 @@ internal fun resolveShiftGesture(direction: String?, longPressTriggered: Boolean
         else -> ShiftGestureOutcome.Tap
     }
 
+/**
+ * 第三行第一个键（shift）是否显示 esc：有候选（含联想/剪贴板等非组合候选）或处于
+ * 编码态时为 true——不管编码敲了多少个、候选出没出来，编码态点 esc 都是清空当前
+ * 编码/候选（clear_composition）；两者都不满足时才保留 shift 的大小写切换。
+ */
+internal fun shouldShiftShowEsc(candidateCount: Int, isComposing: Boolean): Boolean =
+    candidateCount > 0 || isComposing
+
 @Composable
 private fun ShiftCell(env: QwertyRowEnv, modifier: Modifier, id: String = "shift") {
-    // 有候选时该键转为 esc：点击清空当前候选（编码态退出）。
+    // 有候选或编码态时该键转为 esc：点击清空当前候选/编码（编码态退出）。
+    // 编码打不出来时候选数为 0，但用户仍在编码态，此时要的是 esc 而不是大小写切换。
     // 大小写切换在候选态无意义（编码由候选栏接管），esc 才是此时用户需要的动作。
     if (env.hasCandidates) {
         SwipeableKeyButton(
@@ -1186,7 +1198,12 @@ private fun SpaceCell(env: QwertyRowEnv, modifier: Modifier) {
         { invokeKeyAction(spaceTap, env.onKeyPress, env.onCommitText, env.onGestureAction) }
     } else null
     val spaceLongPressConfig = spaceBinding?.longPress
-    val spaceLongPressItems = spaceLongPressConfig?.let { KeysConfigHelper.longPressDisplayItems(it) }?.ifEmpty { null }
+    // 仅多项长按才走气泡接管（SpaceKey 的 items != null 分支会禁用滑动）；
+    // 单值长按（如默认语音）走 onLongPress，同时保留空格滑动手势。
+    val spaceLongPressItems = spaceLongPressConfig
+        ?.takeIf { it.values.size > 1 }
+        ?.let { KeysConfigHelper.longPressDisplayItems(it) }
+        ?.ifEmpty { null }
     val spaceLongPressMap = spaceLongPressConfig?.let { KeysConfigHelper.longPressActionMap(it) }
     val onLongPress: (() -> Unit)? = if (spaceLongPressItems == null) {
         spaceLong?.let { action ->
@@ -2143,8 +2160,8 @@ private fun LandscapeKeyboardContent(
     // 未配置时回退内置 QWERTY（与竖屏 getOrElse 兜底一致）
     // 横屏与竖屏同源 layout.rows（最多 5 行）；纯字母布局在最后一个字母行两端补 shift/delete
     val landscapeRows = landscapeQwertyRows(keyRows)
-    // 有候选时第三行第一个键（shift）转为 esc：点击清空当前候选
-    val hasCandidates = callbacks.candidateCount() > 0
+    // 有候选或处于编码态时第三行第一个键（shift）转为 esc：点击清空当前编码/候选
+    val hasCandidates = shouldShiftShowEsc(callbacks.candidateCount(), callbacks.isComposing())
     val schemaName = uiState.schemaName
     val enterKeyText = uiState.enterKeyText
     val onKeyPressDown = callbacks.onKeyPressDown

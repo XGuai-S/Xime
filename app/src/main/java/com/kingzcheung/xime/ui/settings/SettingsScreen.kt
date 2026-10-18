@@ -43,6 +43,7 @@ fun SettingsScreen(
                 onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
                 onNavigateToSmartPrediction = { navController.navigate(SettingsRoutes.SmartPrediction) },
                 onNavigateToCorrection = { navController.navigate(SettingsRoutes.Correction) },
+                onNavigateToAutoWord = { navController.navigate(SettingsRoutes.AutoWord) },
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
                 onNavigateToAbout = { navController.navigate(SettingsRoutes.About) },
                 onNavigateToClipboard = { navController.navigate(SettingsRoutes.Clipboard) },
@@ -63,9 +64,14 @@ fun SettingsScreen(
                     onWizardBack()
                 },
                 onNavigateToMarket = { navController.navigate(SettingsRoutes.Market) },
-                onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.UserConfigBrowser) },
+                // 「打开配置目录」打开 rime 工作目录：方案词典与词库所在目录（应用私有 files/rime），
+                // 与「用其他应用打开目录」定位的是同一个目录
+                onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
                 onNavigateToFileManager = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
                 onNavigateToSchemaDictBrowser = { navController.navigate(SettingsRoutes.SchemaDictBrowser) },
+                // 上游 v3.2.2 在此新增 onNavigateToImported（「已导入」独立页面，依赖
+                // SchemaLocalContent 新增的 title 参数与 SchemaSettingsScreen 的入口）。
+                // 本分支的方案页保留了本地实现（未合并上游的方案页重构），故暂不接入。
             )
         }
         composable(SettingsRoutes.Market) {
@@ -191,6 +197,11 @@ fun SettingsScreen(
                 onBack = { navController.popBackStack() }
             )
         }
+        composable(SettingsRoutes.AutoWord) {
+            AutoWordSettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
         composable(SettingsRoutes.SpeechToText) {
             SpeechToTextSettingsContent(
                 onBack = { navController.popBackStack() },
@@ -220,16 +231,8 @@ fun SettingsScreen(
             )
         }
         composable(SettingsRoutes.RimeFileBrowser) {
-            // 通用文件管理器：从私有 rime 根目录开始，可自行进入配置目录
+            // 通用文件管理器：从 rime 工作目录（私有 files/rime，方案词典所在）开始
             RimeFileBrowserContent(onBack = { navController.popBackStack() })
-        }
-        composable(SettingsRoutes.UserConfigBrowser) {
-            // 「打开配置目录」的承诺就是打开配置目录：直接落在 /storage/emulated/0/Xime/，
-            // 让用户一步看到 xime.yaml，而不是再点一层虚拟入口
-            RimeFileBrowserContent(
-                onBack = { navController.popBackStack() },
-                startInUserConfigDir = true,
-            )
         }
         composable(SettingsRoutes.Clipboard) {
             ClipboardSettingsContent(

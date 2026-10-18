@@ -63,7 +63,7 @@ class ConfigDirReleaseContractTest {
         assertTrue(
             "应有锚点文件路径（FileProvider 单文件，供只认文件入口的管理器定位）",
             source.contains("FileProvider.getUriForFile") &&
-                source.contains("UserConfigDir.README_FILE"),
+                source.contains("MT_ANCHOR_FILE"),
         )
         assertTrue(
             "目录 URI 必须用系统外部存储 DocumentsProvider",

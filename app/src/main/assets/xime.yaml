@@ -418,6 +418,8 @@ color_schemes:
 #   long_press: { display: "bubble", values: [ { label: "大写", action: "commit", value: "A" }, { label: "Ä", action: "commit", value: "ä" } ] }
 #   # 也支持字符串简写：
 #   long_press: { display: "bubble", values: ["q", "Q"] }
+#   # 单个动作可直写（不写 values，等价于只含这一项的列表）；bubble: false 时不弹气泡、长按直接执行：
+#   long_press: { label: "语音", action: "voice", bubble: false }
 keyboard:
   # ── 键盘颜色配置（可选，不设置则使用内置默认值）──
   # 背景色已由 color_schemes.*.keyboard_background 接管
@@ -523,6 +525,8 @@ keyboard:
   #   {nl#}           农历 + 干支纪年（丙午年九月初五）
   # 命令项（不产生文本，而是执行内置命令）：
   #   { command: reload, label: 重新部署 }
+  #   { command: "open_dir:/storage/emulated/0/rime", label: 打开配置目录 }
+  #     （open_dir 不带路径时默认打开公开 rime 根 /storage/emulated/0/rime）
   # 用户可在 xime.yaml 里增删改；同名触发码覆盖内置，写成空列表 [] 即禁用。
   combos:
     orq: ["{time:yyyy年M月d日}", "{time:yyyy-MM-dd}"]
@@ -533,6 +537,8 @@ keyboard:
     ojq: ["{jq}", "{jq+}"]
     oiz:
       - { command: reload, label: "重新部署" }
+    ock:
+      - { command: "open_dir:/storage/emulated/0/rime", label: "打开配置目录" }
 
   qwerty:
     # ── 按键布局模式（仅 26 键键盘支持；九键/笔画等其余键盘固定 standard，配置不生效）──
@@ -728,7 +734,7 @@ keyboard:
       # 两端 ?123：单击切面板，长按弹出「数字 / 常用符号」
       mode_change: { width: 1.2, tap: {  action: command, value: mode_change, bubble: false }, long_press: { display: bubble, values: [ { label: number, action: command, value: mode_change_number }, { label: common_symbol, action: command, value: mode_change_common_symbol } ] } }
       # 空格键：单击上屏空格；长按进入语音输入（含麦克风权限校验）
-      space: { width: 5.5, tap: {  action: space, bubble: false }, long_press: { values: [ { label: "语音", action: voice } ] } }
+      space: { width: 5.5, tap: {  action: space, bubble: false }, long_press: { label: "语音", action: voice, bubble: false } }
       # 左右光标键：组合态移动编码编辑光标、空闲态移动编辑器光标
       cursor_left: { tap: {  action: cursor_left, bubble: false } }
       cursor_right: { tap: {  action: cursor_right, bubble: false } }
@@ -779,7 +785,7 @@ keyboard:
       comma: { width: 1, tap: {  label: ",", value: ",", bubble: false } }
       period: { width: 1, tap: {  label: ".", value: ".", bubble: false } }
       mode_change: { width: 1.2, tap: {  action: command, value: mode_change, bubble: false }, long_press: { display: bubble, values: [ { label: number, action: command, value: mode_change_number }, { label: common_symbol, action: command, value: mode_change_common_symbol } ] } }
-      space: { width: 5.5, tap: {  action: space, bubble: false }, long_press: { values: [ { label: "语音", action: voice } ] } }
+      space: { width: 5.5, tap: {  action: space, bubble: false }, long_press: { label: "语音", action: voice, bubble: false } }
       cursor_left: { tap: {  action: cursor_left, bubble: false } }
       cursor_right: { tap: {  action: cursor_right, bubble: false } }
       tab: { width: 1.2, tap: {  action: tab, bubble: false } }
@@ -1117,10 +1123,39 @@ keyboard:
       # 行 3 行尾（"." 正好落在 26 键 shift_right 那一列）
       ".": { width: 1.2 }
 
+# ── 自动造词 ──
+# 上屏词自动进临时词库 auto_word_temp.txt，输入对应编码即出现在候选栏；
+# 被选中上屏满 promote_count 次晋升固定词库 auto_word.txt（文件与 xime.yaml 同级）。
+# 造词编码按当前方案的【单字】规则生成：2 字各取前 2 码；3 字生成两种（各字首码、
+# 前两字首码+第三字前 2 码）；4 字及以上取前三字首码 + 尾字首码。
+auto_word:
+  # 总开关：关闭后不收录、不统计（已生成的文件原样保留）
+  enabled: true
+  # 临时词库保留天数：超过该天数没再被选中的词删除
+  promote_days: 30
+  # 晋升固定词库所需被选中次数（点选或空格选中上屏各算一次）
+  promote_count: 2
+  # 组合生词：相邻两次上屏拼成新词（如「现在」+「目录」→「现在目录」），拼接不算选中次数
+  combo_enabled: true
+  # 组合生词收录的字数范围（含）
+  combo_min_chars: 2
+  combo_max_chars: 4
+
 backup:
   # 备份范围：哪些内容需要随备份一起打包（本地导出 / 云备份共用）。
   # 备份包里始终包含 rime 配置、设置与插件配置；这里的开关决定是否额外携带用户数据。
-  #   candidate_order  候选排序词频表（candidate_order.txt，与 xime.yaml 同级），
+  # 下列文件都与 xime.yaml 同级（可见配置目录），关闭后恢复会回到引擎默认：
+  #   candidate_order  候选排序词频表（candidate_order.txt），
   #                     即你手动拖拽出来的候选顺序。默认开启：换机或恢复后顺序不丢。
   #                     关闭后备份包不含排序表，恢复后候选顺序回到引擎默认。
+  #   auto_word        自动造词词库（auto_word_temp.txt 临时词库 + auto_word.txt 固定词库），
+  #                     即日积月累攒出来的自造词。默认开启：换机后造词积累不丢。
+  #                     关闭后换机/恢复只会丢积累，功能本身照常（重新开始学词）。
+  #   word_freq        上屏词频表（word_freq.txt），参与候选排序。
+  #                     默认开启；关闭后恢复时候选排序退化为引擎默认顺序。
+  #   blacklist        黑名单词库（word_blacklist.txt），长按候选删除的词。
+  #                     默认开启；关闭后恢复时删过的词会重新出现在候选栏。
   candidate_order: true
+  auto_word: true
+  word_freq: true
+  blacklist: true

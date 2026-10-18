@@ -25,6 +25,28 @@ internal fun shouldBreakCompositionOnSelectionChange(
 }
 
 /**
+ * onUpdateSelection 的重入闸门。
+ *
+ * 宿主（如 Compose）会在输入法写完选区后同步回调 updateSelection，
+ * 若不在回调里拦住这次自触发，就会无限递归导致栈溢出。
+ */
+internal class SelectionUpdateGate {
+    private var handling = false
+
+    /** 进入处理区；已在处理中返回 false（自触发回调，调用方直接返回即可）。 */
+    fun tryEnter(): Boolean {
+        if (handling) return false
+        handling = true
+        return true
+    }
+
+    /** 退出处理区，需放在 try/finally 中。 */
+    fun exit() {
+        handling = false
+    }
+}
+
+/**
  * 丢弃输入框内的未上屏编码后应恢复的光标位置；null = 不删除编码文本。
  *
  * 编码在输入框里以 composing 区域存在（宿主不会在光标移出时定稿），
@@ -46,4 +68,21 @@ internal fun restoreCaretAfterInputBoxComposingRemoval(
     } else {
         newSelStart
     }
+}
+
+/**
+ * 组合键（keyboard.combos）输入态是否豁免「光标移动丢弃组合态」。
+ *
+ * combos 触发码（如 orq）在输完前引擎往往无候选，宿主每次写入编码都会回调
+ * 选区变化；若按普通输入丢弃会把引擎编码清空，触发码永远凑不齐。命中后候选栏
+ * 整体被组合键结果占据（注释均为「组合」），同样不应被宿主回调清掉。
+ */
+internal fun shouldExemptComboState(
+    inputText: String,
+    candidates: List<String>,
+    comments: List<String>,
+): Boolean {
+    if (inputText.isEmpty()) return false
+    if (candidates.isEmpty()) return true
+    return comments.isNotEmpty() && comments.all { it == "组合" }
 }

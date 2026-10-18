@@ -251,7 +251,7 @@ fun LayoutDisplaySettingsContent(
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "输入框显示首个候选，便于在正文里预览将要上屏的词；开启后编码让位，只在候选栏显示",
+                                text = "输入框显示首个候选，便于在正文里预览将要上屏的词；没有候选时显示编码，保证输入框始终有内容（开启后编码让位到候选栏）",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

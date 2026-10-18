@@ -103,4 +103,62 @@ class SelectionChangePolicyTest {
         assertNull(removalCaret(1, 1, -1, -1))
         assertNull(removalCaret(1, 1, 5, 5))
     }
+
+    // ── 组合键输入态豁免 ──
+
+    @Test
+    fun `组合键编码累积中无候选_豁免丢弃`() {
+        // 触发码 orq 输入到 or 时引擎无候选：宿主光标回调不应清空编码
+        assertTrue(shouldExemptComboState("or", emptyList(), emptyList()))
+        assertTrue(shouldExemptComboState("o", emptyList(), emptyList()))
+    }
+
+    @Test
+    fun `组合键候选已显示_豁免丢弃`() {
+        // 命中后候选栏被「组合」结果占据：宿主回调不应清掉日期候选
+        assertTrue(
+            shouldExemptComboState("orq", listOf("2026年10月15日"), listOf("组合"))
+        )
+    }
+
+    @Test
+    fun `无编码输入不豁免`() {
+        assertFalse(shouldExemptComboState("", emptyList(), emptyList()))
+        assertFalse(shouldExemptComboState("", listOf("a"), listOf("组合")))
+    }
+
+    @Test
+    fun `普通引擎候选不豁免`() {
+        // 正常拼音有候选：用户移动光标仍需丢弃组合态（上游逻辑保留）
+        assertFalse(shouldExemptComboState("nihao", listOf("你好"), emptyList()))
+        assertFalse(shouldExemptComboState("ni", listOf("你", "尼"), listOf("", "")))
+    }
+}
+
+/**
+ * 选区回调重入闸门：外层放行、处理中（自身写入触发的同步回调）拒绝、退出后恢复。
+ * 回归 StackOverflowError——onUpdateSelection 写 InputConnection 后宿主同步回调 updateSelection。
+ */
+class SelectionUpdateGateTest {
+
+    @Test
+    fun `首次进入放行`() {
+        assertTrue(SelectionUpdateGate().tryEnter())
+    }
+
+    @Test
+    fun `处理中再次进入被拒_屏蔽自触发回调`() {
+        val gate = SelectionUpdateGate()
+        assertTrue(gate.tryEnter())
+        assertFalse(gate.tryEnter())
+        assertFalse(gate.tryEnter())
+    }
+
+    @Test
+    fun `退出后可再次进入`() {
+        val gate = SelectionUpdateGate()
+        assertTrue(gate.tryEnter())
+        gate.exit()
+        assertTrue(gate.tryEnter())
+    }
 }

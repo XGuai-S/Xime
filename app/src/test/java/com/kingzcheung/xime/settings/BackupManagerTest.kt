@@ -263,7 +263,7 @@ class BackupManagerTest {
             filesDir,
             { _, _ -> },
             bytes,
-            candidateOrderWriter = { text ->
+            userDataWriter = { _, text ->
                 written = text
                 true
             }
@@ -285,7 +285,7 @@ class BackupManagerTest {
             filesDir,
             { _, _ -> },
             zipOfText(mapOf("candidate_order.txt" to orderText)),
-            candidateOrderWriter = { false }
+            userDataWriter = { _, _ -> false }
         )
         assertTrue(failResult.isSuccess)
         assertEquals(orderText, File(filesDir, "candidate_order.txt").readText())
@@ -295,6 +295,54 @@ class BackupManagerTest {
         val absentResult = restore(filesDir, zipOfText(mapOf("candidate_order.txt" to orderText)))
         assertTrue(absentResult.isSuccess)
         assertEquals(orderText, File(filesDir, "candidate_order.txt").readText())
+    }
+
+    // ---- 自动造词词库与上屏词频（backup.auto_word / backup.word_freq） ----
+
+    @Test
+    fun `restore routes auto word and word freq to userDataWriter not rime dir`() {
+        val filesDir = tempDir.newFolder("files")
+        val entries = mapOf(
+            "auto_word_temp.txt" to "今天\tjt\t1700000000000\t1\t1700000000000\n",
+            "auto_word.txt" to "现在\txi\t1700000000000\n",
+            "word_freq.txt" to "你\tni\t100\n"
+        )
+        val routed = LinkedHashMap<String, String>()
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            zipOfText(entries),
+            userDataWriter = { name, text ->
+                routed[name] = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(entries.keys, routed.keys)
+        entries.forEach { (name, text) ->
+            assertEquals(text, routed[name])
+            // 不能落到 rime/：那里会被可见目录里的旧表遮蔽
+            assertTrue(!File(filesDir, "rime/$name").exists())
+        }
+    }
+
+    @Test
+    fun `restore falls back to private dir for auto word and word freq`() {
+        val filesDir = tempDir.newFolder("files")
+        val entries = mapOf(
+            "auto_word_temp.txt" to "temp\n",
+            "auto_word.txt" to "fixed\n",
+            "word_freq.txt" to "freq\n"
+        )
+
+        val result = restore(filesDir, zipOfText(entries))
+
+        assertTrue(result.isSuccess)
+        entries.forEach { (name, text) ->
+            assertEquals(text, File(filesDir, name).readText())
+        }
     }
 
     @Test
@@ -309,6 +357,25 @@ class BackupManagerTest {
         assertTrue(!File(filesDir, "rime/candidate_order.txt").exists())
     }
 
+    @Test
+    fun `restore routes word blacklist to userDataWriter not rime dir`() {
+        val filesDir = tempDir.newFolder("files")
+        val routed = LinkedHashMap<String, String>()
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { _, _ -> },
+            zipOfText(mapOf("word_blacklist.txt" to "坏词\n")),
+            userDataWriter = { name, text ->
+                routed[name] = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("坏词\n", routed["word_blacklist.txt"])
+        assertTrue(!File(filesDir, "rime/word_blacklist.txt").exists())
+    }
     // ---- 流式恢复入口（文件，不走内存） ----
     @Test
     fun `restore from file unpacks rime entries and meta prefs`() {

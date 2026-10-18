@@ -33,6 +33,25 @@ class ConfigDirOpenerIntentTest {
     }
 
     @Test
+    fun `打开前先把私有 rime 工作目录同步到公开 rime 根`() {
+        // 第三方应用无法访问应用私有目录 /data/user/0/...，因此「用其他应用打开」前
+        // 必须先把私有 rime 工作目录（方案词典真正所在）同步到公开 /storage/emulated/0/rime
+        val schema = RepoFiles.file(
+            "app/src/main/java/com/kingzcheung/xime/ui/settings/SchemaSettingsScreen.kt",
+        ).readText()
+        assertTrue(
+            "打开前应同步私有 rime 到公开目录",
+            schema.contains("RimeUserFileSync.sync(context)"),
+        )
+        // 只同步可编辑文本时，第三方看到的目录比「打开配置目录」少 build/、*.userdb、
+        // 安装状态文件，用户会以为两个入口内容不一致
+        assertTrue(
+            "打开前应把运行状态与编译产物也补进镜像，保证两个入口内容一致",
+            schema.contains("RimeUserFileSync.mirrorRuntimeFiles(context)"),
+        )
+    }
+
+    @Test
     fun `不得用 file URI 交付给其他应用`() {
         // file:// 在 targetSdk >= 24 上会被 FileUriExposedException 拦截
         assertFalse(
@@ -131,7 +150,7 @@ class ConfigDirOpenerIntentTest {
         assertTrue("应处理 Failed 分支", screen.contains("LaunchOutcome.Failed"))
         assertTrue(
             "仅打开时应提示不支持定位，并给出目录路径",
-            screen.contains("不支持直接定位") && screen.contains("UserConfigDir.DISPLAY_PATH"),
+            screen.contains("不支持直接定位") && screen.contains("RimeUserFileSync.mirrorDir(context)"),
         )
     }
 
@@ -151,8 +170,8 @@ class ConfigDirOpenerIntentTest {
             mtBody.contains("mt://"),
         )
         assertTrue(
-            "应以目录内的锚点文件（说明.txt）作为跳转目标",
-            mtBody.contains("UserConfigDir.README_FILE"),
+            "应以目录内的锚点文件（rime 根的 default.yaml）作为跳转目标",
+            mtBody.contains("MT_ANCHOR_FILE"),
         )
         // URI 必须由**本应用自己的 FileProvider** 生成：
         // 真机实测（2026-10-14）发 externalstorage 的 DocumentsProvider URI 会被系统拒——
@@ -166,12 +185,13 @@ class ConfigDirOpenerIntentTest {
             "应声明 FLAG_GRANT_READ_URI_PERMISSION（否则接收方读不到）",
             mtBody.contains("FLAG_GRANT_READ_URI_PERMISSION"),
         )
-        // filepaths.xml 必须把外部存储的 Xime 目录声明给 FileProvider，
-        // 否则 getUriForFile 会抛 IllegalArgumentException（找不到已配置的根）
+        // MT 锚点文件取自公开 rime 根 /storage/emulated/0/rime（打开前由 RimeUserFileSync
+        // 从私有工作目录同步过来），必须由 filepaths.xml 的 external-path 覆盖；
+        // 否则 getUriForFile 抛 IllegalArgumentException，MT 深链被静默跳过
         val paths = RepoFiles.file("app/src/main/res/xml/filepaths.xml").readText()
         assertTrue(
-            "filepaths.xml 应声明 external-path 覆盖 Xime 目录",
-            paths.contains("<external-path") && paths.contains("path=\"Xime/\""),
+            "filepaths.xml 应声明 external-path 覆盖公开 rime 根目录",
+            paths.contains("<external-path") && paths.contains("path=\"rime/\""),
         )
         assertTrue(
             "应带 text/plain（MT 只对已声明的文件类型有入口）",

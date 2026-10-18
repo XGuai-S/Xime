@@ -22,7 +22,7 @@ import java.io.File
  *
  * ## 存放位置
  *
- * 词频表写在用户可见配置目录（`/storage/emulated/0/Xime/`，与 `xime.yaml` 同级），
+ * 词频表写在用户可见配置目录（`/storage/emulated/0/rime/xime/`，与 `xime.yaml` 同级），
  * 用户在文件管理器 / 电脑 USB 里可直接查看、备份。可见目录不可用（未授权等）时
  * 回退应用私有目录，功能不丢。
  *
@@ -31,6 +31,12 @@ import java.io.File
  * 只改**显示顺序**，不动引擎候选本体。重排后每个显示位置都附带一条
  * [CandidateAction.engine] 指回它原本的引擎下标，点选因此仍然落在正确的词上
  * （见 [ImeKeyRouter.selectCandidateAsync] 对 pendingAction.engineIndex 的处理）。
+ *
+ * ## 手改合并
+ *
+ * 运行期内存表是唯一真源，但保存前会先做外部修改合并：用户刚在配置目录里手改过文件时，
+ * 手改内容合回内存表（新增/修改保留、删除也尊重，见 [UserDataMerge]），不会被下一次
+ * 保存冲掉。
  */
 internal object CandidateOrderStore {
 
@@ -161,6 +167,12 @@ internal object CandidateOrderStore {
     // ── 文件 IO ──
 
     /**
+     * 外部修改检测基线：上次 load 读到的可见文件文本 / 上次 save 写出的文本。
+     * null = 本进程还没读过也没写过（无从判断外部修改，保存时不合并直接写）。
+     */
+    private var baselineText: String? = null
+
+    /**
      * 回退用的私有目录文件（可见目录不可用/写入失败时）。
      *
      * 读取时也会回退到这里：老版本把词频表写在私有目录，升级后应能读到旧数据。
@@ -194,6 +206,7 @@ internal object CandidateOrderStore {
     }
 
     /** 读取词频表；文件不存在或读失败时返回空表（排序功能退化为不干预）。 */
+    @Synchronized
     fun load(context: android.content.Context): Map<String, Map<String, Int>> {
         // 优先可见配置目录（与 xime.yaml 同级，用户可直接查看/备份），
         // 与私有目录都存在时按修改时间取较新者，见 [newerOf]。
@@ -202,26 +215,50 @@ internal object CandidateOrderStore {
         val priv = privateFile(context)
         val privateText = if (priv.exists()) runCatching { priv.readText() }.getOrNull() else null
         val privateStamp = if (priv.exists()) priv.lastModified() else null
+        // 基线锚定**可见文件**的文本（保存前比对的就是它），与内存取自哪一侧无关
+        baselineText = visibleText ?: ""
         val text = newerOf(visibleStamp, visibleText, privateStamp, privateText) ?: return emptyMap()
         return runCatching { parse(text) }.getOrElse { emptyMap() }
     }
 
-    /** 写入词频表。表为空时删除文件，避免留下一个只有表头的空壳。 */
-    fun save(context: android.content.Context, table: Map<String, Map<String, Int>>) {
-        val text = serialize(table)
-        if (table.isEmpty()) {
-            // 空表：两处都清掉
-            UserConfigDir.delete(context, FILE_NAME)
-            runCatching { privateFile(context).let { if (it.exists()) it.delete() } }
-            return
-        }
-        // 写可见配置目录；不可用/失败时回退私有目录，保证功能不丢
-        val writtenVisible = UserConfigDir.writeText(context, FILE_NAME, text)
-        if (!writtenVisible) {
-            runCatching { privateFile(context).writeText(text) }
-        } else {
-            // 已迁移到可见目录，清掉私有目录旧副本，避免读取时两份不一致
-            runCatching { privateFile(context).let { if (it.exists()) it.delete() } }
-        }
+    /**
+     * 写入词频表，返回**实际写入的表**（调用方必须采纳）。
+     *
+     * 保存前先做外部修改合并：用户刚在配置目录里手改过文件时，手改内容合进返回表
+     * （新增/修改/删除都尊重，见 [UserDataMerge]）——不采纳的话下次保存又会冲掉。
+     * 表为空且没被外部改过时删除文件，不留表头空壳。
+     */
+    @Synchronized
+    fun save(
+        context: android.content.Context,
+        table: Map<String, Map<String, Int>>,
+    ): Map<String, Map<String, Int>> =
+        UserDataMerge.saveUserTable(
+            context = context,
+            name = FILE_NAME,
+            privateFile = privateFile(context),
+            baselineText = baselineText,
+            memory = table,
+            parse = ::parse,
+            serialize = ::serialize,
+            onBaseline = { baselineText = it },
+        )
+
+    /**
+     * 合并外部手改（不写盘）：返回合并后的表，调用方必须采纳。
+     *
+     * 内存表随即包含文件里的全部有效条目，下次保存自然落盘；基线记为当前文件内容，
+     * 之后保存不会把用户的删除写回冲掉。文件读不到或没被改过 → 原样返回。
+     */
+    @Synchronized
+    fun reconcile(
+        context: android.content.Context,
+        table: Map<String, Map<String, Int>>,
+    ): Map<String, Map<String, Int>> {
+        val current = UserConfigDir.readText(context, FILE_NAME) ?: return table
+        if (!UserDataMerge.externalChanged(baselineText, current)) return table
+        val merged = UserDataMerge.reconcileTable(baselineText, current, table, ::parse)
+        baselineText = current
+        return merged
     }
 }

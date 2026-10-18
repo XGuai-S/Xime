@@ -82,13 +82,13 @@ class RimeUserFileSyncContractTest {
     }
 
     @Test
-    fun `镜像目录位于可见配置目录之下`() {
+    fun `镜像目录位于配置目录的父级`() {
         val code = executable(sync)
         assertTrue(
-            "镜像目录应建在 UserConfigDir.absoluteDir 之下",
-            code.contains("File(UserConfigDir.absoluteDir, MIRROR_DIR_NAME)"),
+            "镜像目录应建在内部存储根的 rime 目录（配置目录 rime/xime 的父级）",
+            code.contains("File(Environment.getExternalStorageDirectory(), MIRROR_DIR_NAME)"),
         )
-        assertEquals("镜像子目录名应为 rime", "rime", RimeUserFileSync.MIRROR_DIR_NAME)
+        assertEquals("镜像目录名应为 rime", "rime", RimeUserFileSync.MIRROR_DIR_NAME)
     }
 
     @Test
@@ -131,8 +131,8 @@ class RimeUserFileSyncContractTest {
         ).readText()
         val readme = userConfigDir.substringAfter("private val README_TEXT")
         assertTrue(
-            "说明应提到镜像目录（引用常量，避免与实现漂移）",
-            readme.contains("RimeUserFileSync.MIRROR_DIR_NAME"),
+            "说明应提到 rime 镜像目录（上一级 ../rime/）",
+            readme.contains("../rime/"),
         )
         assertTrue("说明应讲清删除不会同步", readme.contains("删除"))
         assertTrue("说明应讲清部署后才生效", readme.contains("部署"))

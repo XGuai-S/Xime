@@ -384,6 +384,37 @@ data class XimeConfig(
     val metadata: MetadataConfig? = null,
     @SerialName("backup")
     val backup: BackupConfig? = null,
+    @SerialName("auto_word")
+    val autoWord: AutoWordConfig? = null,
+)
+
+/**
+ * 自动造词配置，从 xime.yaml `auto_word` 段加载。
+ *
+ * 控制上屏词自动收录（临时词库 → 固定词库）与词频统计的开关与晋升参数。
+ */
+@Serializable
+data class AutoWordConfig(
+    /** 是否启用自动造词（上屏词收录与词频统计）。默认 true。 */
+    @SerialName("enabled")
+    val enabled: Boolean = true,
+    /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 30。 */
+    @SerialName("promote_days")
+    val promoteDays: Int = 30,
+    /** 窗口内需达到的上屏次数。默认 2。 */
+    @SerialName("promote_count")
+    val promoteCount: Int = 2,
+    /** 是否把相邻两次上屏的词拼接成生词（如「现在」+「目录」→「现在目录」）。默认 true。 */
+    @SerialName("combo_enabled")
+    val comboEnabled: Boolean = true,
+    /**
+     * 组合生词的字数下限/上限（含）。拼接后的词字数落在此区间才收录，
+     * 避免 1 字碎片与超长句子污染词库。默认 2–4。
+     */
+    @SerialName("combo_min_chars")
+    val comboMinChars: Int = 2,
+    @SerialName("combo_max_chars")
+    val comboMaxChars: Int = 4,
 )
 
 /**
@@ -400,6 +431,25 @@ data class BackupConfig(
      */
     @SerialName("candidate_order")
     val candidateOrder: Boolean = true,
+    /**
+     * 是否备份自动造词词库（auto_word_temp.txt 临时词库 + auto_word.txt 固定词库，
+     * 与 xime.yaml 同级）。默认 true：造词是长期积累，换机后不该从零开始。
+     * 关闭只影响「积累」，功能本身照常（重新开始学词）。
+     */
+    @SerialName("auto_word")
+    val autoWord: Boolean = true,
+    /**
+     * 是否备份上屏词频表（word_freq.txt，与 xime.yaml 同级）。
+     * 默认 true：与候选排序同理，恢复后候选顺序不退化。
+     */
+    @SerialName("word_freq")
+    val wordFreq: Boolean = true,
+    /**
+     * 是否备份黑名单词库（word_blacklist.txt，与 xime.yaml 同级）。
+     * 默认 true：长按删掉的词是用户明确的选择，换机/恢复后不该重新冒出来。
+     */
+    @SerialName("blacklist")
+    val blacklist: Boolean = true,
 )
 
 @Serializable

@@ -91,10 +91,12 @@ import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.settings.SyncManager
 import com.kingzcheung.xime.ui.keyboard.KeyboardView
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
+import com.kingzcheung.xime.ui.keyboard.isT9Schema
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import com.kingzcheung.xime.ui.theme.keyboardBackground
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import com.kingzcheung.xime.settings.ConfigDirOpener
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.ui.theme.XimeTheme
 import com.kingzcheung.xime.util.FileLogger
@@ -255,6 +257,29 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 在 [onCreate] 里用已 attach 的 context 加载。
      */
     internal var candidateOrderTable: Map<String, Map<String, Int>> = emptyMap()
+    /**
+     * 上屏词频表（编码 → 词 → 上屏次数）。
+     *
+     * 与 [candidateOrderTable] 同一加载约束：InputMethodService 构造先于
+     * attachBaseContext，字段初始化时 `getFilesDir()` 为 null，只能在 [onCreate]
+     * 里用已 attach 的 context 加载。上屏时更新、防抖落盘（见 [recordWordFrequency]）。
+     */
+    internal var wordFreqTable: Map<String, Map<String, Int>> = emptyMap()
+    /**
+     * 自动造词临时词库（编码 → 词 → 条目）。
+     *
+     * 与 [candidateOrderTable] 同一加载约束（onCreate 里用已 attach 的 context 加载）。
+     * 上屏时记录、晋升时更新并防抖落盘，见 [recordWordFrequency]。
+     */
+    internal var autoWordTemp: Map<String, Map<String, AutoWordStore.Entry>> = emptyMap()
+    /** 自动造词固定词库（编码 → 词 → 权重），晋升时更新落盘；作为 custom_phrase 注入 rime。 */
+    internal var autoWordFixed: Map<String, Map<String, Int>> = emptyMap()
+    /**
+     * 黑名单词库：长按候选删除的词，显示候选时整条剔除（见 [WordBlacklistStore]）。
+     *
+     * 加载约束同上（onCreate 里用已 attach 的 context 加载）。
+     */
+    internal var wordBlacklist: Set<String> = emptySet()
     private val clipboardItemsState = mutableStateOf<List<com.kingzcheung.xime.clipboard.ClipboardItem>>(emptyList())
     private val voiceAmplitudeState = mutableFloatStateOf(0f)
     private val voiceSpectrumState = mutableStateOf(FloatArray(16))
@@ -630,6 +655,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         FileLogger.i(TAG, "XimeInputMethodService created")
         // 候选排序词频表：在 onCreate（context 已 attach）加载，字段初始化时不可用
         candidateOrderTable = CandidateOrderStore.load(this)
+        wordFreqTable = WordFreqStore.load(this)
+        autoWordTemp = AutoWordStore.loadTemp(this)
+        autoWordFixed = AutoWordStore.loadFixed(this)
+        wordBlacklist = WordBlacklistStore.load(this)
+        // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 30 天）没再上屏
+        // 的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
+        val prunedTemp = AutoWordStore.prune(
+            autoWordTemp,
+            System.currentTimeMillis(),
+            com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
+        )
+        if (prunedTemp !== autoWordTemp) {
+            autoWordTemp = prunedTemp
+            scheduleWordFreqSave()
+        }
         FileLogger.i(
             TAG,
             "Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}), " +
@@ -739,12 +779,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
                 applyInitialSchemaAfterInit()
 
-                // 恢复备份时若引擎未就绪，自造词快照只落了盘没合并：此处补做一次 sync
+                // 恢复备份时若引擎未就绪，自造词快照只落了盘没合并：此处补做一次
                 // （librime 按时间戳合并，不会吃掉本机新词）。失败保留标记，下次引擎就绪再试。
                 if (SettingsPreferences.isPendingDictMerge(this@XimeInputMethodService)) {
-                    val merged = SyncManager.syncNow(this@XimeInputMethodService).isSuccess
-                    FileLogger.i(TAG, "initRimeEngine: pending 自造词快照合并=$merged")
-                    if (merged) SettingsPreferences.setPendingDictMerge(this@XimeInputMethodService, false)
+                    val merged = SyncManager.mergePendingSnapshots(this@XimeInputMethodService)
+                    FileLogger.i(
+                        TAG,
+                        "initRimeEngine: pending 自造词快照合并=${merged.getOrNull() ?: "失败"}"
+                    )
+                    if (merged.isSuccess) SettingsPreferences.setPendingDictMerge(this@XimeInputMethodService, false)
                 }
 
                 withContext(Dispatchers.Main) {
@@ -816,6 +859,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     sessionController.restorePersistedSchemaOptions()
                     updateUI()
                     Log.d(TAG, "initRimeEngine: Rime engine initialized successfully")
+                    // 引擎可用后加载用户词库词集合，供组合生词查重（异步，失败静默）
+                    refreshSchemeDictWords(force = true)
+                    // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）
+                    cleanupAutoWordFromCustomPhrase()
                 }
             } catch (e: Exception) {
                 FileLogger.e(TAG, "initRimeEngine: Failed to initialize Rime engine", e)
@@ -1016,6 +1063,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 else -> actualSchema = savedSchema
             }
             sessionController.updateSchemaName()
+            // 方案可能已变化：刷新组合生词查重用的用户词库词集合（异步，失败静默）
+            refreshSchemeDictWords()
                 
             // 从 user.yaml 恢复方案选项（中/西、简/繁等，含 ascii_mode）
             sessionController.restorePersistedSchemaOptions()
@@ -2281,7 +2330,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
             // 组合键「重新部署」：与设置页「部署方案」同一实现（同步可见目录 → 重编 → 重载）。
             "reload" -> schemaController.reloadConfig()
-            else -> FileLogger.w(TAG, "Unknown command: $name")
+            // 打开目录：`open_dir` 默认公开 rime 根，也可写 `open_dir:<绝对路径>` 指定。
+            else -> if (ConfigDirOpener.isOpenDirCommand(name)) {
+                ConfigDirOpener.openDirectory(this, ConfigDirOpener.parseOpenDirPath(name))
+            } else {
+                FileLogger.w(TAG, "Unknown command: $name")
+            }
         }
     }
 
@@ -2438,6 +2492,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
     }
 
+    /** onUpdateSelection 重入闸门（见 SelectionUpdateGate）。 */
+    private val selectionUpdateGate = SelectionUpdateGate()
+
     override fun onUpdateSelection(
         oldSelStart: Int,
         oldSelEnd: Int,
@@ -2447,18 +2504,36 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         candidatesEnd: Int,
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
-        if (!shouldBreakCompositionOnSelectionChange(
-                oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
+        // 自身写入 InputConnection 会同步触发本回调，处理中直接忽略，避免递归
+        if (!selectionUpdateGate.tryEnter()) return
+        try {
+            // 仅在输入框承载编码/候选词（input-box 模式）时才处理光标移动丢弃组合态：
+            // 此时 setComposingText 写入编辑器的 composing 区，宿主回调的 candidatesStart/End
+            // 覆盖该区域，可据此区分「输入引起的光标回调」与「用户移动光标」。
+            // 候选栏模式下编码只在输入法候选栏显示，编辑器光标变化与组合态无关，宿主也常
+            // 报告 candidates=-1（豁免条件永不成立），任何光标回调都会被误判为「用户移动」
+            // 而清空引擎 input —— 连续输入触发码（如组合键 orq）会在累积完成前被打断。
+            if (!SettingsPreferences.isInputBoxComposing(this)) return
+            if (!shouldBreakCompositionOnSelectionChange(
+                    oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
+                )
+            ) {
+                return
+            }
+            // 组合键输入态（编码累积中且无候选、或候选栏已被组合键结果占据）豁免丢弃：
+            // combos 触发码（如 orq）在输完前引擎往往无候选，宿主写入编码的光标回调
+            // 不应打断累积；命中后候选栏被日期/命令结果占据，同样不应被宿主回调清掉。
+            val state = candidateState.value
+            if (shouldExemptComboState(rimeEngine.getInput(), state.candidates, state.candidateComments)) return
+            if (!hasPendingComposition()) return
+            FileLogger.i(
+                TAG,
+                "onUpdateSelection: 丢弃待上屏组合态 ($oldSelStart,$oldSelEnd)->($newSelStart,$newSelEnd)"
             )
-        ) {
-            return
+            breakPendingCompositionForCaretMove(newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        } finally {
+            selectionUpdateGate.exit()
         }
-        if (!hasPendingComposition()) return
-        FileLogger.i(
-            TAG,
-            "onUpdateSelection: 丢弃待上屏组合态 ($oldSelStart,$oldSelEnd)->($newSelStart,$newSelEnd)"
-        )
-        breakPendingCompositionForCaretMove(newSelStart, newSelEnd, candidatesStart, candidatesEnd)
     }
 
     /** 是否存在未上屏的组合态（输入框 composing / t9 半提交 / 引擎输入）。 */
@@ -2830,6 +2905,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         com.kingzcheung.xime.association.NativeOnnxEngine.releaseSharedEnv()
         serviceScope.cancel()
         keyProcessingDispatcher.close()
+        // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
+        // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
+        mainHandler.removeCallbacks(wordFreqSaveRunnable)
+        wordFreqSavePending = false
+        saveWordData()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
@@ -2847,6 +2927,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun saveCandidateOrder(code: String, ordered: List<String>) {
         if (ordered.isEmpty()) return
+        // 先吃进用户在配置目录里的手改，再叠加本次拖动结果
+        candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
         candidateOrderTable = CandidateOrderStore.withFullOrder(candidateOrderTable, code, ordered)
         CandidateOrderStore.save(this, candidateOrderTable)
         updateUI()
@@ -3091,6 +3173,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
         currentInputConnection?.commitText(text, 1)
 
+        // 上屏词频统计：真实上屏后按当前编码计入统计表（自动造词与候选排序的数据源）
+        recordWordFrequency(text, isPaste)
+
         // text_committed 事件：真实上屏才累计/投递（内部编辑器分支已在上方 return；
         // 敏感输入框（密码）不计不投；粘贴性质上屏带 is_paste 标记，见 commitPastedText；
         // 详见 PluginEventDispatcher）
@@ -3114,6 +3199,375 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     private fun rememberCommitChunk(text: String) {
         predictionManager.appendCommittedChunk(text)
+    }
+
+    // ── 上屏词频统计（自动造词与候选排序的数据源） ──
+
+    /** 词频防抖落盘延迟（ms）：合并高频上屏的多次写盘，避免每键一次 IO。 */
+    private val wordFreqSaveDebounceMs: Long = 1500
+
+    private var wordFreqSavePending = false
+
+    /** 上次上屏的词（组合生词的左半边）；仅中文引擎真实上屏后更新。 */
+    private var lastCommittedWord: String = ""
+
+    /**
+     * 最近一次**从候选栏选中**的词（点选/数字选/造词候选/空格上屏首候选）。
+     *
+     * 晋升计数要求「整个词在候选栏出现并被完整上屏」：上屏后候选快照往往已被清空，
+     * 此时用本标记兜底判断本次提交是否就是那个候选；没有标记的提交（如输入框里
+     * 预览残留、光标移动丢弃组合态带入的内容）不计选中次数。
+     */
+    private var lastSelectedCandidateWord: String? = null
+
+    /** 记录本次从候选栏选中的词，见 [lastSelectedCandidateWord]。 */
+    internal fun markCandidateSelection(word: String) {
+        if (word.isNotEmpty()) lastSelectedCandidateWord = word
+    }
+
+    /**
+     * 已启用方案词库的**词集合**（方案词典 `.dict.yaml` 词条 + 该方案用户词典
+     * `<词典名>.userdb` 自造词），普通上屏词收录查重用：
+     * 词在启用方案词库里已能打出来，无需再收录生成一份。
+     * 引擎读 userdb 持 rimeLock 独占，故缓存只能异步刷新（见 [refreshSchemeDictWords]），
+     * 上屏路径只读内存，绝不触发引擎调用。
+     */
+    @Volatile
+    private var schemeDictWords: Set<String> = emptySet()
+
+    /**
+     * 已启用方案的「单字 → 编码」索引（[SchemeCodeIndex]），组合生词按方案规则生成编码用。
+     * 与 [schemeDictWords] 同批加载（同一份码表），上屏路径只读内存。
+     */
+    @Volatile
+    private var schemeCharCodes: Map<String, String> = emptyMap()
+
+    /** 上次刷新词库词集合的时间戳（节流：输入框切换频繁，不必每次切框都读）。 */
+    private var lastSchemeDictRefreshAt = 0L
+
+    /** 词库词集合最短刷新间隔（ms）：读 userdb 持 rimeLock 独占，不宜太频繁。 */
+    private val schemeDictRefreshIntervalMs = 30_000L
+
+    /**
+     * 异步刷新 [schemeDictWords]：收集当前启用方案引用的各词典（`.dict.yaml`）
+     * 全部词条 + 对应用户词典（`.userdb`）词条。
+     * 引擎未就绪或读取失败时保持原缓存（收录退化为不查重）。
+     * 词典解析与 userdb 读取都较耗时，必须放 IO 线程；
+     * 调用方（引擎就绪后、方案切换后）勿在主线程等待。
+     *
+     * @param force 方案切换/引擎就绪时强制刷新，忽略 [schemeDictRefreshIntervalMs] 节流
+     */
+    private fun refreshSchemeDictWords(force: Boolean = false) {
+        if (!com.kingzcheung.xime.rime.RimeEngine.isInitialized()) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastSchemeDictRefreshAt < schemeDictRefreshIntervalMs) return
+        lastSchemeDictRefreshAt = now
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                val ctx = this@XimeInputMethodService
+                val rimeDir = com.kingzcheung.xime.settings.SchemaManager.getRimeDir(ctx)
+                val dictNames = com.kingzcheung.xime.settings.SchemaManager
+                    .getEnabledSchemas(ctx)
+                    .mapNotNull {
+                        com.kingzcheung.xime.settings.SchemaManager
+                            .getReferencedDictName(ctx, it)
+                    }
+                    .distinct()
+                if (dictNames.isEmpty()) return@launch
+                val words = LinkedHashSet<String>()
+                // 只收单字条目（key 长度 1）：字码索引不借用多字词编码（见 SchemeCodeIndex）
+                val tableEntries = ArrayList<Pair<String, String>>()
+                for (dictName in dictNames) {
+                    // 方案词典词条（`...` 之后的 `词<TAB>码[<TAB>权重]`）
+                    runCatching {
+                        val dictFile = java.io.File(rimeDir, "$dictName.dict.yaml")
+                        if (dictFile.isFile) {
+                            val parsed = com.kingzcheung.xime.settings.DictionaryHelper
+                                .parseDictEntries(dictFile.readText())
+                            for (entry in parsed) {
+                                if (entry.word.isNotEmpty()) {
+                                    words += entry.word
+                                    if (entry.code.isNotEmpty() && entry.word.length == 1) {
+                                        tableEntries += entry.word to entry.code
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 该词典的用户词典（userdb）自造词
+                    runCatching {
+                        words += com.kingzcheung.xime.settings.UserDictIoManager
+                            .readEntries(dictName).map { it.word }
+                    }
+                }
+                schemeDictWords = words
+                schemeCharCodes = SchemeCodeIndex.buildCharCodes(tableEntries.asSequence())
+                FileLogger.d(
+                    TAG,
+                    "scheme dict refreshed: ${words.size} words, ${schemeCharCodes.size} chars from ${dictNames.joinToString()}"
+                )
+            }
+        }
+    }
+
+    /**
+     * 记录一次上屏词频：以上屏瞬间的编码（inputText/preeditText）为键，
+     * 上屏文本为词，计数 +1。
+     *
+     * 过滤：粘贴、密码框、T9（已有 t9Memorize 调频体系）、英文模式不计——
+     * 只统计中文纯引擎输入的词，与候选排序应用范围一致。
+     *
+     * 同时联动自动造词：词进临时词库，窗口内攒够次数即晋升固定词库
+     * （见 [AutoWordStore.record] / [AutoWordStore.promote]）。
+     */
+    private fun recordWordFrequency(text: String, isPaste: Boolean) {
+        if (isPaste || editorSecret) return
+        if (isT9Schema(uiState.value.currentSchemaId)) return
+        if (uiState.value.isAsciiMode) return
+        // 自动造词开关（xime.yaml auto_word.enabled）：关闭时不做任何收录/统计
+        val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+        if (!autoWordConfig.enabled) return
+        val code = candidateState.value.inputText.ifEmpty { candidateState.value.preeditText }
+        if (code.isEmpty()) return
+        val next = WordFreqStore.withCommit(wordFreqTable, code, text)
+        if (next !== wordFreqTable) {
+            wordFreqTable = next
+        }
+        // 自动造词：临时词库记录，随后晋升/淘汰。
+        // 词已在启用方案的词库里（方案词典 .dict.yaml 或用户词典 .userdb）时不收录。
+        // 晋升统计「用户选中次数」（候选点选/空格上屏）：
+        // - 词已在临时词库 → 这次上屏算一次选中，计数 +1；
+        // - 词已在固定词库 → 已学成，不再计数；
+        // - 首次上屏的新词 → 收录（首次上屏算一次选中，初始 1 次）。
+        //
+        // 计数门槛：只有「该词整个出现在候选栏并被完整上屏」才计一次。
+        // 候选快照已被上屏清空时（真实上屏的常见终态），用本次选中的词
+        // （[lastSelectedCandidateWord]）兜底；没有候选来源的提交——只是嵌在输入框里
+        // 预览、或只上屏了词的一部分——都不算选中，不参与晋升计数。
+        val selectedWord = lastSelectedCandidateWord
+        lastSelectedCandidateWord = null
+        val shownCandidates = candidateState.value.candidates
+        val committedWholeWordFromCandidates =
+            text in shownCandidates || (shownCandidates.isEmpty() && text == selectedWord)
+        if (committedWholeWordFromCandidates && text !in schemeDictWords) {
+            when {
+                autoWordTemp[code]?.containsKey(text) == true ->
+                    recordAutoWord(text, listOf(code), autoWordConfig)
+                autoWordFixed[code]?.containsKey(text) == true -> Unit
+                else -> {
+                    // 编码统一按方案单字规则生成：不取输入框残缺码（避免「快乐怎么」以 klz
+                    // 前缀上屏却记进词库）；规则生成不了（字不在方案里）才回退实际输入码。
+                    val codes = SchemeCodeIndex.composeCodes(text, schemeCharCodes)
+                        .ifEmpty { listOf(code) }
+                    recordAutoWord(text, codes, autoWordConfig)
+                }
+            }
+        }
+        // 组合生词：把上一次上屏的词与本次的词拼接成新词进临时词库
+        // （如「现在」+「目录」→「现在目录」，长度由 combo_min/max_chars 控制）。
+        // 编码按启用方案的单字规则生成；任一字在方案里取不到码就不造（编不出来等于打不出来）。
+        // 组合产生的词初始次数为 0：它只是候选，被用户选中后才开始计数（见 [recordAutoWord]）。
+        if (autoWordConfig.comboEnabled) {
+            val comboText = AutoWordStore.comboWord(
+                prevWord = lastCommittedWord,
+                word = text,
+                minChars = autoWordConfig.comboMinChars,
+                maxChars = autoWordConfig.comboMaxChars,
+            )
+            if (comboText != null) {
+                recordAutoWord(
+                    comboText,
+                    SchemeCodeIndex.composeCodes(comboText, schemeCharCodes),
+                    autoWordConfig,
+                    initialCount = 0,
+                )
+            }
+        }
+        // 本次上屏成为下一次组合的「上一次」：仅在满足组合条件（汉字词）时更新，
+        // 否则把组合链打断（粘贴、英文、标点等不应与下一次上屏拼接）。
+        lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
+        scheduleWordFreqSave()
+    }
+
+    /**
+     * 收录一个自动造词：按 [codes] 逐个进临时词库并晋升。
+     *
+     * 一个词可有多个编码（3 字词：三首码 + 前两字首码加第三字前两码），全部收录；
+     * 编码为空（组合词编不出来）时不收录。
+     *
+     * [initialCount] 新条目的初始次数：普通收录 1（首次上屏算一次候选选中），
+     * 组合生词 0（自动拼接的词还没被用户选中过）。晋升判定为 count >= promote_count。
+     * 造词不注入快捷短语（custom_phrase.txt）：候选由 [mergeAutoWordCandidates] 直接合并。
+     */
+    private fun recordAutoWord(
+        word: String,
+        codes: List<String>,
+        config: com.kingzcheung.xime.settings.AutoWordConfig,
+        initialCount: Int = 1,
+    ) {
+        for (code in codes) {
+            if (code.isEmpty()) continue
+            val now = System.currentTimeMillis()
+            val temp = AutoWordStore.record(autoWordTemp, code, word, now, initialCount)
+            if (temp === autoWordTemp) continue
+            autoWordTemp = temp
+            val promotion = AutoWordStore.promote(
+                autoWordTemp, autoWordFixed, now,
+                windowDays = config.promoteDays,
+                minCount = config.promoteCount,
+            )
+            autoWordTemp = promotion.temp
+            autoWordFixed = promotion.fixed
+        }
+    }
+
+    /**
+     * 把自动造词（临时+固定词库）中编码匹配当前输入的词合并进候选尾部。
+     *
+     * 造词不经过 rime、也不写进快捷短语（custom_phrase.txt）：显示候选时由输入法
+     * 直接把两库的词按当前编码合入（完整编码优先；编码没打完时按前缀命中，
+     * 见 [AutoWordStore.candidatesFor]），点选走插件候选（直接上屏）路径。这样临时词库的
+     * 词也能被选中上屏，晋升统计的是「用户选中次数」（见 [recordWordFrequency]）。
+     *
+     * 仅非 T9、非 ascii 的中文组合态合并；无匹配词时返回 null（不干预候选）。
+     *
+     * @return 合并后的候选/注释/动作三元组（动作尾部补 plugin 直接上屏）
+     */
+    internal fun mergeAutoWordCandidates(
+        code: String,
+        engineCandidates: List<String>,
+        engineComments: List<String>,
+        engineActions: List<CandidateAction>,
+        isT9: Boolean,
+        isAscii: Boolean,
+    ): CandidateOrderStore.Reordered? {
+        if (isT9 || isAscii || code.isEmpty()) return null
+        if (!com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().enabled) return null
+        val extra = AutoWordStore.candidatesFor(
+            temp = autoWordTemp,
+            fixed = autoWordFixed,
+            code = code,
+            known = engineCandidates.toHashSet(),
+        )
+        if (extra.isEmpty()) return null
+        // 引擎候选无显式 actions 时（非 T9 无插件变换：显示 index 即引擎 index），
+        // 补齐占位 engine(i)，保证 actions 与合并后候选完全对齐——否则造词候选的
+        // plugin 动作会错位到引擎候选位置，点选造词静默失败（selectRimeOk=false）。
+        val baseActions = if (engineActions.size >= engineCandidates.size) {
+            engineActions
+        } else {
+            engineCandidates.indices.map { CandidateAction.engine(it) }
+        }
+        return CandidateOrderStore.Reordered(
+            candidates = engineCandidates + extra,
+            comments = engineComments + extra.map { "" },
+            actions = baseActions + extra.map { CandidateAction.plugin(it) },
+        )
+    }
+
+    /**
+     * 判断 [word] 是否为当前编码下的自动造词（临时或固定词库）。
+     *
+     * 候选合并同时写入平行的 actions，正常情况下点选走 plugin 动作；此判断作为
+     * 兜底：actions 万一未同步（防御），按“词在造词表”也能直接上屏。
+     */
+    internal fun isAutoWordCandidate(word: String, code: String): Boolean =
+        code.isNotEmpty() && (
+            autoWordTemp[code]?.containsKey(word) == true ||
+                autoWordFixed[code]?.containsKey(word) == true
+            )
+
+    /**
+     * 把一个词加入黑名单并落盘：之后它不再出现在候选栏（显示层屏蔽，见 [WordBlacklistStore.filter]）。
+     *
+     * 长按删除走的是 librime 的 tombstone，只对用户词典生效——方案词典与自造词库的词
+     * 删了还会再冒出来，因此删除必须同时进黑名单。
+     */
+    internal fun addWordBlacklist(word: String) {
+        if (word.isEmpty()) return
+        // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词
+        wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+        val next = WordBlacklistStore.withBlocked(wordBlacklist, word)
+        if (next === wordBlacklist) return
+        wordBlacklist = next
+        WordBlacklistStore.save(this, next)
+        FileLogger.i(TAG, "WordBlacklist: added '$word' total=${next.size}")
+    }
+
+    /**
+     * 迁移清理（一次性、幂等）：移除旧版本注入到快捷短语（custom_phrase.txt）的自动造词。
+     *
+     * 自动造词已改为候选合并通道，不再占用快捷短语。custom_phrase 里与固定词库
+     * （auto_word.txt）重叠的词就是旧版注入的造词，清掉后快捷短语只留用户手写内容
+     * （手写词不在 auto_word.txt 里，不会误删）。
+     *
+     * 引擎就绪后调用（需 IO + 增量部署）；失败静默，下次启动再试。
+     */
+    private fun cleanupAutoWordFromCustomPhrase() {
+        val schemaId = uiState.value.currentSchemaId
+        if (schemaId.isBlank()) return
+        val autoWords = HashSet<String>()
+        for ((_, words) in autoWordFixed) autoWords.addAll(words.keys)
+        if (autoWords.isEmpty()) return
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                val existing = com.kingzcheung.xime.settings.PersonalDictManager
+                    .loadCustomPhrases(this@XimeInputMethodService, schemaId)
+                val kept = existing.filter { it.word !in autoWords }
+                if (kept.size == existing.size) return@launch
+                com.kingzcheung.xime.settings.PersonalDictManager.saveCustomPhrases(
+                    this@XimeInputMethodService, schemaId, kept
+                )
+                com.kingzcheung.xime.settings.PersonalDictManager.ensureSchemaPack(this@XimeInputMethodService, schemaId)
+                rimeEngine.deployIncremental()
+            }
+        }
+    }
+
+    /**
+     * 防抖落盘：延迟期间多次上屏只写一次，服务销毁前强制写。
+     * 词频表、临时词库、固定词库三者同批写入。
+     */
+    private fun scheduleWordFreqSave() {
+        if (wordFreqSavePending) return
+        wordFreqSavePending = true
+        mainHandler.postDelayed(wordFreqSaveRunnable, wordFreqSaveDebounceMs)
+    }
+
+    /** 防抖到期的写盘任务；持有引用才能只撤它自己（见 onDestroy）。 */
+    private val wordFreqSaveRunnable = Runnable {
+        wordFreqSavePending = false
+        saveWordData()
+    }
+
+    /**
+     * 立即写盘词频与词库三件套（防抖到期或服务销毁时调用）。
+     *
+     * save 内部会先合并用户在配置目录 `/storage/emulated/0/rime/xime/` 里的手改
+     * （见 [UserDataMerge]），返回值必须采纳——不采纳的话下次保存又会冲掉。
+     */
+    private fun saveWordData() {
+        wordFreqTable = WordFreqStore.save(this, wordFreqTable)
+        autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
+        autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
+    }
+
+    /**
+     * 合并用户在配置目录下的手改（词频/造词/排序/黑名单五件套），只合并不写盘。
+     *
+     * 由「重载」入口调用：reloadConfig 只重载 rime 与键盘配置，词库表本来不重读，
+     * 用户手改要靠这一步才进得了内存（合并不了的话，下次保存还会被冲掉）。
+     * 合并后内存表即包含文件里的全部有效条目，下次保存自然落盘；基线记为当前文件
+     * 内容，之后保存不会把用户的删除写回冲掉。
+     *
+     * 必须主线程调用：与 [saveWordData] / [recordWordFrequency] 同线程操作内存表。
+     */
+    internal fun reconcileUserDataFiles() {
+        candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
+        wordFreqTable = WordFreqStore.reconcile(this, wordFreqTable)
+        autoWordTemp = AutoWordStore.reconcileTemp(this, autoWordTemp)
+        autoWordFixed = AutoWordStore.reconcileFixed(this, autoWordFixed)
+        wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
     }
 
     /**

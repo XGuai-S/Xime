@@ -11,90 +11,18 @@ val onnxAarUrl = "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxr
 // 头文件不在 AAR 内，需从对应版本源码 raw 取（仅需 C API + provider factory 头）
 val onnxHeadersBase = "https://raw.githubusercontent.com/microsoft/onnxruntime/v${onnxVersion}/include/onnxruntime"
 
-// GitHub 加速镜像（按顺序尝试；不可用时请替换/删除）
+// GitHub 加速镜像（按顺序尝试；不可用时请替换/删除）。
+// 下载/解压逻辑内联在下方各任务的 doLast 中：脚本顶层函数若被 doLast 调用，
+// 会随闭包捕获脚本实例，导致 Gradle 配置缓存无法序列化任务动作
+// （"cannot serialize Gradle script object references"）。
+// 内联实现为纯 Java（HttpURLConnection + ZipInputStream），跨平台：
+//  - 不依赖构建环境 PATH 中是否有 curl（F-Droid 构建服务器曾因找不到 curl 而构建失败）
+//  - 天然规避 Windows 下 curl/schannel TLS 握手失败（SSL error 35）问题
 val ghMirrors = listOf(
     "https://ghfast.top",
     "https://gh-proxy.com",
     "https://ghproxy.net",
 )
-
-// 纯 Java（HttpURLConnection）实现下载，跨平台且不依赖外部 curl/powershell：
-//  - 不依赖构建环境 PATH 中是否有 curl（F-Droid 构建服务器曾因找不到 curl 而构建失败）
-//  - 天然规避 Windows 下 curl/schannel TLS 握手失败（SSL error 35）问题
-// 单个 URL 下载，支持断点续传与自动重试
-fun downloadFile(url: String, target: File, workDir: File, desc: String): Boolean {
-    println("Downloading $desc: $url")
-    repeat(5) { attempt ->
-        try {
-            if (downloadOnce(url, target, desc)) {
-                if (target.exists() && target.length() == 0L) {
-                    target.delete()
-                    return false
-                }
-                println("Downloaded ${target.name} (${target.length()} bytes)")
-                return true
-            }
-        } catch (e: Exception) {
-            System.err.println("Download error for $desc: ${e.message}")
-        }
-        // 失败后清空残留半成品，避免续传污染下一源
-        target.delete()
-        if (attempt < 4) Thread.sleep(3000)
-    }
-    return false
-}
-
-// 单次下载；返回 true 表示 HTTP 成功且内容已写入，false 表示 HTTP 层失败（如 404/403）
-fun downloadOnce(url: String, target: File, desc: String): Boolean {
-    val resumeFrom = if (target.exists()) target.length() else 0L
-    val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-    try {
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 30_000
-        conn.readTimeout = 600_000
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
-        if (resumeFrom > 0) {
-            conn.setRequestProperty("Range", "bytes=$resumeFrom-")
-        }
-        val code = conn.responseCode
-        if (code !in 200..299 && code != 206) {
-            System.err.println("Download failed for $desc (HTTP $code)")
-            return false
-        }
-        // 服务端支持 Range（206）才追加续传；否则（200）从头覆盖
-        val append = code == 206 && resumeFrom > 0
-        target.parentFile.mkdirs()
-        conn.inputStream.use { input ->
-            java.io.FileOutputStream(target, append).use { out ->
-                val buf = ByteArray(64 * 1024)
-                var n: Int
-                while (input.read(buf).also { n = it } != -1) {
-                    out.write(buf, 0, n)
-                }
-            }
-        }
-        return true
-    } finally {
-        conn.disconnect()
-    }
-}
-
-// 按顺序尝试多个 URL（镜像优先，最后官方源），成功即停止，失败自动切换到下一个
-fun downloadWithMirrors(urls: List<String>, target: File, workDir: File, desc: String): Boolean {
-    for (url in urls) {
-        // 已完整下载则跳过
-        if (target.exists() && target.length() > 0) return true
-        if (downloadFile(url, target, workDir, desc)) return true
-        // 失败后清空残留半成品，避免续传污染下一源
-        target.delete()
-    }
-    return false
-}
-
-fun githubUrls(url: String): List<String> = buildList {
-    ghMirrors.forEach { add("${it.trimEnd('/')}/$url") }
-    add(url) // 官方源兜底
-}
 
 val downloadOnnx by tasks.registering {
     val cppDir = file("src/main/jni/onnxruntime")
@@ -105,34 +33,140 @@ val downloadOnnx by tasks.registering {
     outputs.dir(jniLibsDir)
     outputs.file(nnapiMarker)
 
+    // 配置期求值为普通值：doLast 引用脚本属性（buildDir/onnxVersion/onnxAarUrl/
+    // onnxHeadersBase/ghMirrors）会捕获脚本实例，导致配置缓存无法序列化任务动作。
+    val taskBuildDir = buildDir
+    val taskOnnxVersion = onnxVersion
+    val taskAarUrl = onnxAarUrl
+    val taskHeadersBase = onnxHeadersBase
+    val mirrors = ghMirrors
+
     doLast {
         val abis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 
+        // ── doLast 内只允许：注册块局部值 + 本地函数 + File/标准库 API。 ──
+        // 禁止调用脚本顶层函数或引用脚本属性，否则配置缓存序列化失败。
+
+        // 本地解压（替代 zipTree()+copy{}）。带 Zip Slip 防护：解压目标必须位于 destDir 内。
+        fun unzip(zipFile: File, destDir: File) {
+            val destCanonical = destDir.canonicalPath
+            java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val outFile = File(destDir, entry.name)
+                    val outCanonical = outFile.canonicalPath
+                    if (outCanonical != destCanonical && !outCanonical.startsWith(destCanonical + File.separator)) {
+                        throw GradleException("Unsafe zip entry: ${entry.name}")
+                    }
+                    if (entry.isDirectory) {
+                        outFile.mkdirs()
+                    } else {
+                        outFile.parentFile?.mkdirs()
+                        zis.copyTo(outFile.outputStream())
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+        }
+
+        fun githubUrls(url: String): List<String> = buildList {
+            mirrors.forEach { add("${it.trimEnd('/')}/$url") }
+            add(url) // 官方源兜底
+        }
+
+        // 单次下载；返回 true 表示 HTTP 成功且内容已写入，false 表示 HTTP 层失败（如 404/403）
+        fun downloadOnce(url: String, target: File, desc: String): Boolean {
+            val resumeFrom = if (target.exists()) target.length() else 0L
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            try {
+                conn.instanceFollowRedirects = true
+                conn.connectTimeout = 30_000
+                conn.readTimeout = 600_000
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+                if (resumeFrom > 0) {
+                    conn.setRequestProperty("Range", "bytes=$resumeFrom-")
+                }
+                val code = conn.responseCode
+                if (code !in 200..299 && code != 206) {
+                    System.err.println("Download failed for $desc (HTTP $code)")
+                    return false
+                }
+                // 服务端支持 Range（206）才追加续传；否则（200）从头覆盖
+                val append = code == 206 && resumeFrom > 0
+                target.parentFile.mkdirs()
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(target, append).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var n: Int
+                        while (input.read(buf).also { n = it } != -1) {
+                            out.write(buf, 0, n)
+                        }
+                    }
+                }
+                return true
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+        // 单个 URL 下载，支持断点续传与自动重试
+        fun downloadFile(url: String, target: File, desc: String): Boolean {
+            println("Downloading $desc: $url")
+            repeat(5) { attempt ->
+                try {
+                    if (downloadOnce(url, target, desc)) {
+                        if (target.exists() && target.length() == 0L) {
+                            target.delete()
+                            return false
+                        }
+                        println("Downloaded ${target.name} (${target.length()} bytes)")
+                        return true
+                    }
+                } catch (e: Exception) {
+                    System.err.println("Download error for $desc: ${e.message}")
+                }
+                // 失败后清空残留半成品，避免续传污染下一源
+                target.delete()
+                if (attempt < 4) Thread.sleep(3000)
+            }
+            return false
+        }
+
+        // 按顺序尝试多个 URL（镜像优先，最后官方源），成功即停止，失败自动切换下一个
+        fun downloadWithMirrors(urls: List<String>, target: File, desc: String): Boolean {
+            for (url in urls) {
+                // 已完整下载则跳过
+                if (target.exists() && target.length() > 0) return true
+                if (downloadFile(url, target, desc)) return true
+                // 失败后清空残留半成品，避免续传污染下一源
+                target.delete()
+            }
+            return false
+        }
+
         // 已全部就绪则跳过
         val allSoPresent = abis.all {
-            file("${jniLibsDir.absolutePath}/$it/libonnxruntime.so").exists() &&
-            file("${cppDir.absolutePath}/lib/$it/libonnxruntime.so").exists()
+            File(jniLibsDir, "$it/libonnxruntime.so").exists() &&
+            File(cppDir, "lib/$it/libonnxruntime.so").exists()
         }
-        val headersPresent = file("$cppDir/include/onnxruntime_c_api.h").exists()
+        val headersPresent = File(cppDir, "include/onnxruntime_c_api.h").exists()
         if (allSoPresent && headersPresent) {
             println("ONNX Runtime (official AAR) already deployed for all ABIs, skipping")
             return@doLast
         }
 
         // 1. 下载官方 AAR（含 4 ABI 的 libonnxruntime.so，内置 CPU + NNAPI EP）
-        val aar = File(buildDir, "onnxruntime-android-${onnxVersion}.aar")
-        if (!downloadWithMirrors(listOf(onnxAarUrl), aar, buildDir, "onnxruntime-android AAR")) {
-            throw GradleException("Failed to download ONNX Runtime Android AAR: $onnxAarUrl")
+        val aar = File(taskBuildDir, "onnxruntime-android-${taskOnnxVersion}.aar")
+        if (!downloadWithMirrors(listOf(taskAarUrl), aar, "onnxruntime-android AAR")) {
+            throw GradleException("Failed to download ONNX Runtime Android AAR: $taskAarUrl")
         }
         println("AAR downloaded: ${aar.length()} bytes")
 
         // 2. 解压 AAR（zip），提取 jni/<abi>/libonnxruntime.so
-        val aarDir = File(buildDir, "onnxruntime-aar")
+        val aarDir = File(taskBuildDir, "onnxruntime-aar")
         try {
-            copy {
-                from(zipTree(aar))
-                into(aarDir)
-            }
+            unzip(aar, aarDir)
         } catch (e: Exception) {
             throw GradleException("Failed to extract AAR: ${e.message}")
         }
@@ -178,8 +212,8 @@ val downloadOnnx by tasks.registering {
         }
         for (rel in headersToFetch) {
             val target = java.io.File(dstHeaders, rel.substringAfterLast("/"))
-            val url = "$onnxHeadersBase/$rel"
-            if (downloadWithMirrors(githubUrls(url), target, buildDir, "onnxruntime header $rel")) {
+            val url = "$taskHeadersBase/$rel"
+            if (downloadWithMirrors(githubUrls(url), target, "onnxruntime header $rel")) {
                 println("Header ok: ${target.name}")
             } else {
                 System.err.println("WARNING: failed to fetch header $rel")
@@ -188,7 +222,7 @@ val downloadOnnx by tasks.registering {
 
         // 4. Marker
         nnapiMarker.parentFile.mkdirs()
-        nnapiMarker.writeText("ONNX Runtime v${onnxVersion} (official AAR, CPU+NNAPI) deployed on ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date())}")
+        nnapiMarker.writeText("ONNX Runtime v${taskOnnxVersion} (official AAR, CPU+NNAPI) deployed on ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date())}")
         println("ONNX Runtime deployed to: ${abis.joinToString()}")
     }
 }
@@ -291,7 +325,39 @@ val downloadKnf by tasks.registering {
     outputs.file(knfCmake)
     outputs.file(kissfftCmake)
 
+    // 配置期求值为普通值：doLast 引用脚本属性（buildDir/ghMirrors）会捕获脚本
+    // 实例，导致 Gradle 配置缓存无法序列化任务动作。
+    val taskBuildDir = buildDir
+    val mirrors = ghMirrors
+
     doLast {
+        // ── doLast 内只允许：注册块局部值 + 本地函数 + File/标准库 API。 ──
+        // 禁止调用脚本顶层函数或引用脚本属性（file()/buildDir/providers 等），
+        // 否则配置缓存序列化失败（"cannot serialize Gradle script object references"）。
+
+        // 本地解压（替代 zipTree()+copy{}）。带 Zip Slip 防护：解压目标必须位于 destDir 内。
+        fun unzip(zipFile: File, destDir: File) {
+            val destCanonical = destDir.canonicalPath
+            java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val outFile = File(destDir, entry.name)
+                    val outCanonical = outFile.canonicalPath
+                    if (outCanonical != destCanonical && !outCanonical.startsWith(destCanonical + File.separator)) {
+                        throw GradleException("Unsafe zip entry: ${entry.name}")
+                    }
+                    if (entry.isDirectory) {
+                        outFile.mkdirs()
+                    } else {
+                        outFile.parentFile?.mkdirs()
+                        zis.copyTo(outFile.outputStream())
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+        }
+
         fun isZip(f: File): Boolean {
             return try {
                 val b = f.readBytes()
@@ -302,11 +368,81 @@ val downloadKnf by tasks.registering {
             }
         }
 
+        // 单次下载；返回 true 表示 HTTP 成功且内容已写入，false 表示 HTTP 层失败（如 404/403）
+        fun downloadOnce(url: String, target: File, desc: String): Boolean {
+            val resumeFrom = if (target.exists()) target.length() else 0L
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            try {
+                conn.instanceFollowRedirects = true
+                conn.connectTimeout = 30_000
+                conn.readTimeout = 600_000
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+                if (resumeFrom > 0) {
+                    conn.setRequestProperty("Range", "bytes=$resumeFrom-")
+                }
+                val code = conn.responseCode
+                if (code !in 200..299 && code != 206) {
+                    System.err.println("Download failed for $desc (HTTP $code)")
+                    return false
+                }
+                // 服务端支持 Range（206）才追加续传；否则（200）从头覆盖
+                val append = code == 206 && resumeFrom > 0
+                target.parentFile.mkdirs()
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(target, append).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var n: Int
+                        while (input.read(buf).also { n = it } != -1) {
+                            out.write(buf, 0, n)
+                        }
+                    }
+                }
+                return true
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+        // 单个 URL 下载，支持断点续传与自动重试
+        fun downloadFile(url: String, target: File, desc: String): Boolean {
+            println("Downloading $desc: $url")
+            repeat(5) { attempt ->
+                try {
+                    if (downloadOnce(url, target, desc)) {
+                        if (target.exists() && target.length() == 0L) {
+                            target.delete()
+                            return false
+                        }
+                        println("Downloaded ${target.name} (${target.length()} bytes)")
+                        return true
+                    }
+                } catch (e: Exception) {
+                    System.err.println("Download error for $desc: ${e.message}")
+                }
+                // 失败后清空残留半成品，避免续传污染下一源
+                target.delete()
+                if (attempt < 4) Thread.sleep(3000)
+            }
+            return false
+        }
+
+        // 按顺序尝试多个 URL（镜像优先，最后官方源），成功即停止，失败自动切换下一个
+        fun downloadWithMirrors(urls: List<String>, target: File, desc: String): Boolean {
+            for (url in urls) {
+                // 已完整下载则跳过
+                if (target.exists() && target.length() > 0) return true
+                if (downloadFile(url, target, desc)) return true
+                // 失败后清空残留半成品，避免续传污染下一源
+                target.delete()
+            }
+            return false
+        }
+
         // Download and verify a valid zip, retrying a few times (github archive
         // can return an error page that downloadWithMirrors treats as success).
-        fun downloadZip(urls: List<String>, target: File, workDir: File, desc: String): Boolean {
+        fun downloadZip(urls: List<String>, target: File, desc: String): Boolean {
             repeat(5) {
-                if (downloadWithMirrors(urls, target, workDir, desc)) {
+                if (downloadWithMirrors(urls, target, desc)) {
                     if (target.exists() && isZip(target)) return true
                     target.delete()
                 }
@@ -318,15 +454,12 @@ val downloadKnf by tasks.registering {
 
         if (!knfCmake.exists()) {
             knfSrc.deleteRecursively()
-            val zip = File(buildDir, "kaldi-native-fbank-${knfVersion}.zip")
+            val zip = File(taskBuildDir, "kaldi-native-fbank-${knfVersion}.zip")
             val url = "https://github.com/csukuangfj/kaldi-native-fbank/archive/refs/tags/v${knfVersion}.zip"
-            if (!downloadZip(listOf(url), zip, buildDir, "kaldi-native-fbank")) {
+            if (!downloadZip(listOf(url), zip, "kaldi-native-fbank")) {
                 throw GradleException("Failed to download a valid kaldi-native-fbank zip")
             }
-            copy {
-                from(zipTree(zip))
-                into(knfRoot)
-            }
+            unzip(zip, knfRoot)
             if (!knfSrc.exists()) {
                 throw GradleException("kaldi-native-fbank extract dir not found under $knfRoot")
             }
@@ -335,16 +468,13 @@ val downloadKnf by tasks.registering {
 
         if (!kissfftCmake.exists()) {
             kissfftSrc.deleteRecursively()
-            val kzip = File(buildDir, "kissfft.zip")
+            val kzip = File(taskBuildDir, "kissfft.zip")
             val kurl = "https://github.com/mborgerding/kissfft/archive/refs/tags/${kissfftTag}.zip"
-            if (!downloadZip(listOf(kurl), kzip, buildDir, "kissfft")) {
+            if (!downloadZip(listOf(kurl), kzip, "kissfft")) {
                 throw GradleException("Failed to download a valid kissfft zip")
             }
-            copy {
-                from(zipTree(kzip))
-                into(knfRoot)
-            }
-            val extracted = file("$knfRoot/kissfft-${kissfftTag}")
+            unzip(kzip, knfRoot)
+            val extracted = File(knfRoot, "kissfft-${kissfftTag}")
             if (extracted.exists()) extracted.renameTo(kissfftSrc)
             if (!kissfftSrc.exists()) {
                 throw GradleException("kissfft extract dir not found under $knfRoot")
@@ -390,11 +520,17 @@ val syncT9Plugin by tasks.registering {
         } catch (_: java.nio.file.FileSystemException) {
             // Windows 未开启开发者模式时普通用户无符号链接权限，退化为拷贝，
             // 与 Rime.cmake 的回退保持一致（拷贝是真实目录，可安全递归删除）。
+            // 注意：doLast 内不得调用 copy{}/file()/zipTree() 等脚本方法——
+            // 它们会捕获脚本对象，导致 Gradle 配置缓存无法序列化该任务动作。
             mirror.mkdirs()
-            copy {
-                from(authoritative)
-                into(mirror)
+            fun copyDir(src: File, dst: File) {
+                src.walkTopDown().filter { it.isFile }.forEach { f ->
+                    val out = File(dst, f.relativeTo(src).path)
+                    out.parentFile?.mkdirs()
+                    f.copyTo(out, overwrite = true)
+                }
             }
+            copyDir(authoritative, mirror)
         }
     }
 }

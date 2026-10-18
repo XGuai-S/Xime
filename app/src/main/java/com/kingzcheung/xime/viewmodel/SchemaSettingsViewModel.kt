@@ -85,11 +85,13 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
         } else {
             enabled.add(schema.schemaId)
         }
+        // 乐观更新：立即写回 state，避免写盘期间连续切换时第二次
+        // 读到旧列表导致前一次切换被静默丢弃
+        _uiState.update { it.copy(enabledSchemas = enabled) }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 SchemaManager.setEnabledSchemas(context, enabled)
             }
-            _uiState.update { it.copy(enabledSchemas = enabled) }
         }
     }
 
@@ -137,7 +139,7 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
                             result.conflicts.isNotEmpty() -> conflictMessage(result.conflicts)
                             !result.success -> "导入失败"
                             result.installedDirect -> "导入成功，已放入 rime 目录"
-                            else -> "导入成功，请到「本地方案」安装"
+                            else -> "导入成功，可在列表中安装"
                         }
                     )
                 }
@@ -218,7 +220,7 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
             _uiState.update { it.copy(isDeploying = true) }
             val success = withContext(Dispatchers.IO) {
                 PersonalDictManager.ensureSchemaPacks(context)
-                // 部署前把可见目录 `/storage/emulated/0/Xime/rime/` 里用户改过的方案与词库
+                // 部署前把可见目录 `/storage/emulated/0/rime/xime/rime/` 里用户改过的方案与词库
                 // 写回 Rime 工作目录，否则本次部署读到的还是旧文件
                 RimeUserFileSync.sync(context)
                 KeysConfigHelper.loadConfig(context)

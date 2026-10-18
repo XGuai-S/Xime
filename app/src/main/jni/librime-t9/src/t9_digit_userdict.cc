@@ -23,6 +23,7 @@ std::string T9DigitUserDict::BuildLookupKey(const std::string& rime_input) {
 // static
 void T9DigitUserDict::SetFilePath(const std::string& path) {
   auto& self = Instance();
+  self.path_ = path;
   if (self.loaded_)
     return;
   if (self.OpenDb(path)) {
@@ -35,6 +36,32 @@ void T9DigitUserDict::SetFilePath(const std::string& path) {
     T9_LOG_DEBUG("T9DigitDict", ">> SetFilePath '%s' OPEN FAILED (fallback: 内存模式)",
                  path.c_str());
     self.loaded_ = true;
+  }
+}
+
+// static
+void T9DigitUserDict::ReleaseDb() {
+  auto& self = Instance();
+  if (!self.db_)
+    return;
+  // Close() 走的就是 Compact() 的那条路：flush memtable 成 .ldb，再删实例释放 leveldb 的 LOCK
+  if (self.db_->loaded())
+    self.db_->Close();
+  delete self.db_;
+  self.db_ = nullptr;
+  T9_LOG_DEBUG("T9DigitDict", ">> ReleaseDb: leveldb 句柄已释放（让位给 librime 用户词典操作）");
+}
+
+// static
+void T9DigitUserDict::AcquireDb() {
+  auto& self = Instance();
+  if (self.db_ || !self.loaded_ || self.path_.empty())
+    return;
+  if (self.OpenDb(self.path_)) {
+    // 只重开、不从磁盘重载：core_ 本就是权威内存态，LoadFromDb 会 reset 掉它
+    T9_LOG_DEBUG("T9DigitDict", ">> AcquireDb: leveldb 句柄已恢复");
+  } else {
+    T9_LOG_DEBUG("T9DigitDict", ">> AcquireDb: 重开失败（降级内存模式）");
   }
 }
 

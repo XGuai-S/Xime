@@ -20,11 +20,6 @@ internal class PluginFrameworkContext(val application: Application) {
     val loadedPlugins = ConcurrentHashMap<String, LoadedPluginInfo>()
     val pluginInstances = ConcurrentHashMap<String, IPluginEntryClass>()
 
-    val loadedPluginsFlow: StateFlow<Map<String, LoadedPluginInfo>> =
-        MutableStateFlow(loadedPlugins.toMap())
-    val pluginInstancesFlow: StateFlow<Map<String, IPluginEntryClass>> =
-        MutableStateFlow(pluginInstances.toMap())
-
     lateinit var lifecycleManager: PluginLifecycleManager
 
     fun initializeLifecycleManager() {

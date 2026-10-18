@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.core.content.FileProvider
 import java.io.File
@@ -23,7 +24,7 @@ data class ConfigDirTarget(
 )
 
 /**
- * 枚举并启动「能打开 `/storage/emulated/0/Xime` 的应用」。
+ * 枚举并启动「能打开 `/storage/emulated/0/rime`（rime 根：方案词典与词库）的应用」。
  *
  * 三条关键结论（前两条是「打开方式里找不到 MT管理器」的真正原因）：
  *
@@ -44,6 +45,12 @@ data class ConfigDirTarget(
 object ConfigDirOpener {
 
     private const val TAG = "ConfigDirOpener"
+
+    /**
+     * 命令名：打开目录。命令项写成 `{ command: open_dir }`（默认公开 rime 根）
+     * 或 `{ command: "open_dir:/storage/emulated/0/rime" }`（指定目录）。
+     */
+    const val OPEN_DIR_COMMAND = "open_dir"
 
     /** 系统外部存储 DocumentsProvider 的 authority（系统内置）。 */
     private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
@@ -102,21 +109,84 @@ object ConfigDirOpener {
     )
 
     /**
-     * 配置目录的标准文档 URI：`content://com.android.externalstorage.documents/document/primary%3AXime`。
+     * SAF/系统选择器用的初始位置 URI：`content://com.android.externalstorage.documents/document/primary%3Arime`。
      *
-     * 用官方 [DocumentsContract.buildDocumentUri] 构造，而不是手拼字符串：
-     * 它会正确地对 document ID 做百分号编码（`primary:Xime` → `primary%3AXime`）。
-     * 手拼时很容易漏掉编码或编码错位置，导致提供方把 ID 解析成 `primary`（即存储根），
-     * 于是第三方管理器只跳到 `/storage/emulated/0/` 而进不去目标子目录。
-     *
-     * 这是可列举的目录 URI（区别于只能读单文件的 FileProvider URI），
-     * 也是 `EXTRA_INITIAL_URI` 需要的形态。
+     * 目标是应用私有 rime 工作目录（`files/rime`，方案词典所在），但第三方应用
+     * **无法访问应用私有目录**（`/data/user/0/...` 不在 externalstorage authority 下），
+     * SAF 类入口只能拿到公开目录作为近似初始位置（用 [DocumentsContract.buildDocumentUri]
+     * 构造并做百分号编码，避免 ID 被解析成存储根）；真正定位到私有目录靠
+     * [mtDeepLinks] 的 FileProvider 单文件深链（见其注释）。
      */
     private fun documentUri(): Uri =
         DocumentsContract.buildDocumentUri(
             EXTERNAL_STORAGE_AUTHORITY,
-            "primary:${UserConfigDir.DIR_NAME}",
+            "primary:${RimeUserFileSync.MIRROR_DIR_NAME}",
         )
+
+    /** 是否 [OPEN_DIR_COMMAND] 命令（可带 `:` 路径参数）。 */
+    fun isOpenDirCommand(command: String): Boolean =
+        command == OPEN_DIR_COMMAND || command.startsWith("$OPEN_DIR_COMMAND:")
+
+    /**
+     * 取 [OPEN_DIR_COMMAND] 的路径参数；不带参数返回 null（调用方回退公开 rime 根）。
+     */
+    fun parseOpenDirPath(command: String): String? =
+        command.removePrefix(OPEN_DIR_COMMAND).removePrefix(":").trim().takeIf { it.isNotEmpty() }
+
+    /** 目录 → 外部存储文档 URI；不在共享存储根下时返回 null（无法给第三方定位）。 */
+    private fun documentUriFor(dir: File): Uri? {
+        val root = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+        val path = dir.absolutePath.trimEnd('/')
+        if (!path.startsWith("$root/")) return null
+        return DocumentsContract.buildDocumentUri(
+            EXTERNAL_STORAGE_AUTHORITY,
+            "primary:${path.removePrefix("$root/")}",
+        )
+    }
+
+    /**
+     * 打开目录：默认公开 rime 根（`/storage/emulated/0/rime`），与设置页同一目标。
+     *
+     * 输入法服务里没有 Activity 上下文，必须带 `FLAG_ACTIVITY_NEW_TASK`；
+     * 顺序为 MT管理器深链（装了 MT 时才能真正定位）→ SAF 目录树 → `ACTION_VIEW` + 目录 MIME。
+     */
+    fun openDirectory(context: Context, path: String?): Boolean {
+        val dir = if (path.isNullOrEmpty()) RimeUserFileSync.mirrorDir(context) else File(path)
+        val uri = documentUriFor(dir)
+        if (uri == null) {
+            FileLogger.e(TAG, "open_dir unsupported path: ${dir.absolutePath}")
+            return false
+        }
+        // MT管理器优先：它不注册任何目录型入口（SAF 树 / 目录 MIME 都被拒），
+        // 只认「目录里的一个文件」，放到最前面才能真正定位。
+        val mtPkg = installedMtPackage(context)
+        val candidates = buildList {
+            if (mtPkg != null) addAll(mtDeepLinks(context, mtPkg, dir))
+            add(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))
+            add(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "vnd.android.document/directory"))
+        }.map { intent ->
+            // 深链 Intent 自带 data/mime，不覆盖；通用两个补上目录 URI
+            val hasData = intent.data != null
+            intent
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .apply {
+                    if (!hasData) setData(uri)
+                    putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri)
+                }
+        }
+        for (intent in candidates) {
+            try {
+                context.startActivity(intent)
+                FileLogger.w(TAG, "open_dir launched: action=${intent.action} uri=$uri")
+                return true
+            } catch (t: Throwable) {
+                FileLogger.w(TAG, "open_dir candidate failed: action=${intent.action} -> ${t.message}", t)
+            }
+        }
+        FileLogger.e(TAG, "open_dir all candidates failed: uri=$uri")
+        return false
+    }
 
     /**
      * 搜索手机上所有能打开配置目录的方式。
@@ -218,9 +288,19 @@ object ConfigDirOpener {
     /** MT管理器包名（正式版与 canary 版）。 */
     private val MT_PACKAGES = setOf("bin.mt.plus", "bin.mt.plus.canary")
 
+    /** MT 深链锚点文件：公开 rime 根（/storage/emulated/0/rime）里方案部署的必然产物。 */
+    private const val MT_ANCHOR_FILE = "default.yaml"
+
     /** 若目标是 MT管理器，返回其全部候选深链；否则返回空列表。 */
     private fun mtDeepLinksIfMt(context: Context, pkg: String): List<Intent> =
         if (pkg in MT_PACKAGES) mtDeepLinks(context, pkg) else emptyList()
+
+    /** 已安装的 MT管理器包名；没装返回 null。 */
+    private fun installedMtPackage(context: Context): String? =
+        MT_PACKAGES.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
+
+    private fun mtDeepLinks(context: Context, pkg: String): List<Intent> =
+        mtDeepLinks(context, pkg, RimeUserFileSync.mirrorDir(context))
 
     /**
      * MT管理器定位到配置目录的 Intent。
@@ -235,25 +315,39 @@ object ConfigDirOpener {
      * - 目录型 MIME（`vnd.android.document/directory`）也被拒：MT 只注册**文件**类型。
      *
      * 可行做法（同机实测）：给 MT 传**目录里的一个文件**（`content://` + `text/plain`），
-     * MT 会打开该文件并自动定位到它所在目录——也就是 `/storage/emulated/0/Xime/`。
-     * 因此这里用目录里的说明文件当锚点，而不是给 MT 传目录本身。
+     * MT 会打开该文件并自动定位到它所在目录——也就是公开 rime 根
+     * `/storage/emulated/0/rime/`。
+     *
+     * 打开前调用方会先把应用私有 rime 工作目录（`files/rime`，方案词典真正所在）
+     * 同步到公开 rime 根（[RimeUserFileSync.sync]），因此锚点用公开镜像里的
+     * `default.yaml`——第三方应用无法直接访问应用私有目录，只能看公开镜像。
      *
      * URI 用**本应用自己的 FileProvider**，而不是 externalstorage DocumentsProvider：
      * 后者虽然格式正确，但真机实测会被系统拒——
-     * `MANAGE_EXTERNAL_STORAGE` 只授予 File API，不包含 DocumentsProvider 的 URI 访问权，
-     * 发送时报 “UID ... does not have permission to content://com.android.externalstorage…”）。
+     * `MANAGE_EXTERNAL_STORAGE` 只授予 File API，不包含 DocumentsProvider 的 URI 访问权。
      * FileProvider 跑在本进程内，可以合法地把文件授权给接收方。
      *
      * @param context 用于取得 FileProvider authority
-     * @return 候选 Intent 列表；锚点文件不存在（如未授权释放）时返回空列表，
+     * @return 候选 Intent 列表；锚点文件不存在（未授权/未同步）时返回空列表，
      *   调用方会退回系统文件选择器。
      */
-    private fun mtDeepLinks(context: Context, pkg: String): List<Intent> {
-        val anchor = File(UserConfigDir.absoluteDir, UserConfigDir.README_FILE)
-        if (!anchor.isFile) return emptyList()
+    private fun mtDeepLinks(context: Context, pkg: String, dir: File): List<Intent> {
+        // 锚点：优先 default.yaml，没有就退而用目录里任意一个文件（MT 只要拿到文件就会
+        // 定位到它所在目录）。目录为空时无锚点可用，交给标准目录 URI 兜底。
+        val anchor = File(dir, MT_ANCHOR_FILE).takeIf { it.isFile }
+            ?: dir.listFiles()?.firstOrNull { it.isFile }
+        if (anchor == null) {
+            FileLogger.w(TAG, "mt deep link skipped: no anchor file in ${dir.absolutePath}")
+            return emptyList()
+        }
         val fileUri = runCatching {
             FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", anchor)
-        }.getOrNull() ?: return emptyList()
+        }.getOrElse { t ->
+            // 缺少 filepaths.xml 声明时这里会抛 IllegalArgumentException 并静默降级成
+            // 「只打开应用」，必须留痕，否则真机上只能看到「打开了 MT 但没进目录」
+            FileLogger.w(TAG, "mt deep link skipped: uri failed for ${anchor.absolutePath}", t)
+            return emptyList()
+        }
         return listOf(
             Intent(Intent.ACTION_VIEW).apply {
                 setPackage(pkg)
@@ -267,7 +361,7 @@ object ConfigDirOpener {
         pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
     }.getOrDefault(pkg)
 
-    /** 系统文档树选择器：必然可用，且直接定位到配置目录，保证列表不会为空。 */
+    /** 系统文档树选择器：必然可用，且直接定位到 rime 根，保证列表不会为空。 */
     private fun systemPickerTargets(pm: PackageManager): List<ConfigDirTarget> {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             putExtra(DocumentsContract.EXTRA_INITIAL_URI, documentUri())

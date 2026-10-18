@@ -222,6 +222,9 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
     private fun updateModelState(index: Int, transform: (ModelItemState) -> ModelItemState) {
         _uiState.update { state ->
             val updated = state.models.toMutableList()
+            // 下载期间模型列表可能被 refresh 整体替换（长度变化），
+            // 陈旧下标越界时直接放弃本次更新
+            if (index !in updated.indices) return@update state
             updated[index] = transform(updated[index])
             state.copy(models = updated)
         }

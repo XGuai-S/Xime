@@ -61,7 +61,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -78,10 +82,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kingzcheung.xime.settings.ConfigDirOpener
 import com.kingzcheung.xime.settings.ConfigDirTarget
 import com.kingzcheung.xime.settings.LaunchOutcome
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SchemaMeta
 import com.kingzcheung.xime.settings.SettingsPreferences
-import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.viewmodel.SchemaLocalViewModel
 import com.kingzcheung.xime.viewmodel.SchemaSettingsViewModel
 
@@ -91,11 +95,12 @@ fun SchemaSettingsContent(
     onBack: () -> Unit,
     onNavigateToMarket: () -> Unit = {},
     onNavigateToRimeFileBrowser: () -> Unit = {},
-    /** 通用文件管理器（私有 rime 根目录起）；[onNavigateToRimeFileBrowser] 则直达配置目录。 */
+    /** 通用文件管理器（rime 根目录起）；[onNavigateToRimeFileBrowser] 也打开 rime 根。 */
     onNavigateToFileManager: () -> Unit = onNavigateToRimeFileBrowser,
     onNavigateToSchemaDictBrowser: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val viewModel: SchemaSettingsViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val localViewModel: SchemaLocalViewModel = viewModel()
@@ -639,17 +644,7 @@ fun SchemaSettingsContent(
                                 SettingsItem(
                                     icon = Icons.Default.FolderOpen,
                                     title = "打开配置目录",
-                                    subtitle = when (UserConfigDir.releaseState) {
-                                        UserConfigDir.ReleaseState.SUCCESS ->
-                                            "${UserConfigDir.DISPLAY_PATH} · 直接打开 xime.yaml 所在目录"
-                                        UserConfigDir.ReleaseState.FAILED ->
-                                            "写入 ${UserConfigDir.DISPLAY_PATH} 被系统拒绝，已回退内置文件管理器"
-                                        UserConfigDir.ReleaseState.PERMISSION_REQUIRED ->
-                                            "需要「所有文件访问」权限才能写入 ${UserConfigDir.DISPLAY_PATH}"
-                                        UserConfigDir.ReleaseState.UNSUPPORTED ->
-                                            "内置文件管理器（系统版本过低）"
-                                        UserConfigDir.ReleaseState.NOT_ATTEMPTED -> UserConfigDir.DISPLAY_PATH
-                                    },
+                                    subtitle = "${SchemaManager.getRimeDir(context).absolutePath} · 方案词典与词库所在目录",
                                     onClick = onNavigateToRimeFileBrowser,
                                     showArrow = true,
                                 )
@@ -729,18 +724,29 @@ fun SchemaSettingsContent(
         ConfigDirOpenDialog(
             targets = targets,
             onPick = { target ->
-                when (ConfigDirOpener.launch(context, target)) {
-                    LaunchOutcome.Located -> Unit
-                    // 只打开了应用却没定位：必须如实告知，否则用户以为跳转失败不了
-                    LaunchOutcome.OpenedOnly -> Toast.makeText(
-                        context,
-                        "${target.label} 不支持直接定位，已为你打开它；配置目录：${UserConfigDir.DISPLAY_PATH}",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    LaunchOutcome.Failed ->
-                        Toast.makeText(context, "无法启动 ${target.label}", Toast.LENGTH_SHORT).show()
-                }
                 configDirTargets = null
+                scope.launch {
+                    // 第三方应用无法访问应用私有目录：先把私有 rime 工作目录
+                    // （方案词典真正所在）同步到公开 /storage/emulated/0/rime，
+                    // 再让第三方打开公开镜像的最新内容
+                    withContext(Dispatchers.IO) {
+                        runCatching { RimeUserFileSync.sync(context) }
+                        // sync() 只管可编辑文本；编译产物与运行状态（build/、*.userdb、
+                        // 安装状态）也补进镜像，否则第三方看到的目录内容比内置的少一块
+                        runCatching { RimeUserFileSync.mirrorRuntimeFiles(context) }
+                    }
+                    when (ConfigDirOpener.launch(context, target)) {
+                        LaunchOutcome.Located -> Unit
+                        // 只打开了应用却没定位：必须如实告知，否则用户以为跳转失败不了
+                        LaunchOutcome.OpenedOnly -> Toast.makeText(
+                            context,
+                            "${target.label} 不支持直接定位，已为你打开它；目录：${RimeUserFileSync.mirrorDir(context).absolutePath}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        LaunchOutcome.Failed ->
+                            Toast.makeText(context, "无法启动 ${target.label}", Toast.LENGTH_SHORT).show()
+                    }
+                }
             },
             onDismiss = { configDirTargets = null },
             onCopyPath = {
@@ -749,11 +755,11 @@ fun SchemaSettingsContent(
                     as? android.content.ClipboardManager
                 clipboard?.setPrimaryClip(
                     android.content.ClipData.newPlainText(
-                        "配置目录路径",
-                        UserConfigDir.DISPLAY_PATH,
+                        "目录路径",
+                        RimeUserFileSync.mirrorDir(context).absolutePath,
                     ),
                 )
-                Toast.makeText(context, "已复制：${UserConfigDir.DISPLAY_PATH}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "已复制：${RimeUserFileSync.mirrorDir(context).absolutePath}", Toast.LENGTH_SHORT).show()
                 configDirTargets = null
             },
         )

@@ -67,7 +67,9 @@ class LayoutMarketViewModel(application: Application) : AndroidViewModel(applica
 
     /** 加载/刷新布局列表。 */
     fun loadLayouts(manual: Boolean = false) {
-        if (_uiState.value.isLoading && _uiState.value.layouts.isNotEmpty()) return
+        // 防抖只针对自动触发（初始化/回调）；手动刷新必须绕过，
+        // 否则加载中+列表非空时用户点刷新毫无反应
+        if (!manual && _uiState.value.isLoading && _uiState.value.layouts.isNotEmpty()) return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             val appliedId = _uiState.value.appliedLayoutId

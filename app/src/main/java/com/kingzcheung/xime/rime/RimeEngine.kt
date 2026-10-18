@@ -645,6 +645,21 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 把一个用户词库快照（`<词典名>.userdb.txt`，含 `#@/db_name` 元数据）按时间戳
+     * 合并进目标词库（`UserDictManager::Restore`）。
+     *
+     * 与 [syncUserData] 的分工：sync 只处理本机**已有** `<词典名>.userdb` 的词典，
+     * 换机/清数据恢复时本机一个用户词库都没有 ⇒ 快照永远合并不进去；这里目标库名
+     * 取自快照元数据，目标库不存在会被创建，正好覆盖这个场景。
+     */
+    fun restoreUserDictSnapshot(snapshotPath: String): Boolean {
+        if (!isInitialized || snapshotPath.isEmpty()) return false
+        locked {
+            return nativeRestoreUserDict(snapshotPath)
+        }
+    }
+
     fun lookupText(text: String): String {
         if (!isInitialized || text.isEmpty()) return ""
         return tryLocked("") {
@@ -857,6 +872,7 @@ class RimeEngine {
     private external fun nativeReadUserDictText(dictName: String): String?
     private external fun nativeExportUserDict(dictName: String, textFilePath: String): Int
     private external fun nativeImportUserDict(dictName: String, textFilePath: String): Int
+    private external fun nativeRestoreUserDict(snapshotPath: String): Boolean
     private external fun nativeDeploy(): Boolean
     private external fun nativeDeploySchema(schemaId: String): Boolean
     private external fun nativeLookupText(text: String): String

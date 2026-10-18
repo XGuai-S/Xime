@@ -288,6 +288,9 @@ fun ClipboardView(
 
         LaunchedEffect(pagerState.currentPage) {
             if (pagerState.currentPage != selectedTab) {
+                // 切到其它 tab 时退出多选：多选态只属于剪贴板 tab，切走后
+                // 底栏/选中集均无意义（选中集只由剪贴板条目填充）
+                exitMultiSelect()
                 onClipboardTabChange?.invoke(pagerState.currentPage)
             }
         }
@@ -341,7 +344,7 @@ fun ClipboardView(
             }
         }
 
-        if (isMultiSelect) {
+        if (isMultiSelect && selectedTab == 0) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -670,6 +673,7 @@ fun ClipboardTabContent(
                         modifier = Modifier.height(62.dp),
                         onClick = onClick,
                         onLongClick = onLongClick,
+                        isMultiSelect = isMultiSelect,
                         dragKey = item.id,
                         onStartDrag = onStartDrag,
                     )
@@ -683,6 +687,7 @@ fun ClipboardTabContent(
                         modifier = Modifier.height(62.dp),
                         onClick = onClick,
                         onLongClick = onLongClick,
+                        isMultiSelect = isMultiSelect,
                         dragKey = item.id,
                         onStartDrag = onStartDrag,
                     )
@@ -691,6 +696,9 @@ fun ClipboardTabContent(
         }
     }
 }
+
+/** 空回调：非多选态占位，使 tolerantClick 保持长按等待但不执行动作。 */
+private val noOpCallback: () -> Unit = {}
 
 /** 图片条目的菜单/长按浮层文案（图片没有可展示的文本）。 */
 internal fun clipboardImageLabel(item: ClipboardItem): String {
@@ -715,11 +723,16 @@ fun ClipboardImageCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    isMultiSelect: Boolean = false,
     dragKey: Any? = null,
     onStartDrag: (() -> Boolean)? = null,
 ) {
     val shape = RoundedCornerShape(8.dp)
     val bg = if (highlighted) accentColor.copy(alpha = 0.18f) else bgColor
+    // 多选态长按退出多选；非多选态长按菜单由 clipboardLongPressDrag 处理，
+    // 这里保留非空但空实现的回调：让 tolerantClick 进入长按等待，长按触发后抬起
+    // 不再 dispatch onClick，避免误上屏（传 null 会导致长按抬起仍触发点击）
+    val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Box(
         modifier = modifier
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
@@ -728,8 +741,7 @@ fun ClipboardImageCard(
             // 长按/拖拽由 clipboardLongPressDrag 处理（长按未拖 → onLongClick 弹菜单）。
             // 用 tolerantClick 而非 combinedClickable：卡片位于 LazyVerticalGrid + HorizontalPager 内，
             // 轻点的小位移会被父级手势判定吃掉（部分 ROM/高采样屏幕表现为“点了没反应”）。
-            // onLongClick 仍须传空回调：长按触发后抬起不再 dispatch onClick，避免误上屏
-            .tolerantClick(onClick = onClick, onLongClick = {})
+            .tolerantClick(onClick = onClick, onLongClick = noOpLongClick)
             // 拖拽手势必须放在点击手势之后（更内层）：Main pass 内层先收，
             // 长按触发后外层点击手势会消费后续事件，外层收到的位移恒为 Zero
             .clipboardLongPressDrag(
@@ -784,11 +796,16 @@ fun GridItemCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    isMultiSelect: Boolean = false,
     dragKey: Any? = null,
     onStartDrag: (() -> Boolean)? = null,
 ) {
     val shape = RoundedCornerShape(8.dp)
     val bg = if (highlighted) accentColor.copy(alpha = 0.18f) else bgColor
+    // 多选态长按退出多选；非多选态长按菜单由 clipboardLongPressDrag 处理，
+    // 这里保留非空但空实现的回调：让 tolerantClick 进入长按等待，长按触发后抬起
+    // 不再 dispatch onClick，避免误上屏（传 null 会导致长按抬起仍触发点击）
+    val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Column(
         modifier = modifier
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
@@ -797,8 +814,7 @@ fun GridItemCard(
             // 长按/拖拽由 clipboardLongPressDrag 处理（长按未拖 → onLongClick 弹菜单）。
             // 用 tolerantClick 而非 combinedClickable：卡片位于 LazyVerticalGrid + HorizontalPager 内，
             // 轻点的小位移会被父级手势判定吃掉（部分 ROM/高采样屏幕表现为“点了没反应”）。
-            // onLongClick 仍须传空回调：长按触发后抬起不再 dispatch onClick，避免误上屏
-            .tolerantClick(onClick = onClick, onLongClick = {})
+            .tolerantClick(onClick = onClick, onLongClick = noOpLongClick)
             // 拖拽手势必须放在点击手势之后（更内层）：Main pass 内层先收，
             // 长按触发后外层点击手势会消费后续事件，外层收到的位移恒为 Zero
             .clipboardLongPressDrag(

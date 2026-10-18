@@ -12,7 +12,7 @@ import org.junit.Test
  * 这四项都属于「不报错、不崩，只在真机上才看得出来」的行为：
  * 1. 大写金额模式负数结果必须带「负」，否则会当成正数错钱；
  * 2. 中英键盘删除键左滑要能按住连删且幅度越大越快（图标键此前显式关闭重复）；
- * 3. 第三行第一个键（shift）有候选时要变 esc 并能清空候选；
+ * 3. 第三行第一个键（shift）有候选或处于编码态时要变 esc 并能清空候选/编码；
  * 4. 换行键上滑要重复输出上一次上屏内容。
  *
  * 因此这里锁住「有没有真的接起来」：配置项、动作映射、渲染分支缺一处都会静默失效。
@@ -111,12 +111,19 @@ class KeyboardBehaviorContractTest {
     }
 
     @Test
-    fun `候选态由候选数量驱动`() {
-        // 无候选时必须保持原 shift 行为，否则「按下 shift 出 esc」会一直失效大小写切换
+    fun `编码态不管有没有候选都显示 esc`() {
+        // 无候选且非编码态时必须保持原 shift 行为，否则大小写切换一直失效；
+        // 编码态（编码打不出来时候选数为 0）则必须转 esc，否则清不了已敲的编码。
         val layout = source("KeyboardLayout.kt")
         assertTrue(
-            "hasCandidates 应由候选数量推导",
-            layout.contains("val hasCandidates = callbacks.candidateCount() > 0"),
+            "hasCandidates 应由候选数量或编码态推导",
+            layout.contains(
+                "val hasCandidates = shouldShiftShowEsc(callbacks.candidateCount(), callbacks.isComposing())"
+            ),
+        )
+        assertTrue(
+            "缺少 shouldShiftShowEsc 纯函数（判定逻辑无法单测）",
+            layout.contains("internal fun shouldShiftShowEsc(candidateCount: Int, isComposing: Boolean): Boolean"),
         )
         val env = layout.substringAfter("class QwertyRowEnv(").substringBefore("\n)")
         assertTrue("env 缺少 hasCandidates 字段", env.contains("val hasCandidates: Boolean = false"))

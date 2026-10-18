@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.settings
+package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.net.Uri
@@ -1095,7 +1095,7 @@ object SchemaManager {
                 name == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE ||
                 name == UserConfigDir.CUSTOM_CONFIG_FILE
             ) {
-                // 用户配置的唯一真源在可见目录 /storage/emulated/0/Xime/xime.yaml（读取优先级最高）。
+                // 用户配置的唯一真源在可见目录 /storage/emulated/0/rime/xime/xime.yaml（读取优先级最高）。
                 // 只写 rime/ 会被可见目录里的旧配置静默覆盖，故此处改走统一写入通道。
                 val text = source.use { it.readBytes().toString(Charsets.UTF_8) }
                 UserConfigDir.writeCustomConfig(context, text)

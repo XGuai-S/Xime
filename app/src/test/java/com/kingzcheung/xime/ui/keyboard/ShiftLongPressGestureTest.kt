@@ -2,6 +2,7 @@ package com.kingzcheung.xime.ui.keyboard
 
 import com.kingzcheung.xime.RepoFiles
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -45,6 +46,24 @@ class ShiftLongPressGestureTest {
         // 反证：长按判定若依赖「方向非空」，按住不动会被判成单击
         assertEquals(ShiftGestureOutcome.LongPress, resolveShiftGesture(null, true))
         assertEquals(ShiftGestureOutcome.Tap, resolveShiftGesture(null, false))
+    }
+
+    // ── shift → esc 判定 ──
+
+    @Test
+    fun `有候选就显示 esc`() {
+        assertTrue(shouldShiftShowEsc(candidateCount = 3, isComposing = false))
+    }
+
+    @Test
+    fun `编码态无候选也显示 esc`() {
+        // 编码打不出来时候选数为 0，但用户仍在编码态：要的是清编码，不是大小写切换
+        assertTrue(shouldShiftShowEsc(candidateCount = 0, isComposing = true))
+    }
+
+    @Test
+    fun `空闲态保持 shift 大小写切换`() {
+        assertFalse(shouldShiftShowEsc(candidateCount = 0, isComposing = false))
     }
 
     // ── 接线契约 ──

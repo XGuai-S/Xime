@@ -85,8 +85,11 @@ class FileProviderPathsContractTest {
         // 已知被声明覆盖的文件来源。新增分享目录时需同步更新此处与 filepaths.xml。
         // 允许「文件由调用方传入」的情形：来源在生产者文件里，由
         // `分享日志的实际写入目录与声明一致` 等测试单独核对。
-        // UserConfigDir 指向外部存储的 Xime 目录，由 filepaths.xml 的 <external-path> 覆盖。
-        val coveredSources = listOf("cacheDir", "filesDir", "ClipboardImageStore", "UserConfigDir")
+        // UserConfigDir 与 RimeUserFileSync 都指向外部存储的 rime 目录
+        // （xime 配置目录与 rime 根），由 filepaths.xml 的 <external-path> 覆盖。
+        val coveredSources = listOf(
+            "cacheDir", "filesDir", "ClipboardImageStore", "UserConfigDir", "RimeUserFileSync",
+        )
         val fileParamIndirection = "fun shareExportedLog(context: Context, file: File)"
         callSites.forEach { f ->
             val text = f.readText()

@@ -988,10 +988,16 @@ public:
         // 直接同步会报 unknown deployment task 并失败（与 deploySchema 同款先例）
         rime::LoadModules(rime::kDeployerModules);
 
+        // T9 数字词库长期持有 <user_data_dir>/t9_digit.userdb 的 leveldb 锁，
+        // user_dict_sync 的 Backup/Restore 在同进程再 Open 会被 leveldb 拒绝
+        // （"already held by process"）⇒ 同步期间先让出句柄，结束后立刻拿回
+        rime::T9DigitUserDict::ReleaseDb();
+
         Bool result = rime->sync_user_data();
         if (!result)
         {
             LOGE("syncUserData: sync_user_data() returned false");
+            rime::T9DigitUserDict::AcquireDb();
             return false;
         }
 
@@ -1006,6 +1012,8 @@ public:
                 LOGI("Waiting for user dict sync... (%d seconds)", wait_count / 10);
             }
         }
+
+        rime::T9DigitUserDict::AcquireDb();
 
         // 重建会话
         session_id_ = rime->create_session();
@@ -1025,10 +1033,16 @@ public:
      * （user_dict_manager.h "the user dict should be closed before the following
      * operations"），且 leveldb 在同一进程内重复加锁会失败 ⇒
      * 先销毁会话 → 执行 op → 重建会话（与 syncUserData / deploy 同款）。
+     *
+     * 另外要先把 T9 数字词库（app 自己的 `t9_digit.userdb`）句柄让出来：它长期持有
+     * leveldb 锁，`UserDictManager` 在同进程再 Open 会被 leveldb PosixLockTable 直接拒绝
+     * （"lock ... already held by process"）——真机上表现为
+     * `Error opening db 't9_digit' read-only.` / 九键数字自造词永不进备份。
      */
     template <typename F>
     auto withUserDictClosed(F op) -> decltype(op())
     {
+        rime::T9DigitUserDict::ReleaseDb();
         if (session_id_)
         {
             rime->destroy_session(session_id_);
@@ -1044,6 +1058,7 @@ public:
         {
             reapplyPageSizeIfNeeded();
         }
+        rime::T9DigitUserDict::AcquireDb();
         return result;
     }
 
@@ -1166,6 +1181,34 @@ public:
             int count = manager.Import(dict_name, rime::path(text_file));
             LOGI("importUserDict: '%s' <- %d entr(ies)", dict_name.c_str(), count);
             return count; });
+    }
+
+    /**
+     * 合并一个用户词库快照（`<词典名>.userdb.txt`，含 `#@/db_name` 元数据）进目标词库，
+     * 走 librime 的 `UserDictManager::Restore`（时间戳合并语义，与词库同步同一条通道）。
+     *
+     * 与 `syncUserData()` 的区别是**不要求目标词库已存在**：`Synchronize` 只处理
+     * `GetUserDictList`（本机已有 `<词典名>.userdb` 目录）列出的词典，换机/清数据后
+     * 本机一个用户词库都没有，快照会被静默跳过；这里目标库名取自快照元数据，缺失则创建。
+     * 返回是否合并成功。
+     */
+    bool restoreUserDict(const std::string &snapshot_file)
+    {
+        if (!rime)
+        {
+            LOGE("restoreUserDict: rime not available");
+            return false;
+        }
+        if (!requireUserDbComponent("restoreUserDict"))
+        {
+            return false;
+        }
+        return withUserDictClosed([&]() -> bool
+                                  {
+            rime::UserDictManager manager(&rime::Service::instance().deployer());
+            bool ok = manager.Restore(rime::path(snapshot_file));
+            LOGI("restoreUserDict: '%s' -> %s", snapshot_file.c_str(), ok ? "merged" : "failed");
+            return ok; });
     }
 
     bool deploySchema(const char *schemaId)
@@ -2735,6 +2778,23 @@ extern "C"
         if (file)
             env->ReleaseStringUTFChars(text_file, file);
         return count;
+    }
+
+    // 合并用户词库快照（<词典名>.userdb.txt，目标库不存在时按快照元数据创建）；成功 true
+    JNIEXPORT jboolean JNICALL
+    Java_com_kingzcheung_xime_rime_RimeEngine_nativeRestoreUserDict(
+        JNIEnv *env,
+        jobject thiz,
+        jstring snapshot_file)
+    {
+        if (!snapshot_file)
+            return JNI_FALSE;
+        const char *file = env->GetStringUTFChars(snapshot_file, nullptr);
+        if (!file)
+            return JNI_FALSE;
+        bool ok = Rime::Instance().restoreUserDict(file);
+        env->ReleaseStringUTFChars(snapshot_file, file);
+        return ok ? JNI_TRUE : JNI_FALSE;
     }
 
     // 更新 last_build_time 为当前时间，避免下次增量检测误判

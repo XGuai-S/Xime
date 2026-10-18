@@ -275,7 +275,7 @@ fun BackupSettingsContent(
                 busyOp = null
                 lastSyncAt = SettingsPreferences.getLastRimeSyncAt(context)
                 snackbar.showSnackbar(
-                    if (result.isSuccess) "恢复完成，重启应用后生效；自造词快照将在引擎就绪后按时间戳合并"
+                    if (result.isSuccess) "恢复完成，重启应用后生效；自造词按时间戳合并（引擎未就绪时会在唤起键盘后补做）"
                     else "恢复失败：${result.exceptionOrNull()?.message}"
                 )
             }

@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.kingzcheung.xime.settings.ExportResult
 import com.kingzcheung.xime.settings.RimeExportManager
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SyncManager
 import com.kingzcheung.xime.settings.UserConfigDir
@@ -93,7 +94,7 @@ data class FileEntry(
     val size: Long,
     val lastModified: Long,
     /**
-     * 非空表示条目属于用户可见配置目录 `/storage/emulated/0/Xime/`（`UserConfigDir` 后端，
+     * 非空表示条目属于用户可见配置目录 `/storage/emulated/0/rime/xime/`（`UserConfigDir` 后端，
      * 不走私有 rime 目录的 File API）：空字符串是该目录的虚拟入口，其余值为目录内的文件名。
      */
     val userConfigName: String? = null
@@ -103,10 +104,10 @@ data class FileEntry(
 private const val USER_CONFIG_ROOT = ""
 
 /** 虚拟入口在列表中的展示名。 */
-private const val USER_CONFIG_ROOT_LABEL = "配置目录（内部存储/Xime）"
+private const val USER_CONFIG_ROOT_LABEL = "配置目录（内部存储/rime/xime）"
 
 /**
- * 编辑器数据源：把 `File`（私有 rime 目录）与 [UserConfigDir]（`/storage/emulated/0/Xime/`）
+ * 编辑器数据源：把 `File`（私有 rime 目录）与 [UserConfigDir]（`/storage/emulated/0/rime/xime/`）
  * 两种后端统一到同一套编辑 UI，避免为了新目录复制一份编辑器实现。
  */
 private class EditorSource(
@@ -142,7 +143,7 @@ private fun userConfigEditorSource(context: android.content.Context, name: Strin
 fun RimeFileBrowserContent(
     onBack: () -> Unit,
     /**
-     * 是否直接落在「用户可见配置目录」（`/storage/emulated/0/Xime/`）。
+     * 是否直接落在「用户可见配置目录」（`/storage/emulated/0/rime/xime/`）。
      *
      * 「打开配置目录」这个入口的字面承诺就是「打开配置目录」，却把用户丢在私有
      * `files/rime/` 根目录、还要再点一层虚拟入口才能看到 `xime.yaml`——多一次点击，
@@ -159,7 +160,7 @@ fun RimeFileBrowserContent(
     var currentDir by remember { mutableStateOf(rootDir) }
     var entries by remember { mutableStateOf(listOf<FileEntry>()) }
     var viewingFile by remember { mutableStateOf<File?>(null) }
-    // 用户可见配置目录 /storage/emulated/0/Xime/ 的浏览态与正在编辑的文件名。
+    // 用户可见配置目录 /storage/emulated/0/rime/xime/ 的浏览态与正在编辑的文件名。
     // 入口承诺直达配置目录，因此有权限时初始即为 true。
     val canUseUserConfig = UserConfigDir.releaseState == UserConfigDir.ReleaseState.SUCCESS
     var browsingUserConfig by remember { mutableStateOf(startInUserConfigDir && canUseUserConfig) }
@@ -232,7 +233,7 @@ fun RimeFileBrowserContent(
     LaunchedEffect(currentDir, browsingUserConfig) { refresh() }
 
     // 展示项：位于 rime 根目录时，在列表最前面插入用户可见配置目录的虚拟入口。
-    // 入口指向 /storage/emulated/0/Xime/，那里才是当前生效的用户配置所在（读取优先级最高），
+    // 入口指向 /storage/emulated/0/rime/xime/，那里才是当前生效的用户配置所在（读取优先级最高），
     // 避免用户点进来只看到私有目录、以为配置没生效。仅在释放确实成功时才给出入口，
     // 否则点进去是个空目录，比没有入口更让人困惑。
     val userConfigReady = UserConfigDir.releaseState == UserConfigDir.ReleaseState.SUCCESS
@@ -359,7 +360,7 @@ fun RimeFileBrowserContent(
                         entry = entry,
                         onView = {
                             when {
-                                // 虚拟入口：进入用户可见配置目录 /storage/emulated/0/Xime/
+                                // 虚拟入口：进入用户可见配置目录 /storage/emulated/0/rime/xime/
                                 ucName == USER_CONFIG_ROOT -> browsingUserConfig = true
                                 ucName != null ->
                                     if (isBinaryName(entry.name)) {

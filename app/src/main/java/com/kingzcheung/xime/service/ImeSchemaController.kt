@@ -31,7 +31,14 @@ import kotlinx.coroutines.withContext
  */
 internal class ImeSchemaController(private val service: XimeInputMethodService) {
     internal fun reloadConfig() {
-        
+
+        // 用户可能刚在 `/storage/emulated/0/rime/xime/` 下手改过词库文件（词频/造词/
+        // 排序/黑名单）：先把外部修改合并进内存，「重载」才真正加载手改内容——这些表
+        // 本来不随重载重读，不合并的话手改不仅不生效，下次保存还会被冲掉
+        // （见 UserDataMerge）。投主线程：与 saveWordData/recordWordFrequency 同线程
+        // 操作内存表，避免竞态；只读不写，与部署互不依赖。
+        service.mainHandler.post { service.reconcileUserDataFiles() }
+
         service.mainHandler.post {
             service.requestHideSelf(0)
             android.widget.Toast.makeText(service, "方案部署中...", android.widget.Toast.LENGTH_SHORT).show()
@@ -46,7 +53,7 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 // 重新加载配色方案（用户可能在 xime.custom.yaml 中修改了 color_schemes）
                 KeyboardThemes.reload(service)
 
-                // 部署前把可见目录 `/storage/emulated/0/Xime/rime/` 里用户改过的方案与词库
+                // 部署前把可见目录 `/storage/emulated/0/rime/xime/rime/` 里用户改过的方案与词库
                 // 写回 Rime 工作目录。没有这一步，用户改完点「部署方案」读到的仍是旧文件。
                 // 注意：本类有三个部署入口（reloadConfig / deploy / deploySchema），都要同步。
                 RimeUserFileSync.sync(service)
@@ -318,7 +325,7 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             
             service.notifyDeploymentStatus(true, "正在部署...")
 
-            // 部署前把用户在可见目录 `/storage/emulated/0/Xime/rime/` 里的修改写回 Rime
+            // 部署前把用户在可见目录 `/storage/emulated/0/rime/xime/rime/` 里的修改写回 Rime
             // 工作目录。没有这一步，用户改完点部署，部署读到的仍是旧文件——
             // 表现为「改了没生效」，比不能改更让人困惑。
             RimeUserFileSync.sync(service)

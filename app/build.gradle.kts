@@ -13,13 +13,33 @@ plugins {
 apply(from = "build-logic/tasks-native.gradle.kts")
 apply(from = "build-logic/tasks-plugin-dev.gradle.kts")
 
-// 获取 Git 提交哈希
-fun getGitHash(): String {
+// 获取 Git 提交哈希（短哈希）。
+// 为什么不跑 `git rev-parse`：配置期启动外部进程会被 Gradle 配置缓存拒绝；
+// providers.exec 又是 Provider，喂不了要求 String 的 buildConfigField。
+// 故直接解析 .git（纯文件读取，配置缓存允许且会纳入输入指纹）：
+// .git/HEAD → refs/heads/<branch>（松散引用）→ packed-refs（打包引用兜底）。
+fun gitShortHash(): String {
     return try {
-        val process = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
-            .directory(rootDir)
-            .start()
-        process.inputStream.bufferedReader().readText().trim()
+        val gitDir = File(rootDir, ".git")
+        val headText = File(gitDir, "HEAD").readText().trim()
+        if (!headText.startsWith("ref: ")) {
+            // detached HEAD：内容即完整 SHA
+            return headText.take(7)
+        }
+        val ref = headText.removePrefix("ref: ").trim()
+        val refFile = File(gitDir, ref.replace('/', File.separatorChar))
+        val full = if (refFile.isFile) {
+            refFile.readText().trim()
+        } else {
+            File(gitDir, "packed-refs").takeIf { it.isFile }
+                ?.readLines()
+                ?.firstOrNull { line ->
+                    !line.startsWith("#") && !line.startsWith("^") && line.endsWith(" $ref")
+                }
+                ?.substringBefore(' ')
+                ?: return "unknown"
+        }
+        if (full.length >= 7) full.substring(0, 7) else "unknown"
     } catch (e: Exception) {
         "unknown"
     }
@@ -33,6 +53,15 @@ val keystorePropertiesFile = rootProject.file("app/keystore.properties")
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
+}
+
+// 本地构建默认只打一个架构：`local.properties`（不入库）里写 `xime.abi=arm64-v8a` 生效，
+// 省掉其余 ABI 的 native 编译与重复打包（release 从约 14 分钟降到数分钟）。
+// 该文件在 CI 上不存在 → 四个 ABI + universal 全量，发布产物不变。
+val localAbi: String? = Properties().run {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) load(file.inputStream())
+    getProperty("xime.abi")?.trim()?.takeIf { it.isNotEmpty() }
 }
 
 android {
@@ -51,19 +80,20 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261013
-        versionName = "3.2.0"
+        versionCode = 20261016
+        versionName = "3.2.2"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // NDK 配置
+        // NDK 配置：本地只编译 xime.abi 指定的架构，未指定时全量
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            abiFilters += localAbi?.let { listOf(it) }
+                ?: listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
         }
 
         // 构建信息
-        buildConfigField("String", "GIT_HASH", "\"${getGitHash()}\"")
+        buildConfigField("String", "GIT_HASH", "\"${gitShortHash()}\"")
     }
 
     signingConfigs {
@@ -182,13 +212,16 @@ android {
         checkDependencies = true
     }
 
-    // 分架构打包
+    // 分架构打包：本地指定 xime.abi 时改由 ndk.abiFilters 收敛（AGP 禁止它与 splits 同时设置），
+    // 未指定时才按架构拆分出四个 ABI + universal
     splits {
         abi {
-            isEnable = true
+            isEnable = localAbi == null
             reset()
-            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            isUniversalApk = true
+            if (localAbi == null) {
+                include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+                isUniversalApk = true
+            }
         }
     }
 }
@@ -196,7 +229,8 @@ android {
 android.applicationVariants.all {
     val appName = "Xime"
     outputs.all {
-        val abi = filters.find { it.filterType.toString() == "ABI" }?.identifier ?: "universal"
+        val abi = filters.find { it.filterType.toString() == "ABI" }?.identifier
+            ?: localAbi ?: "universal"
         (this as BaseVariantOutputImpl).outputFileName = "$appName-$versionName-$abi.apk"
     }
 }

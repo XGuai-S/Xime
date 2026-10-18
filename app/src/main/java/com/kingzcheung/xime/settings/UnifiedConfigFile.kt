@@ -8,7 +8,7 @@ import java.io.File
 import java.security.MessageDigest
 
 /**
- * 统一配置文件 `/storage/emulated/0/Xime/xime.yaml` 的生成。
+ * 统一配置文件 `/storage/emulated/0/rime/xime/xime.yaml` 的生成。
  *
  * 目标（用户需求「配置数据整合到一个文件」）：把键盘布局、手势、配色、字体等全部配置
  * 收敛到一个用户可见、可直接编辑的 YAML 文件里，改完重载即生效。
@@ -239,6 +239,25 @@ object UnifiedConfigFile {
     /** 该行若是顶层键行，返回键名；否则返回 null。 */
     private fun topLevelKeyOf(line: String): String? =
         if (TOP_LEVEL_KEY.find(line) != null) line.substringBefore(':').trim() else null
+
+    /**
+     * 把某个顶层段整块写进可见目录的 `xime.yaml`（其余内容与注释逐字保留），
+     * 供设置页把开关状态同步到统一配置文件。
+     *
+     * 文件不存在（尚未释放）、无写权限、或替换后 YAML 解析不通过时返回 false，
+     * 由调用方决定是否回退到别的存储方式。
+     */
+    fun updateTopLevelBlock(context: Context, key: String, blockText: String): Boolean {
+        if (!UserConfigDir.hasWritePermission(context)) return false
+        val current = UserConfigDir.readText(context, UserConfigDir.UNIFIED_CONFIG_FILE) ?: return false
+        val blockLines = blockText.trimEnd('\n', '\r').lines()
+        val updated = replaceTopLevelBlock(current.lines(), key, blockLines).joinToString("\n")
+        if (runCatching { yaml.parseToYamlNode(updated) }.isFailure) {
+            Log.w(TAG, "updateTopLevelBlock($key): result does not parse, abort")
+            return false
+        }
+        return UserConfigDir.writeText(context, UserConfigDir.UNIFIED_CONFIG_FILE, updated)
+    }
 
     private fun readAssetText(context: Context, fileName: String): String? =
         readAssetBytes(context, fileName)?.toString(Charsets.UTF_8)
