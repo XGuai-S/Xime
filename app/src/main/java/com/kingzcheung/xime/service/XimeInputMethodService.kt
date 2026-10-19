@@ -275,11 +275,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /** 自动造词固定词库（编码 → 词 → 权重），晋升时更新落盘；作为 custom_phrase 注入 rime。 */
     internal var autoWordFixed: Map<String, Map<String, Int>> = emptyMap()
     /**
-     * 黑名单词库：长按候选删除的词，显示候选时整条剔除（见 [WordBlacklistStore]）。
+     * 黑名单词库：长按候选删除的词（词 → 删除时的编码），显示候选时按编码整条剔除
+     * （见 [WordBlacklistStore]）。编码为空 = 按词全局屏蔽（兼容旧数据）。
      *
      * 加载约束同上（onCreate 里用已 attach 的 context 加载）。
      */
-    internal var wordBlacklist: Set<String> = emptySet()
+    internal var wordBlacklist: Map<String, Map<String, Int>> = emptyMap()
     private val clipboardItemsState = mutableStateOf<List<com.kingzcheung.xime.clipboard.ClipboardItem>>(emptyList())
     private val voiceAmplitudeState = mutableFloatStateOf(0f)
     private val voiceSpectrumState = mutableStateOf(FloatArray(16))
@@ -659,6 +660,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         autoWordTemp = AutoWordStore.loadTemp(this)
         autoWordFixed = AutoWordStore.loadFixed(this)
         wordBlacklist = WordBlacklistStore.load(this)
+        FileLogger.d(
+            TAG,
+            "AutoWordStore loaded: temp=${autoWordTemp.size} entries, fixed=${autoWordFixed.size} entries, " +
+                "tempTotal=${autoWordTemp.values.sumOf { it.size }}, fixedTotal=${autoWordFixed.values.sumOf { it.size }}"
+        )
         // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 30 天）没再上屏
         // 的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
         val prunedTemp = AutoWordStore.prune(
@@ -3441,13 +3447,25 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         isT9: Boolean,
         isAscii: Boolean,
     ): CandidateOrderStore.Reordered? {
+        FileLogger.d(
+            TAG,
+            "mergeAutoWord ENTER: code='$code' isT9=$isT9 isAscii=$isAscii " +
+                "temp=${autoWordTemp.size} fixed=${autoWordFixed.size} engine=${engineCandidates.size}"
+        )
         if (isT9 || isAscii || code.isEmpty()) return null
-        if (!com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().enabled) return null
+        val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+        if (!autoWordConfig.enabled) return null
         val extra = AutoWordStore.candidatesFor(
             temp = autoWordTemp,
             fixed = autoWordFixed,
             code = code,
             known = engineCandidates.toHashSet(),
+            prefixMatch = autoWordConfig.prefixMatch,
+        )
+        FileLogger.d(
+            TAG,
+            "mergeAutoWord: code='$code' enabled=${autoWordConfig.enabled} prefixMatch=${autoWordConfig.prefixMatch} " +
+                "temp=${autoWordTemp.size} fixed=${autoWordFixed.size} engine=${engineCandidates.size} extra=${extra.size} extra=$extra"
         )
         if (extra.isEmpty()) return null
         // 引擎候选无显式 actions 时（非 T9 无插件变换：显示 index 即引擎 index），
@@ -3478,20 +3496,23 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             )
 
     /**
-     * 把一个词加入黑名单并落盘：之后它不再出现在候选栏（显示层屏蔽，见 [WordBlacklistStore.filter]）。
+     * 把一个词（连同删除时的编码）加入黑名单并落盘：之后该编码下它不再出现在候选栏
+     * （显示层屏蔽，见 [WordBlacklistStore.filter]）。
      *
      * 长按删除走的是 librime 的 tombstone，只对用户词典生效——方案词典与自造词库的词
      * 删了还会再冒出来，因此删除必须同时进黑名单。
+     *
+     * [code] 传删除时的当前输入编码；为空时按词全局屏蔽（所有编码下都不再出现）。
      */
-    internal fun addWordBlacklist(word: String) {
+    internal fun addWordBlacklist(word: String, code: String = "") {
         if (word.isEmpty()) return
         // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词
         wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
-        val next = WordBlacklistStore.withBlocked(wordBlacklist, word)
+        val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
         if (next === wordBlacklist) return
         wordBlacklist = next
         WordBlacklistStore.save(this, next)
-        FileLogger.i(TAG, "WordBlacklist: added '$word' total=${next.size}")
+        FileLogger.i(TAG, "WordBlacklist: added '$word' code='$code'")
     }
 
     /**

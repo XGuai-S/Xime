@@ -36,6 +36,29 @@ class AutoWordStoreTest {
         assertTrue(AutoWordStore.record(emptyMap(), "a", "单", now) === emptyMap<String, Map<String, AutoWordStore.Entry>>())
         assertTrue(AutoWordStore.record(emptyMap(), "", "今天", now) === emptyMap<String, Map<String, AutoWordStore.Entry>>())
     }
+    @Test
+    fun `组合生词已存在_不计数不刷新`() {
+        // 用户连打「虾苗」两次，组合逻辑自动拼出「虾苗虾苗」（initialCount=0）：
+        // 若词库已有该组合词，不应把它当成「用户选中」计数 +1、也不刷新 lastSeen。
+        var temp = AutoWordStore.record(emptyMap(), "xmxm", "虾苗虾苗", now, initialCount = 0)
+        val first = temp["xmxm"]?.get("虾苗虾苗")
+        assertEquals(0, first?.count)
+        assertEquals(now, first?.lastSeen)
+        // 再次自动拼接（initialCount=0）：已存在 → 原样返回，不计数不刷新
+        val again = AutoWordStore.record(temp, "xmxm", "虾苗虾苗", now + 5000, initialCount = 0)
+        assertTrue(again === temp)
+        assertEquals(0, again["xmxm"]?.get("虾苗虾苗")?.count)
+        assertEquals(now, again["xmxm"]?.get("虾苗虾苗")?.lastSeen)
+    }
+    @Test
+    fun `组合生词被用户选中后_按普通收录计数`() {
+        // 组合词先在词库（0 次），用户从候选栏选中它上屏 → 走普通收录路径（initialCount=1）
+        var temp = AutoWordStore.record(emptyMap(), "xmxm", "虾苗虾苗", now, initialCount = 0)
+        temp = AutoWordStore.record(temp, "xmxm", "虾苗虾苗", now + 1000, initialCount = 1)
+        val entry = temp["xmxm"]?.get("虾苗虾苗")
+        assertEquals(1, entry?.count)
+        assertEquals(now + 1000, entry?.lastSeen)
+    }
 
     // ── promote ──
 
@@ -279,9 +302,9 @@ class AutoWordStoreTest {
     fun `候选合并_编码没打完也出词_前缀命中固定库`() {
         val fixed = mapOf("xmzd" to mapOf("现在" to 20))
         // 输入 "xm"（双拼第一个音节，还没敲完）：前缀命中
-        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", emptySet()))
+        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", emptySet(), prefixMatch = true))
         // 输入 "xmz"：仍前缀命中
-        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xmz", emptySet()))
+        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xmz", emptySet(), prefixMatch = true))
     }
 
     @Test
@@ -289,27 +312,27 @@ class AutoWordStoreTest {
         val older = AutoWordStore.Entry("旧词", "abcd", now, 0, now - 5000)
         val newer = AutoWordStore.Entry("新词", "abce", now, 0, now)
         val temp = mapOf("abcd" to mapOf("旧词" to older), "abce" to mapOf("新词" to newer))
-        assertEquals(listOf("新词", "旧词"), AutoWordStore.candidatesFor(temp, emptyMap(), "ab", emptySet()))
+        assertEquals(listOf("新词", "旧词"), AutoWordStore.candidatesFor(temp, emptyMap(), "ab", emptySet(), prefixMatch = true))
     }
 
     @Test
     fun `候选合并_单个字母不扫前缀`() {
         // 第一个键就扫前缀会命中半个词库，候选栏尾部被灌满
         val fixed = mapOf("xmzd" to mapOf("现在" to 20))
-        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "x", emptySet()).isEmpty())
+        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "x", emptySet(), prefixMatch = true).isEmpty())
     }
 
     @Test
     fun `候选合并_前缀命中总量封顶`() {
         val words = (1..20).associate { "词$it" to it * 10 }
         val fixed = mapOf("abcd" to words)
-        assertEquals(8, AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet()).size)
+        assertEquals(8, AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet(), prefixMatch = true).size)
     }
 
     @Test
     fun `候选合并_前缀命中_引擎已有不重复`() {
         val fixed = mapOf("xmzd" to mapOf("现在" to 20))
-        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", setOf("现在")).isEmpty())
+        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", setOf("现在"), prefixMatch = true).isEmpty())
     }
 
     @Test
@@ -319,7 +342,7 @@ class AutoWordStoreTest {
             "abcd" to mapOf("前缀词" to 100),
         )
         // 完整编码命中的词排在前，即使权重更低
-        assertEquals(listOf("完整词", "前缀词"), AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet()))
+        assertEquals(listOf("完整词", "前缀词"), AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet(), prefixMatch = true))
     }
 
     @Test
@@ -328,6 +351,21 @@ class AutoWordStoreTest {
             "ab" to mapOf("同词" to 5),
             "abcd" to mapOf("同词" to 100),
         )
-        assertEquals(listOf("同词"), AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet()))
+        assertEquals(listOf("同词"), AutoWordStore.candidatesFor(emptyMap(), fixed, "ab", emptySet(), prefixMatch = true))
+    }
+
+    @Test
+    fun `候选合并_默认完整命中_前缀不提前出词`() {
+        val fixed = mapOf("xmzd" to mapOf("现在" to 20))
+        // 默认 prefixMatch=false：输入前缀（未按满）不提前出词
+        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", emptySet()).isEmpty())
+        assertTrue(AutoWordStore.candidatesFor(emptyMap(), fixed, "xmz", emptySet()).isEmpty())
+        // 输入完整编码才出现
+        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xmzd", emptySet()))
+    }
+    @Test
+    fun `候选合并_开启前缀命中_前缀提前出词`() {
+        val fixed = mapOf("xmzd" to mapOf("现在" to 20))
+        assertEquals(listOf("现在"), AutoWordStore.candidatesFor(emptyMap(), fixed, "xm", emptySet(), prefixMatch = true))
     }
 }

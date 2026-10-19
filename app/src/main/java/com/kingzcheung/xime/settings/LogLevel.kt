@@ -14,7 +14,7 @@ enum class LogLevel(val label: String, val description: String) {
     OFF("关闭", "不写任何日志文件"),
 
     /** 仅错误及其以上（即应用崩溃、异常）。**默认值**。 */
-    ERROR("仅错误", "记录崩溃与 ERROR，日常推荐"),
+    ERROR("普通", "记录崩溃与错误，日常推荐"),
 
     /** 错误 + 警告。 */
     WARN("错误与警告", "额外记录 WARN，含可恢复的异常"),

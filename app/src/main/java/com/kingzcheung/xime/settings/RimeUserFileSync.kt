@@ -352,6 +352,56 @@ object RimeUserFileSync {
     }
 
     /**
+     * 恢复备份后调用：**单向**把私有 rime 目录（刚恢复的权威内容）整体镜像到可见目录，
+     * 并以私有内容重写同步基线。
+     *
+     * 为什么不能用普通 [sync]：恢复是覆盖式落盘，私有与可见两侧内容不同、基线也过期，
+     * 三向比对会走「冲突保留可见」分支——把可见里的**旧版本**写回私有，刚恢复的内容
+     * 会被盖掉，表现为「恢复完再点重新部署没用」。
+     * 本方法跳过比对：一律私有 → 可见，基线 = 私有内容。之后用户再 reloadConfig /
+     * oiz 触发普通 [sync]，两侧与基线一致，是空操作，不再冲突。
+     *
+     * @return 本次覆盖到可见目录的文件数
+     */
+    fun forceSyncPrivateToVisible(context: Context): Int {
+        if (!UserConfigDir.isSupported) return 0
+        if (!UserConfigDir.hasWritePermission(context)) return 0
+        val rimeDir = SchemaManager.getRimeDir(context)
+        if (!rimeDir.isDirectory) return 0
+        val mirror = mirrorDir(context)
+        var copied = 0
+        val nextBaseline = LinkedHashMap<String, String>()
+        runCatching {
+            rimeDir.walkTopDown()
+                .onEnter { it == rimeDir || (it.name !in EXCLUDED_DIRS && !it.name.startsWith(".")) }
+                .filter { it.isFile }
+                .forEach { file ->
+                    val rel = file.relativeTo(rimeDir).path.replace('\\', '/')
+                    if (!isSyncable(rel)) return@forEach
+                    val target = File(mirror, rel)
+                    if (copyFile(file, target)) copied++
+                    hashOrNull(file)?.let { nextBaseline[rel] = it }
+                }
+        }.onFailure { FileLogger.w(TAG, "强制私有→可见镜像失败：${it.message}", it) }
+        // 可见目录独有的旧文件清掉，避免恢复后残留过期镜像副本
+        runCatching {
+            mirror.walkTopDown()
+                .onEnter { it == mirror || (it.name !in EXCLUDED_DIRS && it.name !in EXCLUDED_VISIBLE_DIRS && !it.name.startsWith(".")) }
+                .filter { it.isFile }
+                .forEach { file ->
+                    val rel = file.relativeTo(mirror).path.replace('\\', '/')
+                    if (isSyncable(rel) && rel !in nextBaseline) file.delete()
+                }
+        }.onFailure { FileLogger.w(TAG, "清理过期可见镜像失败：${it.message}", it) }
+        pruneEmptyDirs(mirror)
+        writeBaseline(context, nextBaseline)
+        if (copied > 0) {
+            FileLogger.i(TAG, "恢复同步：强制镜像私有→可见 $copied 个文件，基线已重置")
+        }
+        return copied
+    }
+
+    /**
      * 完整镜像不处理的目录：运行日志与版本库（体积不断增长、对用户无意义）。
      * 注意 `build` 目录不在这——它会被 [mirrorRuntimeFiles] 补进镜像。
      */

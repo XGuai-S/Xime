@@ -203,26 +203,31 @@ class LoggingAndConfigDirContractTest {
     }
 
     @Test
-    fun `日志设置页提供级别选择与导出`() {
+    fun `日志设置页提供级别选择与查看器`() {
         assertTrue("应有日志设置页", logSettingsScreen.contains("fun LogSettingsContent("))
         assertTrue("应能选择记录级别", logSettingsScreen.contains("LogLevelDialog("))
         assertTrue("应写入级别偏好", logSettingsScreen.contains("SettingsPreferences.setLogLevelOverride"))
         assertTrue("应同步运行时级别", logSettingsScreen.contains("FileLogger.setLogLevel"))
-        assertTrue("应能导出全部日志", logSettingsScreen.contains("FileLogger.exportAllLogs"))
         assertTrue("应能进入日志查看器", logSettingsScreen.contains("onOpenLogViewer"))
-        assertTrue("应能清空日志", logSettingsScreen.contains("FileLogger.clearAllLogs"))
-        assertTrue(
-            "应提示可在 xime.yaml 中配置",
-            logSettingsScreen.contains("在 xime.yaml 中配置") &&
-                logSettingsScreen.contains("clearLogLevelOverride"),
-        )
     }
 
     @Test
-    fun `日志设置页统计与导出走 IO 线程`() {
-        // 日志文件可能很大，readText/listFiles 压主线程会掉帧
-        assertTrue(logSettingsScreen.contains("Dispatchers.IO"))
-        assertTrue(logSettingsScreen.contains("withContext(Dispatchers.IO)"))
+    fun `日志设置页只暴露三档级别`() {
+        // 简化后 UI 只保留 关闭/普通/调试 三档；xime.yaml 仍支持全枚举但界面不暴露
+        assertTrue(
+            "级别对话框应列出三档",
+            logSettingsScreen.contains("LogLevel.OFF") &&
+                logSettingsScreen.contains("LogLevel.ERROR") &&
+                logSettingsScreen.contains("LogLevel.DEBUG"),
+        )
+        assertFalse(
+            "不应再出现导出全部日志按钮（已从设置页移除）",
+            logSettingsScreen.contains("FileLogger.exportAllLogs"),
+        )
+        assertFalse(
+            "不应再出现清空日志按钮（已从设置页移除）",
+            logSettingsScreen.contains("FileLogger.clearAllLogs"),
+        )
     }
 
     @Test
@@ -245,20 +250,6 @@ class LoggingAndConfigDirContractTest {
         assertTrue(
             "filepaths.xml 必须声明 cache-path $exportDirName/，否则 FileProvider 取 URI 会抛异常",
             filepaths.contains("path=\"$exportDirName/\""),
-        )
-    }
-
-    @Test
-    fun `分享失败必须记日志而不是静默退化`() {
-        // 退化路径会「假装成功」（用户拿到文件，只是没弹分享面板），
-        // 不记日志就无从发现 provider 配置错误
-        assertTrue(
-            "分享失败应写入日志",
-            logSettingsScreen.contains("FileLogger.w(TAG"),
-        )
-        assertTrue(
-            "分享失败文案应说明退化去向",
-            logSettingsScreen.contains("退化为保存到 Download"),
         )
     }
 
@@ -359,15 +350,4 @@ class LoggingAndConfigDirContractTest {
         )
     }
 
-    // ---------- 文案工具函数 ----------
-
-    @Test
-    fun `日志体积文案按量级切换单位`() {
-        assertEquals("暂无日志文件", logStatLine(0, 0L))
-        assertEquals("0 B", formatLogSize(0L))
-        assertEquals("512 B", formatLogSize(512L))
-        assertEquals("1.0 KB", formatLogSize(1024L))
-        assertEquals("2.50 MB", formatLogSize(2L * 1024 * 1024 + 512 * 1024))
-        assertEquals("3 个文件 · 1.0 KB", logStatLine(3, 1024L))
-    }
 }

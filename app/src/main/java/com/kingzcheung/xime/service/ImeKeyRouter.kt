@@ -347,6 +347,31 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             }
             return MainKeyResult(needsUIUpdate, committedText, consumed = true)
         } else {
+            // 撞码保护（avoid_auto_select）：本键会使编码达到某个长度，若造词词库里有
+            // 该完整编码的词、且与小鹤等「满码唯一自动上屏」冲突，改走 setInput（只设
+            // 编码、不触发引擎 auto_select），让候选栏合并出造词词供点选。
+            val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+            val currentInput = service.rimeEngine.getInput()
+            if (!isAsciiMode && autoWordConfig.avoidAutoSelect &&
+                currentInput.length < 4 && char.length == 1 &&
+                (char[0] in 'a'..'z' || char[0] in 'A'..'Z')
+            ) {
+                val nextCode = currentInput + key.lowercase()
+                val hasAutoWord = service.autoWordTemp[nextCode]?.isNotEmpty() == true ||
+                    service.autoWordFixed[nextCode]?.isNotEmpty() == true
+                if (hasAutoWord) {
+                    FileLogger.d(
+                        "ImeKeyRouter",
+                        "avoidAutoSelect: input='$currentInput' + '$key' -> code='$nextCode' hasAutoWord=true, 改走 setInput"
+                    )
+                    service.rimeEngine.setInput(nextCode)
+                    val result = service.rimeEngine.getProcessResult(true)
+                    sendTransformedResult(result) {
+                        if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
+                    }
+                    return MainKeyResult(needsUIUpdate, committedText, consumed = true)
+                }
+            }
             val result = service.rimeEngine.processKeyAndGetResult(keyCode, mask)
         if (result.processed) {
             if (isShiftedChinese && result.committedText != char) {
@@ -1766,11 +1791,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             )
             val ok = service.rimeEngine.deleteCandidateOnCurrentPage(engineIndex)
             // 引擎删不动的词（方案词典里的固定词条）也要进黑名单：显示层统一屏蔽，
-            // 保证用户「长按删除」之后它不再出现在候选栏。
-            service.addWordBlacklist(text)
+            // 保证用户「长按删除」之后它不再出现在候选栏。带当前输入编码记录，
+            // 只屏蔽该编码下的这个词，不影响同一词在其它编码下的候选。
+            val code = service.candidateState.value.inputText
+                .ifEmpty { service.candidateState.value.preeditText }
+            service.addWordBlacklist(text, code)
             FileLogger.i(
                 XimeInputMethodService.TAG,
-                "DeleteCandidate: text='$text' display=$displayIndex engine=$engineIndex ok=$ok blacklisted"
+                "DeleteCandidate: text='$text' code='$code' display=$displayIndex engine=$engineIndex ok=$ok blacklisted"
             )
             withContext(Dispatchers.Main) {
                 service.updateUI()
@@ -1865,11 +1893,13 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             val text = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)?.text
             if (text.isNullOrEmpty()) return@postRimeJob
             val ok = service.rimeEngine.deleteCandidateByGlobalIndex(globalIndex)
-            // 与候选栏同口径：引擎删不动的词也进黑名单，保证删了就不再出现
-            service.addWordBlacklist(text)
+            // 与候选栏同口径：引擎删不动的词也进黑名单（带当前编码），保证删了就不再出现
+            val code = service.candidateState.value.inputText
+                .ifEmpty { service.candidateState.value.preeditText }
+            service.addWordBlacklist(text, code)
             FileLogger.i(
                 "ImeKeyRouter",
-                "deleteCandidateGlobal: text='$text' index=$globalIndex ok=$ok blacklisted"
+                "deleteCandidateGlobal: text='$text' code='$code' index=$globalIndex ok=$ok blacklisted"
             )
             withContext(Dispatchers.Main) {
                 service.updateUI()

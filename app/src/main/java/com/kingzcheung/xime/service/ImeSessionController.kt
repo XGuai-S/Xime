@@ -377,12 +377,14 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             isT9 = display.isT9,
             isAscii = isAsciiMode,
         )
-        // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）
+        // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）。
+        // 按当前输入编码过滤：黑名单条目带删除时的编码，只屏蔽该编码下的词。
         val blacklisted = WordBlacklistStore.filter(
             candidates = withAutoWords?.candidates ?: engineCandidates,
             comments = withAutoWords?.comments ?: engineComments,
             actions = withAutoWords?.actions ?: engineActions,
-            blocked = service.wordBlacklist,
+            table = service.wordBlacklist,
+            code = rawInputText,
         )
         service.candidateState.value = service.candidateState.value.copy(
             // T9 保持合成显示态同源；非 T9 仅显示层用 preedit 回显，inputText 保留原始键入串

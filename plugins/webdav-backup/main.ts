@@ -210,11 +210,17 @@ const plugin = definePlugin({
 
     // 列出远端备份
     async list(): Promise<XimeBackupItem[] | null> {
-      const { base, basePath, headers, error } = resolveBase();
+      const { base, basePath, headers, cfg, error } = resolveBase();
       if (error) return null;
       headers['Depth'] = '1';
       try {
-        const res = await host.http.request('PROPFIND', encodePath(base), headers, null);
+        let res = await host.http.request('PROPFIND', encodePath(base), headers, null);
+        if (res.status === 404 || res.status === 409) {
+          // 远端目录不存在：与 test()/push() 一致，自动创建后重试一次，
+          // 否则首次使用（坚果云上还没有备份目录）时"获取远端列表"会直接失败。
+          if (!await ensureCollection(cfg, headers)) return null;
+          res = await host.http.request('PROPFIND', encodePath(base), headers, null);
+        }
         if (res.status !== 207 && res.status !== 200) return null;
         return parseBackupList(res.text || '', basePath);
       } catch (e) {

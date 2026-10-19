@@ -108,6 +108,7 @@ include_directories("${X11Keysym}")
 
 include_directories(
     "${CMAKE_BINARY_DIR}/include"
+    "${CMAKE_SOURCE_DIR}/boost/boost"
     "${CMAKE_SOURCE_DIR}/boost/libs/algorithm/include"
     "${CMAKE_SOURCE_DIR}/boost/libs/crc/include"
     "${CMAKE_SOURCE_DIR}/boost/libs/dll/include"

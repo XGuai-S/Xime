@@ -206,14 +206,18 @@ internal object AutoWordStore {
         }
         return sb.toString()
     }
-
     /**
-     * 记一次上屏：临时词库中该 (编码, 词) 次数 +1（首次则新建条目）。
+     * 收录一个词条（普通上屏或组合生词），返回新表（无变化时返回原表引用）。
      *
-     * [initialCount] 控制新条目的初始次数：普通收录默认 1（首次上屏本身算一次候选选中）；
-     * 组合生词传 0（自动拼接产生的词还没被用户选中过，选中后才开始计数）。
+     * [initialCount] 决定语义：
+     * - `1`（默认）= **普通上屏**：用户从候选栏完整选中该词并上屏。已存在则计数 +1、
+     *   刷新最后上屏时间——这是晋升统计的「用户选中次数」。
+     * - `0` = **组合生词**：相邻两次上屏自动拼出来的候选，用户还没选过它。已存在时
+     *   **不计数、不刷新时间**（只是又拼了一次，不是用户选中）；仅词库中还没有时才
+     *   以 0 次插入，供候选栏展示等用户选中。
      *
-     * 返回原表表示无需变更（词不可计入、编码为空、或已达上限）。
+     * 这条区分很关键：否则用户连打「虾苗」两次，组合逻辑自动拼出的「虾苗虾苗」
+     * 会被误当成用户选中它，计数被反复刷高甚至提前晋升——而用户从没选过这个词。
      */
     fun record(
         temp: Map<String, Map<String, Entry>>,
@@ -232,8 +236,12 @@ internal object AutoWordStore {
                 word = word, code = code, firstSeen = now,
                 count = initialCount.coerceAtLeast(0), lastSeen = now,
             )
-        } else {
+        } else if (initialCount > 0) {
+            // 普通上屏：用户选中计数 +1，刷新最后上屏时间
             existing.copy(count = existing.count + 1, lastSeen = now)
+        } else {
+            // 组合生词已存在：仅自动拼接过一次，不是用户选中 → 原样返回，不计数不刷新
+            return temp
         }
         val next = LinkedHashMap(temp)
         val words = LinkedHashMap(codeWords ?: emptyMap())
@@ -324,13 +332,12 @@ internal object AutoWordStore {
 
     /**
      * 取当前编码下可出候选的造词：**完整编码命中优先**（固定词库按权重降序、临时词库
-     * 垫底），编码还没打完时再做**前缀命中**（固定库权重降序 + 临时库最近上屏降序，
-     * 总量封顶 [MAX_PREFIX_CANDIDATES]）。
+     * 垫底）；[prefixMatch] 为 true 时，编码还没打完再做**前缀命中**（固定库权重降序 +
+     * 临时库最近上屏降序，总量封顶 [MAX_PREFIX_CANDIDATES]）。
      *
-     * 前缀命中是必需的：只认完整编码时，词要等用户敲满全码才出现，与引擎行为不一致
-     * （引擎码表对没输完的编码也出词）——用户会以为「词进了词库却不出候选」。
-     * 输入太短（< [PREFIX_MIN_INPUT] 个字母）不扫前缀：第一个键就命中半个词库，
-     * 候选栏尾部会被灌满。
+     * [prefixMatch] 默认 false（完整命中）：必须敲满词库中的完整编码才出词，避免
+     * 编码没按够就提前出现。置 true 恢复旧行为：输入 >= [PREFIX_MIN_INPUT] 个字母时
+     * 以当前输入作词库编码前缀提前出词（引擎码表也是边输边出词）。
      *
      * [known] 为引擎已出候选（这些词不再重复合并）。供候选栏合并使用。
      */
@@ -339,6 +346,7 @@ internal object AutoWordStore {
         fixed: Map<String, Map<String, Int>>,
         code: String,
         known: Set<String>,
+        prefixMatch: Boolean = false,
     ): List<String> {
         if (code.isEmpty()) return emptyList()
         val out = ArrayList<String>()
@@ -348,8 +356,8 @@ internal object AutoWordStore {
             if (seen.add(word)) out += word
         }
         temp[code]?.forEach { (word, _) -> if (seen.add(word)) out += word }
-        // 2) 前缀命中：输入是某个已录编码的前缀（且没敲完）时也让词可见
-        if (code.length >= PREFIX_MIN_INPUT) {
+        // 2) 前缀命中（仅 prefixMatch=true 时）：输入是某个已录编码的前缀（且没敲完）时也让词可见
+        if (prefixMatch && code.length >= PREFIX_MIN_INPUT) {
             var added = 0
             val prefixFixed = ArrayList<Pair<String, Int>>()
             for ((c, words) in fixed) {

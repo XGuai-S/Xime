@@ -9,7 +9,7 @@
   "icon": "☁️",
   "description": "通过 WebDAV 将输入方案、自造词、插件与设置备份到云端（已测试坚果云），支持备份列表、恢复与删除。",
   // 插件版本（字符串）
-  "version": "3.0.0",
+  "version": "3.0.1",
   // 插件分类：backup 备份（单选激活）
   "type": "backup",
   "activation": "single",

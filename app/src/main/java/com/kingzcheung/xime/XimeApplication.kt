@@ -151,6 +151,10 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 初始化模型运行时（内存管理 + 生命周期）
         ModelRuntime.attach(this)
 
+        // 自动备份调度：每 12h 检查距上次备份是否超时，超时且备份插件已配置则自动上传。
+        // 放在插件初始化（PluginManager.initialize）之后，确保能拿到已启用的备份插件实例。
+        com.kingzcheung.xime.settings.AutoBackup.start(applicationScope, this)
+
         preInitializeRimeEngine()
     }
     
@@ -181,3 +185,37 @@ class XimeApplication : Application(), ImageLoaderFactory {
         }
     }
 }
+// build-iteration-test
+// build-iteration-test-2
+// fast-build-test
+// daily-iteration-1
+// daily-iteration-2
+// profile-test
+// final-verification
+// final-test-2
+// real-iteration-test
+// offline-test
+// pack-script-final
+// release-optimize-test
+// rel-iteration-real
+
+internal fun buildVersionTag(): String = "xime-rel-opt"
+internal fun buildVersionTag2(): String = "xime-rel-opt2"
+internal fun buildVersionTag3(): String = "rel-final-opt"
+internal fun buildVersionTag4(): String = "rel-prof-4m"
+internal fun buildVersionTag5(): String = "rel-final-opt2"
+internal fun buildVersionTag6(): String = "r8-measure"
+internal fun buildVersionTag7(): String = "gc-measure"
+internal fun buildVersionTag8(): String = "prof-clean"
+internal fun buildVersionTag9(): String = "base-bench"
+internal fun buildVersionTag10(): String = "time-track"
+internal fun buildVersionTag11(): String = "sub-jvm"
+internal fun buildVersionTag12(): String = "r8-thread6"
+internal fun buildVersionTag13(): String = "no-fullmode"
+internal fun buildVersionTag14(): String = "release-lite"
+internal fun buildVersionTag15(): String = "lite-inc"
+internal fun buildVersionTag16(): String = "lite-stable"
+internal fun buildVersionTag17(): String = "r8-thread2"
+internal fun buildVersionTag18(): String = "lite-final"
+internal fun buildVersionTag19(): String = "debug-first"
+internal fun buildVersionTag20(): String = "debug-inc"

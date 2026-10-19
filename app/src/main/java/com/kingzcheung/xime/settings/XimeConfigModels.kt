@@ -415,6 +415,23 @@ data class AutoWordConfig(
     val comboMinChars: Int = 2,
     @SerialName("combo_max_chars")
     val comboMaxChars: Int = 4,
+    /**
+     * 候选匹配方式：编码未打完时是否提前出词。
+     * - false = 完整命中（默认）：必须输入词库中的完整编码才在候选栏出现，没按够不出现；
+     * - true = 前缀命中：编码打了部分（至少 2 码）就以该词作前缀提前出词，与引擎边输边出词一致。
+     */
+    @SerialName("prefix_match")
+    val prefixMatch: Boolean = false,
+    /**
+     * 撞码保护：编码与方案词库撞码时，阻止引擎的「满码唯一自动上屏」（小鹤等顶功方案的
+     * auto_select）抢先把方案词上屏，改为停在候选栏让用户看到并选择自动造词的词。
+     *
+     * - true（默认）：本键形成的编码在造词词库里有词、且该词不在引擎候选里时，不交给
+     *   processKey（会触发自动上屏），改走 setInput 只设置编码，候选栏正常合并出造词词；
+     * - false：不干预，引擎满码唯一即上屏（造词词与方案词撞码时看不到）。
+     */
+    @SerialName("avoid_auto_select")
+    val avoidAutoSelect: Boolean = true,
 )
 
 /**
@@ -450,6 +467,15 @@ data class BackupConfig(
      */
     @SerialName("blacklist")
     val blacklist: Boolean = true,
+    /**
+     * 自动备份间隔（小时）。默认 12：每 12 小时自动向云端备份一次（含配置/词库/方案）。
+     *
+     * - 仅对**云端自动备份**生效（本地导出 / 手动备份不受影响）；
+     * - 设为 0 或负数 = 关闭自动备份；
+     * - 修改后重启应用生效（进程存活期间不会热更新周期）。
+     */
+    @SerialName("auto_interval_hours")
+    val autoIntervalHours: Int = 12,
 )
 
 @Serializable

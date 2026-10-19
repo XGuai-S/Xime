@@ -241,19 +241,18 @@ class UserDataMergeTest {
 
     @Test
     fun `集合文本级_无外部修改_原样返回`() {
-        val memory = setOf("想的")
+        val memory = mapOf("xxmn" to mapOf("霞喵" to 1))
         val text = WordBlacklistStore.serialize(memory)
-        val merged = UserDataMerge.reconcileSet(text, text, memory, WordBlacklistStore::parse)
+        val merged = UserDataMerge.reconcileTable(text, text, memory, WordBlacklistStore::parse)
         assertTrue(merged === memory)
     }
-
     @Test
     fun `集合文本级_用户删一行_合并后消失`() {
-        val memory = setOf("想的", "想得")
+        val memory = mapOf("xxmn" to mapOf("霞喵" to 1, "虾苗" to 1))
         val baseline = WordBlacklistStore.serialize(memory)
-        val edited = WordBlacklistStore.serialize(setOf("想的")) // 用户删了「想得」
-        val merged = UserDataMerge.reconcileSet(baseline, edited, memory, WordBlacklistStore::parse)
-        assertEquals(setOf("想的"), merged)
+        val edited = WordBlacklistStore.serialize(mapOf("xxmn" to mapOf("霞喵" to 1))) // 用户删了「虾苗」
+        val merged = UserDataMerge.reconcileTable(baseline, edited, memory, WordBlacklistStore::parse)
+        assertEquals(mapOf("xxmn" to mapOf("霞喵" to 1)), merged)
     }
 
     // ── 泛型值：自动造词 Entry（数据类，结构相等） ──

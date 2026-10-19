@@ -20,7 +20,7 @@ set -u
 cd "$(dirname "$0")"
 
 # ---------- 版本 & debug 解析 ----------
-VERSION="3.2.2"
+VERSION="3.2.3"
 [ $# -ge 1 ] && VERSION="$1"
 BUILD_DEBUG=0
 [ $# -ge 2 ] && [ "$2" = "debug" ] && BUILD_DEBUG=1

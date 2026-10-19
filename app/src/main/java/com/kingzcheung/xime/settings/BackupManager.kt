@@ -3,8 +3,11 @@ package com.kingzcheung.xime.settings
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
 import com.kingzcheung.xime.plugin.core.api.RemoteBackupEntry
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.zip.ZipInputStream
 
@@ -29,8 +32,9 @@ import java.util.zip.ZipInputStream
  * 建议在非输入状态执行备份/恢复。
  */
 object BackupManager {
-
     private const val TAG = "BackupManager"
+    /** 备份互斥锁：防止自动定时备份与用户手动备份并发（打包/上传互斥）。 */
+    private val backupMutex = Mutex()
 
     /** 备份包内元数据条目前缀（保留字，rime 目录不应有同名顶层文件）。 */
     const val META_PREFIX = "_xime_backup/"
@@ -72,7 +76,7 @@ object BackupManager {
     suspend fun backupNow(
         context: Context,
         plugin: BackupPlugin
-    ): com.kingzcheung.xime.plugin.core.api.BackupResult {
+    ): com.kingzcheung.xime.plugin.core.api.BackupResult = backupMutex.withLock {
         // 先刷新自造词快照（引擎未就绪则用现有快照并在成功消息里说明）
         val dictSnapshotNote = if (SyncManager.syncNow(context).isSuccess) {
             Log.i(TAG, "Backup: 自造词快照已刷新")
@@ -81,11 +85,10 @@ object BackupManager {
             Log.w(TAG, "Backup: 引擎未就绪，使用现有自造词快照（可能非最新）")
             "（自造词快照未刷新：需先唤起键盘一次）"
         }
-
         // 流式打包到 cacheDir：包体不驻留内存（含方案词典与插件包时可达数十 MB）
         val (fileName, archive) = RimeExportManager.buildArchiveToFile(context)
-            .getOrElse { return com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = it.message) }
-        return try {
+            .getOrElse { return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = it.message) }
+        return@withLock try {
             Log.i(TAG, "Backup: name=$fileName size=${archive.length()}")
             val result = plugin.pushBackup(fileName, archive)
             if (result.ok) {
@@ -100,9 +103,43 @@ object BackupManager {
 
     /** 列出远端备份条目（透传插件；失败返回 null）。 */
     suspend fun listRemote(plugin: BackupPlugin): List<RemoteBackupEntry>? = plugin.listBackups()
-
     /** 删除远端备份条目。 */
     suspend fun deleteRemote(plugin: BackupPlugin, id: String): Boolean = plugin.deleteBackup(id)
+
+    /**
+     * 自动备份检查（定时任务入口）。距上次成功备份 >= [AutoBackup.INTERVAL_MS] 时，
+     * 若已有已启用的备份插件且配置就绪，自动执行一次 [backupNow]。
+     *
+     * - 无启用插件 / 未配置时静默跳过（不报错、不污染错误状态）；
+     * - 与手动备份通过 [backupMutex] 互斥，不并发；
+     * - 失败仅写日志，不打断应用（定时任务重试由下一次调度负责）。
+     *
+     * @return true=本次实际执行了备份
+     */
+    suspend fun maybeAutoBackup(context: Context): Boolean {
+        val intervalMs = KeysConfigHelper.loadBackupConfig(context).autoIntervalHours.let { hours ->
+            if (hours <= 0) return false else hours * 60 * 60 * 1000L
+        }
+        val enabled = ExtensionManager.getEnabledBackupPlugins(context)
+        val plugin = enabled.firstOrNull { it.first == SettingsPreferences.getBackupPluginId(context) }
+            ?: enabled.firstOrNull()
+            ?: return false
+        // 配置未就绪（url/账号等必填项缺失）不自动备份，避免每天往错误地址传空包
+        if (!plugin.second.isConfigured()) {
+            Log.i(TAG, "AutoBackup: 备份插件未配置完整，跳过自动备份")
+            return false
+        }
+        val last = SettingsPreferences.getLastBackupAt(context)
+        if (System.currentTimeMillis() - last < intervalMs) return false
+        Log.i(TAG, "AutoBackup: 距上次备份 ${(System.currentTimeMillis() - last) / 3600_000}h（周期 ${intervalMs / 3600_000}h），开始自动备份")
+        val result = backupNow(context, plugin.second)
+        if (!result.ok) {
+            Log.w(TAG, "AutoBackup: 自动备份失败: ${result.message}")
+        } else {
+            Log.i(TAG, "AutoBackup: 自动备份完成")
+        }
+        return true
+    }
 
     /**
      * 从远端恢复：宿主流式下载到缓存文件 → 按条目前缀路由落盘 → 释放句柄。
@@ -212,6 +249,20 @@ object BackupManager {
             SchemaManager.applyEnabledSchemasToDefaultYaml(context)
         } catch (e: Exception) {
             Log.e(TAG, "Restore: 重新镜像 schema_list 失败", e)
+        }
+        // 把刚恢复的私有 rime 内容推回可见镜像并刷新同步基线。
+        //
+        // 为什么必须做：恢复是覆盖式写入 `files/rime/`，但可见目录
+        // `/storage/emulated/0/rime/` 里还留着**恢复前的旧副本**，且基线清单没跟上。
+        // 用户随后点「重新部署」(oiz → reloadConfig) 会先调 RimeUserFileSync.sync()，
+        // 三向比对发现「可见改了/私有也变了 + 基线过期」，按冲突规则保留可见旧版本
+        // 并写回私有目录——于是刚恢复的内容被旧文件盖掉，表现为「恢复完再部署没用」。
+        // 这里用**单向强制镜像**（私有→可见，覆盖+重置基线），恢复内容成为权威；
+        // 之后 reloadConfig 再触发普通 sync 时两侧与基线一致，是空操作，不再冲突。
+        try {
+            RimeUserFileSync.forceSyncPrivateToVisible(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "Restore: 可见目录同步失败", e)
         }
     }
 
