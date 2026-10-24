@@ -6,12 +6,15 @@
 
 <p align="center">
   <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a>
-
 </p>
+<p align="center">
+  <a href="https://github.com/XGuai-S/Xime/blob/main/%E8%87%AA%E5%AE%9A%E4%B9%89%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md">分支自定义功能文档</a>
+</p>
+
 [<img src="https://f-droid.org/badge/get-it-on.png"
     alt="Get it on F-Droid"
-    height="80">](https://f-droid.org/packages/com.kingzcheung.xime)
-[分支自定义功能文档](https://github.com/XGuai-S/Xime/blob/main/%E8%87%AA%E5%AE%9A%E4%B9%89%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md)
+    height="80">](https://f-droid.org/packages/com.kingzcheung.xime/)
+
 
 [Windows Version](https://github.com/ximeiorg/XimeYao) | [Linux Version](https://github.com/ximeiorg/XimeChe) | [Predictive Text Model](https://github.com/ximeiorg/predictive-text) | [Handwriting Model](https://github.com/ximeiorg/ochwpro)
 
@@ -25,8 +28,8 @@ An Android input method built on the [Rime](https://rime.im/) engine, designed f
   <tr>
     <td><img src="docs/Screenshot/full_keyboard_light.jpg" width="180"><br><p align="center">Full Keyboard (Light)</p></td>
     <td><img src="docs/Screenshot/full_keyboard_dark.jpg" width="180"><br><p align="center">Full Keyboard (Dark)</p></td>
-    <td><img src="docs/Screenshot/全键盘_下滑_light.jpg" width="180"><br><p align="center">Radical Swipe</p></td>
-    <td><img src="docs/Screenshot/shotcut_light.jpg" width="180"><br><p align="center">Quick Actions</p></td>
+    <td><img src="docs/Screenshot/radical_swipe_light.jpg" width="180"><br><p align="center">Radical Swipe</p></td>
+    <td><img src="docs/Screenshot/quick_action_light.jpg" width="180"><br><p align="center">Quick Actions</p></td>
   </tr>
   <tr>
     <td><img src="docs/Screenshot/floating.jpg" width="180"><br><p align="center">Floating Keyboard</p></td>
@@ -44,7 +47,7 @@ An Android input method built on the [Rime](https://rime.im/) engine, designed f
     <td><img src="docs/Screenshot/theme_light.jpg" width="180"><br><p align="center">Theme Settings (Light)</p></td>
     <td><img src="docs/Screenshot/theme_dark.jpg" width="180"><br><p align="center">Theme Settings (Dark)</p></td>
     <td><img src="docs/Screenshot/plugin_light.jpg" width="180"><br><p align="center">Plugin Manager</p></td>
-    <td><img src="docs/Screenshot/扩展商店.png" width="180"><br><p align="center">Extension Store</p></td>
+    <td><img src="docs/Screenshot/extension_store.png" width="180"><br><p align="center">Extension Store</p></td>
   </tr>
 </table>
 
@@ -130,37 +133,3 @@ git submodule update --init --recursive
 
 # Build Release APK
 ./gradlew assembleRelease
-```
-
-## Tech Stack
-
-- Kotlin
-- Jetpack Compose
-- Material Design 3
-- Rime (librime)
-- JNI (Native C++)
-
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
-
-Core rules:
-- **File an Issue first** — All changes require a prior discussion via an Issue
-- **Minimal changes** — PRs must contain only the minimum changes needed
-- **GPG signing** — All commits must be GPG-signed
-
-## Acknowledgments
-
-- [Rime](https://rime.im/) - Input method engine
-- [Trime](https://github.com/osfans/trime) - Configuration reference
-- [fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) - Keyboard layout reference
-- [onnxruntime](https://github.com/microsoft/onnxruntime) - ONNX inference runtime for predictive text and speech recognition models
-
-## License
-
-GPLv3 License
-
-Copyright © 2026 Kingz Cheung
-
-The Xime name, logo and other brand assets are **not** covered by the GPLv3 license.
-See [TRADEMARKS.md](TRADEMARKS.md) for details.
