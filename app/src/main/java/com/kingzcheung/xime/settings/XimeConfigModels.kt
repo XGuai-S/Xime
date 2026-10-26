@@ -290,7 +290,7 @@ data class KeyboardGesturesConfig(
      *
      * 反查需方案 schema 配置 `reverse_lookup`（XGuai_flypy 已内置）。
      */
-    val zLongPressReverse: Boolean = false,
+    val zLongPressReverse: Boolean = true,
 ) {
     companion object {
         /** 默认长按判定时间（毫秒）：比系统 400ms 更灵敏，同时仍能区分「点一下」与「按住」。 */

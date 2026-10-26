@@ -517,7 +517,7 @@ keyboard:
   #   反查需方案 schema 配置 reverse_lookup（XGuai_flypy 已内置）。
   gestures:
     long_press_ms: 300
-    z_long_press_reverse: false
+    z_long_press_reverse: true
 
   # ── 组合键（可选）──
   # 输入触发码（完整相等，如 orq）后，候选栏直接给出**求值后**的候选，点选即上屏。

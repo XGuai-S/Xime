@@ -1221,7 +1221,7 @@ object KeysConfigHelper {
             tiered(custom?.longPressMs, builtIn?.longPressMs, KeyboardGesturesConfig.DEFAULT_LONG_PRESS_MS)
         ),
         zLongPressReverse = tiered(
-            custom?.zLongPressReverse, builtIn?.zLongPressReverse, false,
+            custom?.zLongPressReverse, builtIn?.zLongPressReverse, true,
         ),
     )
     /** 夹取长按判定时间到合理区间：配置写 0 或负数会让点按被误判成长按，必须兜住。 */
@@ -1240,7 +1240,7 @@ object KeysConfigHelper {
             longPressMs = normalizeLongPressMs(
                 partial.longPressMs ?: KeyboardGesturesConfig.DEFAULT_LONG_PRESS_MS
             ),
-            zLongPressReverse = partial.zLongPressReverse ?: false,
+            zLongPressReverse = partial.zLongPressReverse ?: true,
         )
     }
     /** 从 YAML 文本中提取 keyboard.gestures 段（仅显式字段非 null）。 */
