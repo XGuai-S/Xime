@@ -213,6 +213,8 @@ fun CandidateBar(
     // 候选行滚动状态：需在 state 分支前声明——ChineseCandidates 的 hasAnyMore
     // 叠加 canScrollForward 判断（见分支内注释）
     val candidateListState = rememberLazyListState()
+    // 每页候选词数（UI 读取设置）：候选栏横排展示数量跟随设置，不再硬编码 20。
+    val pageSize = SettingsPreferences.getPageSize(context).coerceAtLeast(1)
 
     val displayCandidates: List<String>
     val displayAssociation: List<String>
@@ -233,13 +235,15 @@ fun CandidateBar(
             showLeftIcon = true
         }
         is CandidateBarState.ChineseCandidates -> {
-            val taken = s.candidates.take(20)
+            val taken = s.candidates.take(pageSize)
             // 候选栏按设置的"每页候选词数"显示引擎当前页，可左右滑动查看放不下的候选
             displayCandidates = taken
             displayComments = s.comments
             displayImages = emptyList()
 
-            hasAnyMore = s.hasMore || candidateListState.canScrollForward
+            // 不加「更多候选」按钮：横排数量由「每页候选词数」设置控制，
+            // 超出屏宽的部分靠横向滑动查看（canScrollForward 仅影响右侧宽度预留）。
+            hasAnyMore = false
             showLeftIcon = false
             displayAssociation = remember(s.associationCandidates, taken, s.inputText, textMeasurer) {
                 if (taken.isEmpty()) {
@@ -282,7 +286,7 @@ fun CandidateBar(
             displayImages = emptyList()
         }
         is CandidateBarState.EnglishCandidates -> {
-            displayCandidates = s.candidates.take(20)
+            displayCandidates = s.candidates.take(pageSize)
             displayComments = s.comments
             displayAssociation = emptyList()
             hasAnyMore = false
@@ -291,15 +295,15 @@ fun CandidateBar(
         }
         is CandidateBarState.ClipboardDisplay -> {
             // images 与 candidates 由服务层按同一列表同序构造，take 必须同源同步，否则索引错位
-            displayCandidates = s.candidates.take(20)
-            displayImages = s.images.take(20)
+            displayCandidates = s.candidates.take(pageSize)
+            displayImages = s.images.take(pageSize)
             displayComments = emptyList()
             displayAssociation = emptyList()
             hasAnyMore = false
             showLeftIcon = true
         }
         is CandidateBarState.Calculator -> {
-            displayCandidates = s.candidates.take(20)
+            displayCandidates = s.candidates.take(pageSize)
             displayComments = s.comments
             displayAssociation = emptyList()
             hasAnyMore = false
@@ -309,7 +313,7 @@ fun CandidateBar(
         is CandidateBarState.CapitalAmount -> {
             // 与 Calculator 同形：两个候选都渲染、都可点选（第一个高亮）。
             // 点选由 selectCandidate 分辨并走「回显替换」，不会重复上屏金额。
-            displayCandidates = s.candidates.take(20)
+            displayCandidates = s.candidates.take(pageSize)
             displayComments = emptyList()
             displayAssociation = emptyList()
             hasAnyMore = false
