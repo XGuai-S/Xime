@@ -28,8 +28,6 @@ internal object WordBlacklistStore {
     /** 黑名单文件名（与 xime.yaml 同级）。 */
     internal const val FILE_NAME = "word_blacklist.txt"
     private const val HEADER = "# 黑名单词库：长按候选删除的词（一行一词+编码，`词\t编码`），这些词不再出现在候选栏"
-    /** 黑名单上限（按编码-词条目计）：防御异常写入把文件撑爆。 */
-    private const val MAX_WORDS = 4096
 
     // ── 纯逻辑（无 IO，直接单测） ──
     /** 解析黑名单：`词\t编码` 一行一条，`#` 开头与空行跳过；兼容旧格式「一行一词」（无编码归空）。 */
@@ -60,7 +58,7 @@ internal object WordBlacklistStore {
     }
     /**
      * 加入一个 (编码, 词) 屏蔽条目。
-     * [code] 为空表示按词全局屏蔽（兼容旧删除）；已达上限或已存在时返回原表。
+     * [code] 为空表示按词全局屏蔽（兼容旧删除）；已存在时返回原表。
      */
     fun withBlocked(
         table: Map<String, Map<String, Int>>,
@@ -70,7 +68,6 @@ internal object WordBlacklistStore {
         if (word.isEmpty()) return table
         val codeWords = table[code]
         if (codeWords?.containsKey(word) == true) return table
-        if ((table[code]?.size ?: 0) >= MAX_WORDS) return table
         val next = LinkedHashMap(table)
         val nextWords = LinkedHashMap(codeWords ?: emptyMap())
         nextWords[word] = 1

@@ -475,6 +475,13 @@ fun SwipeableKeyButton(
     onSwipeStateChange: ((SwipeState, Rect) -> Unit)? = null,
     onPress: (() -> Unit)? = null,
     onRelease: (() -> Unit)? = null,
+    /**
+     * 长按直接回调（非气泡）：仅在 [longPressItems] 为空（无长按气泡）时生效，
+     * 长按超过 [KeysConfigHelper.getKeyboardGestures().longPressMs] 触发一次。
+     * 用于「长按 z 键反查单字」等需要长按即动作、不弹气泡的按键。
+     * 传 null（默认）不判定长按，与既有行为一致（长按 = 点按）。
+     */
+    onLongClick: (() -> Unit)? = null,
     onLongPressSelect: ((String) -> Unit)? = null,
     longPressItems: List<String>? = null,
     longPressDrawableIds: List<Int>? = null,
@@ -517,6 +524,7 @@ fun SwipeableKeyButton(
     val currentSwipeLeftRepeats by rememberUpdatedState(swipeLeftRepeats)
     val currentOnPress by rememberUpdatedState(onPress)
     val currentOnRelease by rememberUpdatedState(onRelease)
+    val currentOnLongClick by rememberUpdatedState(onLongClick)
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnLongPressSelect by rememberUpdatedState(onLongPressSelect)
     val currentLongPressItems by rememberUpdatedState(longPressItems)
@@ -674,7 +682,7 @@ fun SwipeableKeyButton(
                     }
                 )
             }
-            .pointerInput(text, currentLongPressItems.isNullOrEmpty()) {
+            .pointerInput(text, currentLongPressItems.isNullOrEmpty(), currentOnLongClick != null) {
                 if (currentLongPressItems.isNullOrEmpty()) {
                     // 容差点击：不因指针漂出键格（isOutOfBounds）而取消，见 detectTolerantTapGestures
                     detectTolerantTapGestures(
@@ -699,7 +707,13 @@ fun SwipeableKeyButton(
                                 )
                                 currentOnClick()
                             }
-                        }
+                        },
+                        onLongPress = currentOnLongClick?.let {
+                            {
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                it()
+                            }
+                        },
                     )
                     return@pointerInput
                 }

@@ -46,12 +46,6 @@ internal object CandidateOrderStore {
     /** 表头注释行；解析时以 `#` 开头一律跳过。 */
     private const val HEADER = "# 候选排序词频：词\t编码\t权重（用户手动拖动候选后自动生成）"
 
-    /** 单个编码最多保留的词条数：防御异常大的候选页写爆文件。 */
-    private const val MAX_WORDS_PER_CODE = 64
-
-    /** 表上限：超出后不再写入新编码（已有编码仍可更新）。 */
-    private const val MAX_CODES = 4096
-
     // ── 纯逻辑（无 IO，直接单测） ──
 
     /**
@@ -155,10 +149,7 @@ internal object CandidateOrderStore {
         ordered: List<String>,
     ): Map<String, Map<String, Int>> {
         if (code.isEmpty() || ordered.isEmpty()) return table
-        if (code !in table && table.size >= MAX_CODES) return table
-        val weights = fullOrderWeights(ordered).entries
-            .take(MAX_WORDS_PER_CODE)
-            .associate { it.key to it.value }
+        val weights = fullOrderWeights(ordered)
         val next = LinkedHashMap(table)
         next[code] = weights
         return next

@@ -69,7 +69,13 @@ object DictionaryHelper {
                 } else {
                     var j = i + 1
                     while (j < lines.size && lines[j].trim().startsWith("- ")) {
-                        tables.add(lines[j].trim().removePrefix("- ").trim().trim('"'))
+                        // 块式条目可能带行尾注释（如 `- Flypy   # 主词库`），
+                        // 必须剥掉 `#` 之后的内容，否则拿到的名字带注释后缀、找不到词库文件。
+                        var name = lines[j].trim().removePrefix("- ").trim()
+                        val hash = name.indexOf('#')
+                        if (hash >= 0) name = name.substring(0, hash)
+                        name = name.trim().trim('"').trim()
+                        if (name.isNotEmpty() && name != "..." ) tables.add(name)
                         j++
                     }
                     i = j - 1
@@ -104,6 +110,55 @@ object DictionaryHelper {
     }
 
     /**
+     * 跟随 `import_tables` 递归流式收集词条（注入读取器，便于单测；按表名去重防环）。
+     *
+     * 与 [collectEntries] 的区别：**不返回列表**，而是逐词条回调 [onEntry]，
+     * 调用方边读边处理（如进集合、筛单字码），全程不驻留几十万个 [DictEntry]。
+     * 大词库（数十万行）用它可显著降低堆峰值与 GC 压力。
+     *
+     * 表头标记（`nofreq` / `no_auto_word`）通过 [onDictHeader] 回调下发，
+     * 调用方据此决定该词典的词条是否进排除集。
+     *
+     * @param rootDicts 根词典名（各启用方案的主词典）
+     * @param readDict 按词库名读取 `.dict.yaml` 全文，返回 null 表示不存在
+     * @param onDictStart 每本词典开始解析时回调（词典名、nofreq 标记、no_auto_word 标记）
+     * @param onEntry 每个词条回调（词典名、词、码）
+     */
+    fun collectEntriesStreaming(
+        rootDicts: List<String>,
+        readDict: (String) -> String?,
+        onDictStart: (dictName: String, noFreq: Boolean, noAutoWord: Boolean) -> Unit = { _, _, _ -> },
+        onEntry: (dictName: String, word: String, code: String) -> Unit,
+    ) {
+        val seen = linkedSetOf<String>()
+        val queue = ArrayDeque(rootDicts)
+        while (queue.isNotEmpty()) {
+            val name = queue.removeFirst()
+            if (!seen.add(name)) continue
+            val text = readDict(name) ?: continue
+            onDictStart(name, hasNoFreqMark(text), hasNoAutoWordMark(text))
+            for (entry in parseDictEntries(text)) {
+                onEntry(name, entry.word, entry.code)
+            }
+            for (t in parseImportTables(text)) if (t !in seen) queue.addLast(t)
+        }
+    }
+
+    /** 词典表头是否声明了 `nofreq`（`# nofreq: true` 或 `#@/nofreq`）。 */
+    fun hasNoFreqMark(text: String): Boolean =
+        NO_FREQ_MARK.containsMatchIn(text)
+
+    /** 词典表头是否声明了 `no_auto_word`（`# no_auto_word: true` 或 `#@/no_auto_word`）。 */
+    fun hasNoAutoWordMark(text: String): Boolean =
+        NO_AUTO_WORD_MARK.containsMatchIn(text)
+
+    private val NO_FREQ_MARK =
+        Regex("#@/nofreq|#\\s*nofreq\\s*:\\s*true", RegexOption.IGNORE_CASE)
+
+    private val NO_AUTO_WORD_MARK =
+        Regex("#@/no_auto_word|#\\s*no_auto_word\\s*:\\s*true", RegexOption.IGNORE_CASE)
+
+    /**
      * 从方案 `.schema.yaml` 读取 `translator.packs` 中声明的个人词库名（如 pinyin_simp 的
      * `user_simp`），没有则返回空。这些表同样是方案里的静态码表，与主词典一并展示。
      */
@@ -125,7 +180,7 @@ object DictionaryHelper {
     private fun readSchemaPacksKaml(text: String): List<String>? {
         return try {
             val root = SchemaManager.yaml.parseToYamlNode(text) as? YamlMap ?: return emptyList()
-            val packs = (root["translator"] as? YamlMap)?.get("packs") as? YamlList ?: return emptyList()
+            val packs = root.get<YamlMap>("translator")?.get("packs") as? YamlList ?: return emptyList()
             packs.items.mapNotNull { (it as? YamlScalar)?.content }
                 .map { it.trim().removeSurrounding("\"") }
                 .filter { it.isNotEmpty() }

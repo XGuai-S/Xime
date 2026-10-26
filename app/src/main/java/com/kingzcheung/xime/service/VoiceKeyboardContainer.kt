@@ -1,7 +1,6 @@
 package com.kingzcheung.xime.service
 
 import android.content.Context
-import android.graphics.Paint
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
@@ -23,11 +22,6 @@ class VoiceKeyboardContainer(
     private var isTrackingVoiceButtons = false
     private var lastLeftActive = false
     private var lastRightActive = false
-
-    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 0f
-    }
 
     fun enableVoiceButtonTracking() {
         isTrackingVoiceButtons = true

@@ -30,7 +30,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
-import java.util.zip.ZipInputStream
 import java.util.zip.ZipFile
 
 data class SchemaMeta(
@@ -1147,23 +1146,6 @@ object SchemaManager {
     }
 
     /**
-     * 从 URI 导入 zip，返回解压后的文件列表。
-     */
-    private fun importZipWithFileList(context: Context, uri: Uri, targetDir: File): List<String> {
-        val tempFile = File.createTempFile("import_", ".zip", targetDir)
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                copyStreamTo(input, tempFile)
-            } ?: return emptyList()
-            val files = listArchiveTargetFiles(tempFile)
-            importZipFromFile(tempFile, targetDir)
-            return files
-        } finally {
-            tempFile.delete()
-        }
-    }
-
-    /**
      * 找到所有 .schema.yaml 文件所在的共同父目录作为基目录。
      * 例如 zip 结构为 rime-ice-main/rime_ice.schema.yaml，
      * 则返回 "rime-ice-main/"，解压时剥离此前缀。
@@ -1193,69 +1175,6 @@ object SchemaManager {
         val commonPrefix = parentDirs.reduce { a, b -> a.commonPrefixWith(b) }
         val idx = commonPrefix.lastIndexOf('/')
         return if (idx >= 0) commonPrefix.substring(0, idx + 1) else ""
-    }
-
-    private fun importZip(context: Context, uri: Uri, targetDir: File): Boolean {
-        try {
-            // 第一趟：收集文件名以检测共同根目录
-            val entryNames = mutableListOf<String>()
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                ZipInputStream(input.buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (!entry.isDirectory && !isAppleDouble(entry.name)) entryNames.add(entry.name)
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
-            } ?: return false
-
-            val baseDir = findSchemaBaseDir(entryNames)
-            if (baseDir.isNotEmpty()) {
-                Log.i(TAG, "Found schema base directory: $baseDir, will strip it on extraction")
-            }
-
-            // 第二趟：解压文件，剥离基目录前缀
-            val importedSchemas = mutableSetOf<String>()
-            var extractedCount = 0
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                ZipInputStream(input.buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val originalName = entry.name
-                        val name = originalName.removePrefix(baseDir)
-                        if (!entry.isDirectory && !isAppleDouble(originalName) && !isProtectedImportName(name)) {
-                            val file = safeChild(targetDir, name)
-                            if (file == null) {
-                                Log.w(TAG, "Skip unsafe path: $name")
-                            } else {
-                                file.parentFile?.mkdirs()
-                                FileOutputStream(file).use { output ->
-                                    zis.copyTo(output)
-                                }
-                                extractedCount++
-
-                                when {
-                                    name.endsWith(".schema.yaml") ->
-                                        importedSchemas.add(name.removeSuffix(".schema.yaml").substringAfterLast('/'))
-                                    name.endsWith(".dict.yaml") ->
-                                        importedSchemas.add(name.removeSuffix(".dict.yaml").substringAfterLast('/'))
-                                }
-
-                            }
-                        }
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-
-            Log.i(TAG, "Imported zip: $extractedCount files extracted, schemas: $importedSchemas")
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to import zip", e)
-            return false
-        }
     }
 
     /**

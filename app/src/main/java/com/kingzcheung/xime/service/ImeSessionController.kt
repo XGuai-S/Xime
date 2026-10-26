@@ -344,24 +344,24 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             )
             return
         }
-        // 用户手动排序（纯引擎路径）：按本地词频表重排候选栏显示顺序。
+        // 用户手动排序（纯引擎路径）：仅应用手动排序表（candidate_order.txt），
+        // 不再按词频重排——候选顺序完全由「手动排序 + rime 引擎原生权重」控制，
+        // word_freq.txt 只作记录（双写一份 word_freq.yaml），不干预候选显示。
         // 重排产生的 engine actions 让点选仍落在正确的引擎候选上
         // （selectCandidateAsync 走 pendingAction.engineIndex）。
-        // 手动排序覆盖该编码时优先（用户显式排定的全序）；未手动排过的编码
-        // 用上屏词频表（word_freq.txt）补位——上得多的词排在前面。见
-        // CandidateOrderStore.reorder / WordFreqStore.reorder。
+        // 见 CandidateOrderStore.reorder。
+        val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         val reordered = if (shouldApplyCandidateOrder(display.isT9, isAsciiMode, candidateActions)) {
-            CandidateOrderStore.reorder(
-                code = rawInputText,
-                candidates = display.candidates,
-                comments = display.comments,
-                table = service.candidateOrderTable,
-            ) ?: WordFreqStore.reorder(
-                code = rawInputText,
-                candidates = display.candidates,
-                comments = display.comments,
-                table = service.wordFreqTable,
-            )
+            if (autoWordConfig.sortByManual) {
+                CandidateOrderStore.reorder(
+                    code = rawInputText,
+                    candidates = display.candidates,
+                    comments = display.comments,
+                    table = service.candidateOrderTable,
+                )
+            } else {
+                null
+            }
         } else {
             null
         }

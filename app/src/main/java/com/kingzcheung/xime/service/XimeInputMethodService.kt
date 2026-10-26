@@ -665,7 +665,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             "AutoWordStore loaded: temp=${autoWordTemp.size} entries, fixed=${autoWordFixed.size} entries, " +
                 "tempTotal=${autoWordTemp.values.sumOf { it.size }}, fixedTotal=${autoWordFixed.values.sumOf { it.size }}"
         )
-        // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 30 天）没再上屏
+        // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 7 天）没再上屏
         // 的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
         val prunedTemp = AutoWordStore.prune(
             autoWordTemp,
@@ -755,7 +755,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 检查词库是否已部署（deploymentDone 标记 + 部署 hash 一致）
                 val deploymentDone = SettingsPreferences.isDeploymentDone(this@XimeInputMethodService)
                 val needsDeployment = !deploymentDone || !RimeConfigHelper.isDeploymentComplete(this@XimeInputMethodService)
-
+                // 部署前兜底：确保 rime 可编译词典 word_freq.dict.yaml 已生成。
+                // XGuai_flypy 等方案的 import_tables 引用 `word_freq`，若文件缺失
+                // librime 编译方案词库直接失败、build 无 .bin → 打不出字（engine=0）。
+                // 词频表已落盘时按内存表生成；未加载过则从可见目录读一次。
+                if (needsDeployment) {
+                    if (wordFreqTable.isEmpty()) {
+                        wordFreqTable = WordFreqStore.load(this@XimeInputMethodService)
+                    }
+                    WordFreqStore.ensureRimeDict(this@XimeInputMethodService, wordFreqTable)
+                }
                 if (needsDeployment) {
                     // 统一部署入口（进程内互斥，hash 一致时内部跳过）。
                     // 与 XimeApplication 预初始化共享，避免两者并发触发两次全量编译。
@@ -3225,11 +3234,26 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 预览残留、光标移动丢弃组合态带入的内容）不计选中次数。
      */
     private var lastSelectedCandidateWord: String? = null
-
     /** 记录本次从候选栏选中的词，见 [lastSelectedCandidateWord]。 */
     internal fun markCandidateSelection(word: String) {
-        if (word.isNotEmpty()) lastSelectedCandidateWord = word
+        if (word.isNotEmpty()) {
+            lastSelectedCandidateWord = word
+            // 同步快照当前编码：上屏后 candidateState 常已被清空，靠这里保住编码，
+            // 否则 word_freq.txt 会因 code 为空而漏记（见 recordWordFrequency 的兜底）。
+            val code = candidateState.value.inputText.ifEmpty { candidateState.value.preeditText }
+            if (code.isNotEmpty()) lastSelectedCandidateCode = code
+        }
     }
+
+    /**
+     * 最近一次选中候选时的**输入编码**快照。
+     *
+     * 为什么需要它：候选点选/空格上屏后 `candidateState` 往往已被清空（inputText/preedit
+     * 都为空），此时 [recordWordFrequency] 再读当前编码只能拿到空串，`WordFreqStore.withCommit`
+     * 遇空编码直接返回原表——用户明确选中的词就这么漏出了词频统计。
+     * 上屏前在 [markCandidateSelection] 里存一份编码，上屏时优先用它兜底。
+     */
+    private var lastSelectedCandidateCode: String? = null
 
     /**
      * 已启用方案词库的**词集合**（方案词典 `.dict.yaml` 词条 + 该方案用户词典
@@ -3240,26 +3264,71 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     @Volatile
     private var schemeDictWords: Set<String> = emptySet()
-
     /**
-     * 已启用方案的「单字 → 编码」索引（[SchemeCodeIndex]），组合生词按方案规则生成编码用。
+     * 声明了 `nofreq` 标记的词典词条（表头注释 `# nofreq: true` 或 `#@/nofreq`）。
+     *
+     * 这些词来自用户声明「不进词频」的词典（如个人词库 XGuai_user.dict.yaml），
+     * 上屏时**跳过词频记录**（word_freq.txt / word_freq.yaml 不收录），
+     * 但仍是方案词典的正常候选（能打出来、能手动排序）。
+     *
      * 与 [schemeDictWords] 同批加载（同一份码表），上屏路径只读内存。
      */
     @Volatile
-    private var schemeCharCodes: Map<String, String> = emptyMap()
-
-    /** 上次刷新词库词集合的时间戳（节流：输入框切换频繁，不必每次切框都读）。 */
-    private var lastSchemeDictRefreshAt = 0L
-
-    /** 词库词集合最短刷新间隔（ms）：读 userdb 持 rimeLock 独占，不宜太频繁。 */
-    private val schemeDictRefreshIntervalMs = 30_000L
+    private var noFreqWords: Set<String> = emptySet()
+    /**
+     * 声明了 `no_auto_word` 标记 / 配置了 `auto_word.no_auto_word_dicts` 的词典词条
+     * （表头注释 `# no_auto_word: true`，或在 xime.yaml 的 `auto_word.no_auto_word_dicts`
+     * 里列出词典名，如 `XGuai_user`）。
+     *
+     * 这些词上屏时**跳过自动造词链**（不进临时/固定词库、不参与组合生词），
+     * 但仍是方案词典的正常候选（能打出来、能手动排序、能进词频）。
+     *
+     * 与 [schemeDictWords] 同批加载（同一份码表），上屏路径只读内存。
+     */
+    @Volatile
+    private var noAutoWordWords: Set<String> = emptySet()
 
     /**
-     * 异步刷新 [schemeDictWords]：收集当前启用方案引用的各词典（`.dict.yaml`）
-     * 全部词条 + 对应用户词典（`.userdb`）词条。
-     * 引擎未就绪或读取失败时保持原缓存（收录退化为不查重）。
-     * 词典解析与 userdb 读取都较耗时，必须放 IO 线程；
-     * 调用方（引擎就绪后、方案切换后）勿在主线程等待。
+     * 已启用方案的「全部词条」集合（[schemeDictWords]）与「单字 → 满四码」索引（[schemeCharCodes]）。
+     * 两者同批加载（同一份码表），上屏路径只读内存。
+     */
+    @Volatile
+    private var schemeCharCodes: Map<String, List<String>> = emptyMap()
+
+    /**
+     * 词库解析结果缓存：词集、排除集、单字满四码索引。
+     * 与 [dictSnapshot] 配套——文件未变时直接复用，避免重解析数十万行码表。
+     */
+    private data class SchemeDictCache(
+        val words: Set<String>,
+        val noFreq: Set<String>,
+        val noAutoWord: Set<String>,
+        val charCodes: Map<String, List<String>>,
+    )
+
+    /** 解析成功的词库文件快照：(绝对路径, 最后修改时间, 字节数)。 */
+    private var dictSnapshot: List<Triple<String, Long, Long>>? = null
+    /** 最近一次解析结果（文件未变时直接复用）。 */
+    private var schemeDictCache: SchemeDictCache? = null
+    /** 上次触发刷新的时间戳（节流：输入框切换频繁，不必每次都读）。 */
+    private var lastSchemeDictRefreshAt = 0L
+    /** 词库最短刷新间隔（ms）：文件未变会直接跳过解析，这里只兜住同次运行内反复触发。 */
+    private val schemeDictRefreshIntervalMs = 300_000L
+    /** 刷新协程是否在跑：并发触发（引擎就绪 force + onStartInput）时避免重复解析。 */
+    @Volatile
+    private var schemeDictRefreshRunning = false
+
+    /**
+     * 异步刷新 [schemeDictWords] / [schemeCharCodes]。
+     * 收集当前启用方案引用的各词典（`.dict.yaml`，随 import_tables 递归展开）全部词条
+     * + 各词典用户词典（`.userdb`）自造词。
+     *
+     * 性能要点：
+     * - 流式收集：边读边处理，不堆几十万 DictEntry 对象。
+     * - 文件快照缓存：词典 (mtime, size) 未变时直接复用上次结果，跳过整轮重解析。
+     * - 并发守卫：force 与 onStartInput 同时触发时只解析一次。
+     *
+     * 引擎未就绪或解析失败保持原缓存（收录退化为不查重）。
      *
      * @param force 方案切换/引擎就绪时强制刷新，忽略 [schemeDictRefreshIntervalMs] 节流
      */
@@ -3267,55 +3336,110 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (!com.kingzcheung.xime.rime.RimeEngine.isInitialized()) return
         val now = System.currentTimeMillis()
         if (!force && now - lastSchemeDictRefreshAt < schemeDictRefreshIntervalMs) return
+        if (schemeDictRefreshRunning) return
         lastSchemeDictRefreshAt = now
+        schemeDictRefreshRunning = true
         serviceScope.launch(Dispatchers.IO) {
-            runCatching {
-                val ctx = this@XimeInputMethodService
-                val rimeDir = com.kingzcheung.xime.settings.SchemaManager.getRimeDir(ctx)
-                val dictNames = com.kingzcheung.xime.settings.SchemaManager
-                    .getEnabledSchemas(ctx)
-                    .mapNotNull {
-                        com.kingzcheung.xime.settings.SchemaManager
-                            .getReferencedDictName(ctx, it)
-                    }
-                    .distinct()
-                if (dictNames.isEmpty()) return@launch
-                val words = LinkedHashSet<String>()
-                // 只收单字条目（key 长度 1）：字码索引不借用多字词编码（见 SchemeCodeIndex）
-                val tableEntries = ArrayList<Pair<String, String>>()
-                for (dictName in dictNames) {
-                    // 方案词典词条（`...` 之后的 `词<TAB>码[<TAB>权重]`）
-                    runCatching {
-                        val dictFile = java.io.File(rimeDir, "$dictName.dict.yaml")
-                        if (dictFile.isFile) {
-                            val parsed = com.kingzcheung.xime.settings.DictionaryHelper
-                                .parseDictEntries(dictFile.readText())
-                            for (entry in parsed) {
-                                if (entry.word.isNotEmpty()) {
-                                    words += entry.word
-                                    if (entry.code.isNotEmpty() && entry.word.length == 1) {
-                                        tableEntries += entry.word to entry.code
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // 该词典的用户词典（userdb）自造词
-                    runCatching {
-                        words += com.kingzcheung.xime.settings.UserDictIoManager
-                            .readEntries(dictName).map { it.word }
-                    }
-                }
-                schemeDictWords = words
-                schemeCharCodes = SchemeCodeIndex.buildCharCodes(tableEntries.asSequence())
-                FileLogger.d(
-                    TAG,
-                    "scheme dict refreshed: ${words.size} words, ${schemeCharCodes.size} chars from ${dictNames.joinToString()}"
-                )
+            try {
+                runCatching { doRefreshSchemeDictWords() }
+            } finally {
+                schemeDictRefreshRunning = false
             }
         }
     }
 
+    /** [refreshSchemeDictWords] 解析主体（IO 线程）。 */
+    private fun doRefreshSchemeDictWords() {
+        val ctx = this@XimeInputMethodService
+        val rimeDir = com.kingzcheung.xime.settings.SchemaManager.getRimeDir(ctx)
+        // 根词典：各启用方案的主词典（translator.dictionary）。
+        val rootDictNames = com.kingzcheung.xime.settings.SchemaManager
+            .getEnabledSchemas(ctx)
+            .mapNotNull { com.kingzcheung.xime.settings.SchemaManager.getReferencedDictName(ctx, it) }
+            .distinct()
+        if (rootDictNames.isEmpty()) return
+
+        // 快照命中：所有词典文件都没动过，直接复用上次结果，跳过整轮重解析。
+        val cached = dictSnapshot
+        if (cached != null && cached.isNotEmpty() &&
+            cached.all { (path, mtime, size) ->
+                val f = java.io.File(path)
+                f.isFile && f.lastModified() == mtime && f.length() == size
+            }
+        ) {
+            schemeDictCache?.let { applySchemeDictCache(it) }
+            return
+        }
+
+        val cfg = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+        val cfgNoFreqDicts = cfg.noFreqDicts.toHashSet()
+        val cfgNoAutoWordDicts = cfg.noAutoWordDicts.toHashSet()
+        // 各词典排除标记：xime.yaml 配置优先，词典表头标记其次。
+        val noFreqByDict = HashMap<String, Boolean>()
+        val noAutoWordByDict = HashMap<String, Boolean>()
+
+        val words = LinkedHashSet<String>()
+        val noFreq = LinkedHashSet<String>()
+        val noAutoWord = LinkedHashSet<String>()
+        val singles = HashMap<String, MutableSet<String>>()
+        val snapshot = ArrayList<Triple<String, Long, Long>>()
+        val loadedNames = ArrayList<String>()
+
+        com.kingzcheung.xime.settings.DictionaryHelper.collectEntriesStreaming(
+            rootDicts = rootDictNames,
+            readDict = { name ->
+                val f = java.io.File(rimeDir, "$name.dict.yaml")
+                if (!f.isFile) return@collectEntriesStreaming null
+                snapshot += Triple(f.absolutePath, f.lastModified(), f.length())
+                loadedNames += name
+                f.readText(Charsets.UTF_8)
+            },
+            onDictStart = { name, headerNoFreq, headerNoAutoWord ->
+                if (name in cfgNoFreqDicts || headerNoFreq) noFreqByDict[name] = true
+                if (name in cfgNoAutoWordDicts || headerNoAutoWord) noAutoWordByDict[name] = true
+            },
+            onEntry = { name, word, code ->
+                if (word.isEmpty()) return@collectEntriesStreaming
+                words.add(word)
+                // 排除集按词典级别判定：该词典声明了 nofreq / no_auto_word 才排除其词条。
+                if (noFreqByDict[name] == true) noFreq.add(word)
+                if (noAutoWordByDict[name] == true) noAutoWord.add(word)
+                // 只收单字（码点数判定，增补平面汉字占两个 char），由 SchemeCodeIndex 只留满四码。
+                if (code.isNotEmpty() && word.codePointCount(0, word.length) == 1) {
+                    singles.getOrPut(word) { HashSet() }.add(code)
+                }
+            },
+        )
+
+        // 各词典用户词典（userdb）自造词。
+        for (name in loadedNames) {
+            runCatching {
+                for (entry in com.kingzcheung.xime.settings.UserDictIoManager.readEntries(name)) {
+                    if (entry.word.isNotEmpty()) words.add(entry.word)
+                }
+            }
+        }
+
+        val charCodes = SchemeCodeIndex.buildCharCodes(
+            singles.asSequence().flatMap { (ch, codes) -> codes.asSequence().map { ch to it } }
+        )
+        val result = SchemeDictCache(words, noFreq, noAutoWord, charCodes)
+        dictSnapshot = snapshot.toList()
+        schemeDictCache = result
+        applySchemeDictCache(result)
+        FileLogger.d(
+            TAG,
+            "scheme dict refreshed: ${words.size} words, ${charCodes.size} chars from ${loadedNames.joinToString()}"
+        )
+    }
+
+    /** 把解析结果刷到字段（均为 volatile / 原子赋值，主线程读安全）。 */
+    private fun applySchemeDictCache(c: SchemeDictCache) {
+        schemeDictWords = c.words
+        noFreqWords = c.noFreq
+        noAutoWordWords = c.noAutoWord
+        schemeCharCodes = c.charCodes
+    }
     /**
      * 记录一次上屏词频：以上屏瞬间的编码（inputText/preeditText）为键，
      * 上屏文本为词，计数 +1。
@@ -3330,12 +3454,48 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (isPaste || editorSecret) return
         if (isT9Schema(uiState.value.currentSchemaId)) return
         if (uiState.value.isAsciiMode) return
+        // 声明了 nofreq 的词典词条（表头 `# nofreq: true` / `#@/nofreq`，如个人词库
+        // XGuai_user.dict.yaml）：不参与上屏词频统计（word_freq.txt/yaml 不收录），
+        // 但仍走自动造词链（能正常学习/组合）。只在词频层面跳过。
+        if (text in noFreqWords) return
         // 自动造词开关（xime.yaml auto_word.enabled）：关闭时不做任何收录/统计
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         if (!autoWordConfig.enabled) return
-        val code = candidateState.value.inputText.ifEmpty { candidateState.value.preeditText }
-        if (code.isEmpty()) return
-        val next = WordFreqStore.withCommit(wordFreqTable, code, text)
+        val code = candidateState.value.inputText
+            .ifEmpty { candidateState.value.preeditText }
+            .ifEmpty { lastSelectedCandidateCode.orEmpty() }
+        // 本次上屏的词在启用方案里能打出的**全部**编码（按三个总规则组合）。
+        // 造词基底只用该字的**满四码**条目（简码不参与），多音字会得到多个组合码。
+        // 单字返回空（单字本身不用造词），但**不影响组合链**：见下方的 lastCommittedWord。
+        val schemeCodes = SchemeCodeIndex.composeCodes(text, schemeCharCodes)
+        // 用户明确从候选栏选中的词必须进词频表：编码缺失时按方案规则取一个
+        // （短码优先，即组合里最实用的那个）。单字无组合码，用其满四码单字码兜底；
+        // 只有规则也编不出（无满四码）时才放弃。
+        val effectiveCode = code.ifEmpty {
+            when {
+                lastSelectedCandidateWord == text && schemeCodes.isNotEmpty() ->
+                    schemeCodes.firstOrNull().orEmpty()
+                // 单字（composeCodes 返回空）：用该字的满四码单字码兜底，保证单字也进词频
+                lastSelectedCandidateWord == text ->
+                    schemeCharCodes[text]?.firstOrNull().orEmpty()
+                else -> ""
+            }
+        }
+        if (effectiveCode.isEmpty()) {
+            lastSelectedCandidateWord = null
+            lastSelectedCandidateCode = null
+            // 组合链必须照常推进：单字（composeCodes 返回空）或编码临时缺失时若直接跳过，
+            // lastCommittedWord 就停在上一次，下一次上屏永远拼不出「一」+「键」→「一键」。
+            // 词频可以不记，但「这次上屏了什么」这个事实必须记住。
+            lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
+            return
+        }
+        // 词频就落在**本次上屏对应的编码**上：输入框/候选快照里的实际编码
+        // （[markCandidateSelection] 已把候选对应的编码快照进 lastSelectedCandidateCode，
+        // 上屏后 candidateState 清空也能兜底）。不替换成词自身方案码——用户在什么编码下
+        // 选中的词，词频就记在什么编码下，下次按同样编码打，候选排序能吃到这次统计。
+        val freqCode = code.ifEmpty { effectiveCode }
+        val next = WordFreqStore.withCommit(wordFreqTable, freqCode, text)
         if (next !== wordFreqTable) {
             wordFreqTable = next
         }
@@ -3356,22 +3516,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val committedWholeWordFromCandidates =
             text in shownCandidates || (shownCandidates.isEmpty() && text == selectedWord)
         if (committedWholeWordFromCandidates && text !in schemeDictWords) {
+            // 该词在方案里能打出的全部编码（满四码基底 + 三个总规则）；
+            // 任一字没有满四码时就编不出来，此时回退实际输入码（保证仍能学）。
+            val codes = schemeCodes.ifEmpty { listOf(effectiveCode) }
+            // 已收录过的（任意一个编码下命中）→ 这次上屏算一次选中，只在**已存在**的
+            // 编码上计数，避免每次上屏把多余编码也刷一遍；已晋升固定词库则不再计数。
+            val recordedCodes = codes.filter { autoWordTemp[it]?.containsKey(text) == true }
             when {
-                autoWordTemp[code]?.containsKey(text) == true ->
-                    recordAutoWord(text, listOf(code), autoWordConfig)
-                autoWordFixed[code]?.containsKey(text) == true -> Unit
-                else -> {
-                    // 编码统一按方案单字规则生成：不取输入框残缺码（避免「快乐怎么」以 klz
-                    // 前缀上屏却记进词库）；规则生成不了（字不在方案里）才回退实际输入码。
-                    val codes = SchemeCodeIndex.composeCodes(text, schemeCharCodes)
-                        .ifEmpty { listOf(code) }
-                    recordAutoWord(text, codes, autoWordConfig)
-                }
+                recordedCodes.isNotEmpty() -> recordAutoWord(text, recordedCodes, autoWordConfig)
+                codes.any { autoWordFixed[it]?.containsKey(text) == true } -> Unit
+                else -> recordAutoWord(text, codes, autoWordConfig)
             }
         }
         // 组合生词：把上一次上屏的词与本次的词拼接成新词进临时词库
         // （如「现在」+「目录」→「现在目录」，长度由 combo_min/max_chars 控制）。
-        // 编码按启用方案的单字规则生成；任一字在方案里取不到码就不造（编不出来等于打不出来）。
+        // 编码按三个总规则从满四码单字拼出；任一字没有满四码就不造（编不出来等于打不出来）。
         // 组合产生的词初始次数为 0：它只是候选，被用户选中后才开始计数（见 [recordAutoWord]）。
         if (autoWordConfig.comboEnabled) {
             val comboText = AutoWordStore.comboWord(
@@ -3411,6 +3570,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         config: com.kingzcheung.xime.settings.AutoWordConfig,
         initialCount: Int = 1,
     ) {
+        // 声明了 no_auto_word / 配置了 auto_word.no_auto_word_dicts 的词典词条
+        // （如个人词库 XGuai_user.dict.yaml）：不参与自动造词链——
+        // 不进临时/固定词库、不参与组合生词。但仍是方案词典正常候选。
+        if (word in noAutoWordWords) return
         for (code in codes) {
             if (code.isEmpty()) continue
             val now = System.currentTimeMillis()

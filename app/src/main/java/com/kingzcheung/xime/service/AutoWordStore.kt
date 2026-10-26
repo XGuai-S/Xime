@@ -12,7 +12,9 @@ import java.io.File
  * 临时词库与固定词库的词都会在输入对应编码时**直接合并进候选栏**（不经 rime、
  * 不占用快捷短语 custom_phrase.txt），被用户选中上屏即计数；
  * 同一词被选中满 2 次晋升到**固定词库**（[FIXED_FILE_NAME]）。
- * 超过一个月没再被选中的词在 [prune] / [promote] 中淘汰，不会无限堆积。
+ * 超过 7 天没再被选中的词在 [prune] / [promote] 中淘汰，不会无限堆积；
+ * 临时词库文件**不限大小**（不设条数/字节上限），体积完全靠 7 天过期控制——
+ * 既不担心文件撑爆，也不会出现满额后新词学不进来的问题。
  *
  * ## 与 [WordFreqStore] 的分工
  *
@@ -38,20 +40,11 @@ internal object AutoWordStore {
     /** 固定词库文件名（与 xime.yaml 同级）。 */
     internal const val FIXED_FILE_NAME = "auto_word.txt"
 
-    /** 晋升考察窗口：一个月（30 天）。 */
-    internal const val PROMOTE_WINDOW_DAYS = 30
+    /** 晋升考察窗口 / 临时词库过期窗口：7 天。窗口内未满晋升条件即删除。 */
+    internal const val PROMOTE_WINDOW_DAYS = 7
 
     /** 窗口内需达到的上屏次数。 */
     internal const val PROMOTE_MIN_COUNT = 2
-
-    /** 单个编码最多保留的临时词条数。 */
-    private const val MAX_WORDS_PER_CODE = 64
-
-    /** 临时库表上限：超出后不再写入新编码（已有编码仍可更新）。 */
-    private const val MAX_CODES = 4096
-
-    /** 固定库表上限。 */
-    private const val MAX_FIXED_CODES = 4096
 
     /** 前缀命中时最多补进候选栏的词数：短编码命中面宽，不封顶会把候选栏尾部塞满。 */
     private const val MAX_PREFIX_CANDIDATES = 8
@@ -66,7 +59,7 @@ internal object AutoWordStore {
     internal const val COMBO_MAX_CHARS = 4
 
     private const val TEMP_HEADER =
-        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 2 次晋升固定词库；超过一个月没再被选中则删除）"
+        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 2 次晋升固定词库；超过 7 天没再被选中则删除）"
 
     private const val FIXED_HEADER = "# 固定词库：词\t编码\t权重（由临时词库晋升，输入时合并进候选栏出候选）"
 
@@ -100,7 +93,8 @@ internal object AutoWordStore {
      * - 拼接结果字数须落在 `[minChars, maxChars]` 内（按 Unicode 码点数），
      *   默认 2–4 字：太短（单字碎片）与太长（整句）都不收录。
      *
-     * 编码不在这里拼：按启用方案的单字规则生成，见 [SchemeCodeIndex.composeCodes]。
+     * 编码不在这里拼：按启用方案的**满四码单字**与三个总规则生成，
+     * 见 [SchemeCodeIndex.composeCodes]。
      *
      * @return 组合出的新词；不满足条件返回 null。
      */
@@ -135,6 +129,15 @@ internal object AutoWordStore {
             i += Character.charCount(cp)
         }
         return true
+    }
+
+    /**
+     * 造词库收录门槛：≥2 个汉字（组合词/普通上屏词都要求），区别于词频表
+     * （[WordFreqStore.isCountableWord] 收单字）。单字方案里本身就能打，无需学。
+     */
+    private fun isLearnedWord(word: String): Boolean {
+        if (word.length < 2) return false
+        return isComboWord(word)
     }
 
     /**
@@ -226,11 +229,14 @@ internal object AutoWordStore {
         now: Long,
         initialCount: Int = 1,
     ): Map<String, Map<String, Entry>> {
-        if (code.isEmpty() || !WordFreqStore.isCountableWord(word)) return temp
+        // 造词收录门槛与词频表（WordFreqStore.isCountableWord）不同：词频表收单字
+        // （上屏历史镜像），但造词库只学「≥2 字可组合的词」——单字方案里本身就能打，
+        // 学进造词库只会污染候选（合并时固定库权重会把它顶到前面）。
+        if (code.isEmpty() || !isLearnedWord(word)) return temp
+        // 临时词库**不限大小**：不设条数/编码/字节上限（体积由 7 天过期窗口控制），
+        // 任何词都能学进来——以前组合生词把 4096 个编码额度占满后新词被拒收的问题不再存在。
         val codeWords = temp[code]
-        if (codeWords == null && temp.size >= MAX_CODES) return temp
         val existing = codeWords?.get(word)
-        if (existing == null && codeWords != null && codeWords.size >= MAX_WORDS_PER_CODE) return temp
         val entry = if (existing == null) {
             Entry(
                 word = word, code = code, firstSeen = now,
@@ -252,10 +258,10 @@ internal object AutoWordStore {
 
     /**
      * 晋升与淘汰：
-     * - 首次上屏起窗口（30 天）内上屏满 2 次的词 → 移入固定词库（权重按次数换算，供 custom_phrase 使用）；
+     * - 首次上屏起窗口（7 天）内上屏满 2 次的词 → 移入固定词库（权重按次数换算，供 custom_phrase 使用）；
      * - 超过窗口天数没再上屏的词 → 从临时库淘汰。
      *
-     * 两个窗口都取 [windowDays]（默认 30 天，可在 xime.yaml 的 `auto_word.promote_days` 调整）：
+     * 两个窗口都取 [windowDays]（默认 7 天，可在 xime.yaml 的 `auto_word.promote_days` 调整）：
      * 晋升从**首次**上屏算起，淘汰从**最后**上屏算起——常用的词不会被误删。
      *
      * 每次上屏后调用，幂等：无待晋升/待淘汰时返回原表。
@@ -291,8 +297,6 @@ internal object AutoWordStore {
         val nextFixed = LinkedHashMap<String, LinkedHashMap<String, Int>>()
         for ((code, words) in fixed) nextFixed[code] = LinkedHashMap(words)
         for (entry in promoted) {
-            val codeWords = nextFixed[entry.code]
-            if (codeWords == null && nextFixed.size >= MAX_FIXED_CODES) continue
             nextFixed.getOrPut(entry.code) { LinkedHashMap() }[entry.word] = promoteWeight(entry.count)
         }
         return Promotion(nextTemp, nextFixed, promoted)

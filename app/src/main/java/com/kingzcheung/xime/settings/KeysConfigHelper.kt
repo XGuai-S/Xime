@@ -612,11 +612,9 @@ object KeysConfigHelper {
 
     /** 当前生效的组合键表（只读）。 */
     fun getKeyboardCombos(): List<KeyboardCombo> = keyboardCombos
-
     /** 当前生效的自动造词配置（只读）；未配置时用默认值。 */
     fun getAutoWordConfig(): AutoWordConfig =
         mergedConfigCache?.autoWord ?: AutoWordConfig()
-
     /**
      * 按输入编码匹配组合键：返回编码与输入**完全相等**的条目。
      *
@@ -1222,15 +1220,16 @@ object KeysConfigHelper {
         longPressMs = normalizeLongPressMs(
             tiered(custom?.longPressMs, builtIn?.longPressMs, KeyboardGesturesConfig.DEFAULT_LONG_PRESS_MS)
         ),
+        zLongPressReverse = tiered(
+            custom?.zLongPressReverse, builtIn?.zLongPressReverse, false,
+        ),
     )
-
     /** 夹取长按判定时间到合理区间：配置写 0 或负数会让点按被误判成长按，必须兜住。 */
     internal fun normalizeLongPressMs(value: Int): Int =
         value.coerceIn(
             KeyboardGesturesConfig.MIN_LONG_PRESS_MS,
             KeyboardGesturesConfig.MAX_LONG_PRESS_MS,
         )
-
     /**
      * 兼容测试入口：从 YAML 文本中提取 keyboard.gestures 段并填充代码默认值。
      * > 合并（custom → builtIn → 默认）请使用 [parseKeyboardGesturesYamlPartial]。
@@ -1241,9 +1240,9 @@ object KeysConfigHelper {
             longPressMs = normalizeLongPressMs(
                 partial.longPressMs ?: KeyboardGesturesConfig.DEFAULT_LONG_PRESS_MS
             ),
+            zLongPressReverse = partial.zLongPressReverse ?: false,
         )
     }
-
     /** 从 YAML 文本中提取 keyboard.gestures 段（仅显式字段非 null）。 */
     private fun parseKeyboardGesturesYamlPartial(yamlText: String): KeyboardGesturesPartial? {
         return try {
@@ -1251,13 +1250,29 @@ object KeysConfigHelper {
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val gesturesNode = keyboardNode.opt<YamlMap>("gestures") ?: return null
             var longPressMs: Int? = null
+            var zLongPressReverse: Boolean? = null
             for ((kNode, vNode) in gesturesNode.entries) {
-                if (kNode.content != "long_press_ms") continue
-                val value = (vNode as? YamlScalar)?.content ?: continue
-                longPressMs = value.toIntOrNull()
+                when (kNode.content) {
+                    "long_press_ms" -> {
+                        val value = (vNode as? YamlScalar)?.content ?: continue
+                        longPressMs = value.toIntOrNull()
+                    }
+                    "z_long_press_reverse" -> {
+                        val value = (vNode as? YamlScalar)?.content ?: continue
+                        zLongPressReverse = when (value.trim().lowercase()) {
+                            "true", "1", "yes" -> true
+                            "false", "0", "no" -> false
+                            else -> null
+                        }
+                    }
+                }
             }
-            if (longPressMs == null) return null
-            KeyboardGesturesPartial(longPressMs = longPressMs)
+            // 只配置了其中一个字段也要生效（long_press_ms 未配置时用代码默认值）
+            if (longPressMs == null && zLongPressReverse == null) return null
+            KeyboardGesturesPartial(
+                longPressMs = longPressMs,
+                zLongPressReverse = zLongPressReverse,
+            )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse keyboard.gestures", e)
             null

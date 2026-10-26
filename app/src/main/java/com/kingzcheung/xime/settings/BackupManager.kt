@@ -94,11 +94,40 @@ object BackupManager {
             if (result.ok) {
                 // 上传成功即一次完整备份，刷新卡片状态
                 SettingsPreferences.setLastBackupAt(context, System.currentTimeMillis())
+                // 按 xime.yaml backup.keep_count 清理远端旧备份，只保留最近 N 份。
+                // 失败不影响本次备份结果（仅记日志）——清理是维护性动作，不让它
+                // 反过来把「备份成功」变成失败。
+                pruneRemoteBackups(context, plugin)
                 if (dictSnapshotNote != null) result.copy(message = dictSnapshotNote) else result
             } else result
         } finally {
             archive.delete()
         }
+    }
+
+    /**
+     * 清理远端备份目录，只保留最近 [BackupConfig.keepCount] 份（含刚上传的）。
+     *
+     * listBackups 已按创建时间**倒序**返回（WebDAV 插件按 createdAt 排序），
+     * 直接取前 N 个保留、其余逐个 [deleteBackup]。远端不提供时间戳（createdAt=0）
+     * 时也按列表顺序保留前 N——此时顺序即插件返回顺序，与展示一致。
+     *
+     * keepCount <= 0 表示不清理（保留全部历史）。
+     */
+    private suspend fun pruneRemoteBackups(context: Context, plugin: BackupPlugin) {
+        val keepCount = KeysConfigHelper.loadBackupConfig(context).keepCount
+        if (keepCount <= 0) return
+        val remote = plugin.listBackups() ?: return
+        if (remote.size <= keepCount) return
+        val toDelete = remote.drop(keepCount) // 保留前 keepCount 个（最新），删后面更旧的
+        for (entry in toDelete) {
+            val ok = runCatching { plugin.deleteBackup(entry.id) }.getOrDefault(false)
+            Log.i(
+                TAG,
+                "Backup: 清理旧备份 ${entry.name}（id=${entry.id}）= ${if (ok) "成功" else "失败"} 保留${keepCount}份"
+            )
+        }
+        Log.i(TAG, "Backup: 远端清理完成，保留最近 $keepCount 份，删除 ${toDelete.size} 份")
     }
 
     /** 列出远端备份条目（透传插件；失败返回 null）。 */

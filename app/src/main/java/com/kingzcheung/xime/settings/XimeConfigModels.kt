@@ -280,14 +280,23 @@ data class KeyboardCandidatesConfig(
  */
 data class KeyboardGesturesConfig(
     val longPressMs: Int = DEFAULT_LONG_PRESS_MS,
+    /**
+     * 长按 z 键反查单字（小鹤音形官网「万能键」语义：z 键上档为反引号 `，长按 z 进入反查）。
+     *
+     * - true：长按 z 键 = 注入 rime 反查引导符 `` ` ``，随后输入的形码/音码走
+     *   `reverse_lookup_translator` 反查（候选显示对应音码/形码）。z 键点按仍输入 z、
+     *   上滑仍出 `*`，互不干扰；长按不再弹「z/Z」大小写气泡。
+     * - false（默认）：保持原行为（长按 z 弹大小写气泡）。
+     *
+     * 反查需方案 schema 配置 `reverse_lookup`（XGuai_flypy 已内置）。
+     */
+    val zLongPressReverse: Boolean = false,
 ) {
     companion object {
         /** 默认长按判定时间（毫秒）：比系统 400ms 更灵敏，同时仍能区分「点一下」与「按住」。 */
         const val DEFAULT_LONG_PRESS_MS: Int = 300
-
         /** 允许的下限：再小会把正常点按误判成长按。 */
         const val MIN_LONG_PRESS_MS: Int = 120
-
         /** 允许的上限：再大长按会显得没反应。 */
         const val MAX_LONG_PRESS_MS: Int = 1500
     }
@@ -350,6 +359,8 @@ internal data class KeyboardCandidatesPartial(
 
 internal data class KeyboardGesturesPartial(
     val longPressMs: Int? = null,
+    /** 长按 z 反查开关（xime.yaml keyboard.gestures.z_long_press_reverse）。 */
+    val zLongPressReverse: Boolean? = null,
 )
 
 /** 字段级一路 fallback：custom → builtIn → 代码默认值。 */
@@ -387,7 +398,6 @@ data class XimeConfig(
     @SerialName("auto_word")
     val autoWord: AutoWordConfig? = null,
 )
-
 /**
  * 自动造词配置，从 xime.yaml `auto_word` 段加载。
  *
@@ -398,9 +408,9 @@ data class AutoWordConfig(
     /** 是否启用自动造词（上屏词收录与词频统计）。默认 true。 */
     @SerialName("enabled")
     val enabled: Boolean = true,
-    /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 30。 */
+    /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 7。 */
     @SerialName("promote_days")
-    val promoteDays: Int = 30,
+    val promoteDays: Int = 7,
     /** 窗口内需达到的上屏次数。默认 2。 */
     @SerialName("promote_count")
     val promoteCount: Int = 2,
@@ -432,6 +442,45 @@ data class AutoWordConfig(
      */
     @SerialName("avoid_auto_select")
     val avoidAutoSelect: Boolean = true,
+    /**
+     * ⚠️ 已停用（保留字段仅兼容解析旧配置）：候选排序不再按词频重排。
+     *
+     * 自 3.2.13 起候选顺序完全由「手动排序表（[sortByManual]）+ rime 引擎原生权重」
+     * 控制；本表（word_freq.txt）仅作上屏记录，并双写一份 `word_freq.yaml` 到 rime
+     * 根目录供外部读取，不参与候选显示。配置里写 `sort_by_freq: false` 没有任何效果。
+     */
+    @SerialName("sort_by_freq")
+    val sortByFreq: Boolean = true,
+    /**
+     * 候选排序是否应用手动排序表（candidate_order.txt 用户拖拽排定的全序）。
+     *
+     * - true（默认）：手动排过的编码按用户排定顺序显示；
+     * - false：忽略手动排序表（词频重排 [sortByFreq] 仍生效）。
+     *
+     * 两者都 false = 完全退回 rime 引擎原生排序。
+     */
+    @SerialName("sort_by_manual")
+    val sortByManual: Boolean = true,
+    /**
+     * 不参与自动造词的词典名列表（词典文件名去掉 `.dict.yaml` 后缀，如 `XGuai_user`）。
+     *
+     * 这些词典的词条上屏时**不进临时/固定词库、不参与组合生词**（自动造词链整体跳过），
+     * 但仍是方案词典的正常候选（能打出来、能手动排序）。
+     *
+     * 等效于在词典表头声明 `# no_auto_word: true`（本配置为全局统一开关，优先级更高）。
+     */
+    @SerialName("no_auto_word_dicts")
+    val noAutoWordDicts: List<String> = emptyList(),
+    /**
+     * 不参与上屏词频统计的词典名列表（词典文件名去掉 `.dict.yaml` 后缀，如 `XGuai_user`）。
+     *
+     * 这些词典的词条上屏时**不进 word_freq.txt / word_freq.yaml**（词频表不收录），
+     * 但仍是方案词典的正常候选，且**不受 [noAutoWordDicts] 影响**（仍可自动造词）。
+     *
+     * 等效于在词典表头声明 `# nofreq: true`（本配置为全局统一开关，优先级更高）。
+     */
+    @SerialName("no_freq_dicts")
+    val noFreqDicts: List<String> = emptyList(),
 )
 
 /**
@@ -476,6 +525,16 @@ data class BackupConfig(
      */
     @SerialName("auto_interval_hours")
     val autoIntervalHours: Int = 12,
+    /**
+     * 云端备份保留份数。默认 2：远端备份目录只保留最近 2 份（含刚上传的），
+     * 更旧的自动删除，避免坚果云等 WebDAV 目录文件越积越多。
+     *
+     * - 仅对**云端备份**生效（本地导出不受影响）；
+     * - 设为 0 或负数 = 不清理（保留全部历史）；
+     * - 手动「立即备份」与自动备份同样生效。
+     */
+    @SerialName("keep_count")
+    val keepCount: Int = 2,
 )
 
 @Serializable

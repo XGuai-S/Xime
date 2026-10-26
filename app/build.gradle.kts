@@ -80,8 +80,8 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261019
-        versionName = "3.2.3"
+        versionCode = 20261105
+        versionName = "3.2.20"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

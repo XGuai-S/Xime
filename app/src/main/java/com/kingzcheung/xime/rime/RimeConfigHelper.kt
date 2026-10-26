@@ -180,8 +180,13 @@ object RimeConfigHelper {
         }
 
         for (schemaId in enabledSchemas) {
-            if (!File(buildDir, "$schemaId.prism.bin").exists() &&
-                !File(buildDir, "$schemaId.schema.yaml").exists()) {
+            // 关键：schema.yaml 是 assets 原样拷贝的文本文件（非编译产物），
+            // 不能作为「已部署」标志；必须以编译产物 prism.bin + table.bin 为准。
+            // （历史 bug：只看「schema.yaml 存在」就判定完成，导致 deploy 被短路跳过，
+            //  build 里永远没有 .bin → 引擎无词库 → engine=0 打不出字。）
+            val schemaArtifact = File(buildDir, "$schemaId.prism.bin")
+            val tableArtifact = File(buildDir, "$schemaId.table.bin")
+            if (!schemaArtifact.exists() || !tableArtifact.exists()) {
                 return false
             }
         }

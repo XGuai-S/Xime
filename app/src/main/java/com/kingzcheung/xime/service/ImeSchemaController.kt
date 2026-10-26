@@ -58,18 +58,19 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 // 注意：本类有三个部署入口（reloadConfig / deploy / deploySchema），都要同步。
                 RimeUserFileSync.sync(service)
                 
-                val userDataDir = File(service.filesDir, "rime")
-                
-                // 清空 build 目录，强制 Rime 全量重新编译
-                val buildDir = File(userDataDir, "build")
-                if (buildDir.exists()) {
-                    buildDir.deleteRecursively()
+                // 统一走 ensureDeployment（增量优先 + 失败才清空重建 + 成功才标记）。
+                // 🔴 历史 bug：直接 deleteRecursively() 清空 build + deploy() 失败也标记
+                // 「已部署完成」→ 私有 build 的 .bin 被毁且永不重建 → 下次启动
+                // isDeploymentComplete 误判已部署而跳过编译 → engine=0 打不出字。
+                // ensureDeployment 内部：hash 一致则跳过；build 存在则增量维护；
+                // 增量失败才清空全量；且仅部署成功才 storeDeploymentHash + done=true。
+                val deployed = RimeConfigHelper.ensureDeployment(service)
+                if (!deployed) {
+                    FileLogger.e(
+                        XimeInputMethodService.TAG,
+                        "reloadConfig: ensureDeployment failed, keeping previous build artifacts"
+                    )
                 }
-                
-                service.rimeEngine.deploy()
-                // 部署后记录 hash 与完成标记，否则下次启动会因 hash 不一致再次全量编译
-                RimeConfigHelper.storeDeploymentHash(service)
-                SettingsPreferences.setDeploymentDone(service, true)
                 
                 // 部署完成后重新加载配置（Rime 可能在部署过程中改写文件）
                 KeysConfigHelper.loadConfig(service)
@@ -109,10 +110,17 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
         try {
             // 同 reloadConfig：部署前先把可见目录里的用户修改写回工作目录
             RimeUserFileSync.sync(service)
-            service.rimeEngine.deploy()
-            // 部署后记录 hash 与完成标记，避免下次启动再次全量编译
-            RimeConfigHelper.storeDeploymentHash(service)
-            SettingsPreferences.setDeploymentDone(service, true)
+            // 统一走 ensureDeployment：增量优先、失败才清空、成功才标记 done/hash。
+            // （历史同 reloadConfig：直接 deploy() 失败也标记「已部署完成」，下次启动
+            //  误判已部署跳过编译 → 私有 build 无 .bin → engine=0 打不出字。）
+            val deployed = RimeConfigHelper.ensureDeployment(service)
+            if (!deployed) {
+                FileLogger.e(
+                    XimeInputMethodService.TAG,
+                    "deploySchema: ensureDeployment failed, keeping previous build artifacts"
+                )
+                return
+            }
             val savedSchema = SettingsPreferences.getCurrentSchema(service)
             applyPageSizeSetting(savedSchema)
             service.rimeEngine.switchSchema(savedSchema)
@@ -342,10 +350,6 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 service.notifyDeploymentStatus(false, "")
             }
         }
-    }
-    
-    private fun updateKeyboardHeightPreview(heightDp: Int) {
-        service.keyboardContainer.updateHeight(heightDp)
     }
     
     internal fun setKeyboardHeight(heightDp: Int) {

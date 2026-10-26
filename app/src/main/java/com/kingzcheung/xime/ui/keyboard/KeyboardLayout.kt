@@ -1820,11 +1820,16 @@ fun KeyboardRowWithConfig(
             // 长按选项
             val longPressConfig = KeysConfigHelper.getKeyGesture(key, isAsciiMode)?.longPress
             val longPressDisplay = longPressConfig?.display ?: DisplayMode.KEY
-            val longPressLabels = if (longPressDisplay == DisplayMode.BUBBLE) {
+            // 长按 z 反查单字（xime.yaml keyboard.gestures.z_long_press_reverse）：
+            // 开启后长按 z 直接注入 rime 反查引导符 `` ` ``（走 reverse_lookup_translator，
+            // 候选显示音码/形码），不再弹「z/Z」大小写气泡。z 点按仍输入 z、上滑仍出 *。
+            val zReverseActive = !isAsciiMode && key == "z" &&
+                KeysConfigHelper.getKeyboardGestures().zLongPressReverse
+            val longPressLabels = if (zReverseActive) null else if (longPressDisplay == DisplayMode.BUBBLE) {
                 longPressConfig?.let { KeysConfigHelper.longPressDisplayItems(it) }
                     ?.ifEmpty { null }
             } else null
-            val longPressGestureMap = if (longPressDisplay == DisplayMode.BUBBLE) {
+            val longPressGestureMap = if (zReverseActive) null else if (longPressDisplay == DisplayMode.BUBBLE) {
                 longPressConfig?.let { KeysConfigHelper.longPressActionMap(it) }
             } else null
 
@@ -1903,6 +1908,15 @@ fun KeyboardRowWithConfig(
                 dispatchLongPressSelection(
                     selectedLabel, longPressGestureMap, onKeyPress, onCommitText, onGestureAction)
             } }
+            // 长按 z 反查：注入 rime 反查引导符（反引号 ` ），走 reverse_lookup_translator。
+            // 对齐小鹤音形官网「万能键」语义：z 键上档为反引号 `，长按 z 进入反查，
+            // 随后输入形码/音码，候选显示对应音码/形码。
+            // 反查词典由 schema reverse_lookup.dictionary 指定（XGuai_flypy 主表已并入
+            // XGuai_reverse 等全部码表，编译出 reverse.bin）；用户可自定义主表 import_tables
+            // 里的反查词典文件。走 onKeyPress 字符串路由（与直接按键同管道）。
+            val onZReverseLongClick: (() -> Unit)? = remember(key, zReverseActive, onKeyPress) {
+                if (zReverseActive) ({ onKeyPress("`") }) else null
+            }
 
             if (compactButton) {
                 SwipeableKeyButtonLandscape(
@@ -1924,6 +1938,7 @@ fun KeyboardRowWithConfig(
                     onSwipeStateChange = onSwipeStateChange,
                     onPress = onPress,
                     onRelease = onRelease,
+                    onLongClick = onZReverseLongClick,
                     onLongPressSelect = onLongPressSelect,
                     longPressItems = longPressLabels,
                     fontSize = config.fontSize,
@@ -1954,6 +1969,7 @@ fun KeyboardRowWithConfig(
                 onSwipeStateChange = onSwipeStateChange,
                 onPress = onPress,
                 onRelease = onRelease,
+                onLongClick = onZReverseLongClick,
                 onLongPressSelect = onLongPressSelect,
                 longPressItems = longPressLabels,
                 fontSize = config.fontSize,
@@ -2276,6 +2292,8 @@ fun SwipeableKeyButtonLandscape(
     swipeLeftRepeats: Boolean = false,
     onPress: (() -> Unit)? = null,
     onRelease: (() -> Unit)? = null,
+    /** 长按直接回调（非气泡）：仅 [longPressItems] 为空时生效，语义同 [SwipeableKeyButton.onLongClick]。 */
+    onLongClick: (() -> Unit)? = null,
     onLongPressSelect: ((String) -> Unit)? = null,
     longPressItems: List<String>? = null,
     fontSize: androidx.compose.ui.unit.TextUnit = androidx.compose.ui.unit.TextUnit.Unspecified,
@@ -2307,6 +2325,7 @@ fun SwipeableKeyButtonLandscape(
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnPress by rememberUpdatedState(onPress)
     val currentOnRelease by rememberUpdatedState(onRelease)
+    val currentOnLongClick by rememberUpdatedState(onLongClick)
     val currentOnLongPressSelect by rememberUpdatedState(onLongPressSelect)
     val currentLongPressItems by rememberUpdatedState(longPressItems)
     val currentOnSwipeStateChange by rememberUpdatedState(onSwipeStateChange)
@@ -2339,7 +2358,7 @@ fun SwipeableKeyButtonLandscape(
         modifier = modifier
             .fillMaxHeight()
             .fillMaxWidth()
-            .pointerInput(currentText, currentLongPressItems.isNullOrEmpty(), currentOnLongPressSelect != null) {
+            .pointerInput(currentText, currentLongPressItems.isNullOrEmpty(), currentOnLongPressSelect != null, currentOnLongClick != null) {
                 if (currentLongPressItems.isNullOrEmpty() || currentOnLongPressSelect == null) {
                     detectTapGestures(
                         onPress = {
@@ -2353,7 +2372,13 @@ fun SwipeableKeyButtonLandscape(
                         },
                         onTap = {
                             if (!dragActivated && !hasTriggeredSwipeUp && !hasTriggeredSwipeDown) currentOnClick()
-                        }
+                        },
+                        onLongPress = currentOnLongClick?.let {
+                            {
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                it()
+                            }
+                        },
                     )
                 } else {
                     awaitEachGesture {
