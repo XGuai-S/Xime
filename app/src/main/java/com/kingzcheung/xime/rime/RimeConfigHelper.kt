@@ -63,14 +63,29 @@ object RimeConfigHelper {
      */
     fun ensureDeployment(context: Context): Boolean {
         synchronized(deploymentLock) {
+            val buildDir = File(context.filesDir, "rime/build")
             val currentHash = computeDeploymentHash(context)
-            if (currentHash.isNotEmpty() && currentHash == SettingsPreferences.getDeploymentHash(context)) {
+            // 关键：hash 只覆盖源文件，不覆盖 build 产物。产物被
+            // isBrokenBuildArtifact 判损坏删除后源文件并未变化 → hash 仍一致，
+            // 若此处直接 return true，则 table.bin/prism.bin 永远不会被重建，
+            // 表现为「部署完成但词库为空、候选恒空、engine=0 打不出字」。
+            // 因此 hash 一致时必须再验产物完整性，缺产物则强制重建。
+            val artifactsComplete = hasCompleteBuildArtifacts(context)
+            if (currentHash.isNotEmpty() &&
+                currentHash == SettingsPreferences.getDeploymentHash(context) &&
+                artifactsComplete
+            ) {
                 SettingsPreferences.setDeploymentDone(context, true)
                 return true
             }
-            Log.i(TAG, "Deployment hash mismatch or missing")
-            val buildDir = File(context.filesDir, "rime/build")
-            val buildExists = buildDir.exists() && buildDir.listFiles()?.isNotEmpty() == true
+            if (!artifactsComplete) {
+                Log.i(TAG, "Build artifacts incomplete, forcing deployment")
+                FileLogger.w(TAG, "ensureDeployment: build artifacts incomplete, forcing re-deploy")
+            } else {
+                Log.i(TAG, "Deployment hash mismatch or missing")
+            }
+            val buildExists = buildDir.exists() && buildDir.listFiles()?.isNotEmpty() == true &&
+                artifactsComplete
             val engine = RimeEngine.getInstance()
             val deployed: Boolean
             if (buildExists) {
@@ -117,6 +132,27 @@ object RimeConfigHelper {
         return Pair(rimeDir.absolutePath, rimeDir.absolutePath)
     }
     
+    /**
+     * build 产物是否齐全（每个启用方案都必须有 magic 合法的 prism.bin + table.bin）。
+     *
+     * 与 [isDeploymentComplete] 的产物段一致，但**不修改任何文件**、不读 hash，
+     * 供 [ensureDeployment] 在「hash 一致」捷径前做最后一道确认。
+     * 缺任一产物即视为未部署完成，必须重新部署——否则被删掉的产物无人重建。
+     */
+    internal fun hasCompleteBuildArtifacts(context: Context): Boolean {
+        val buildDir = File(context.filesDir, "rime/build")
+        if (!buildDir.isDirectory) return false
+        val enabledSchemas = SchemaManager.getEnabledSchemas(context)
+        if (enabledSchemas.isEmpty()) return false
+        for (schemaId in enabledSchemas) {
+            val prism = File(buildDir, "$schemaId.prism.bin")
+            val table = File(buildDir, "$schemaId.table.bin")
+            if (!prism.isFile || !table.isFile) return false
+            if (isBrokenBuildArtifact(prism) || isBrokenBuildArtifact(table)) return false
+        }
+        return true
+    }
+
     fun storeDeploymentHash(context: Context) {
         val hash = computeDeploymentHash(context)
         if (hash.isNotEmpty()) {
