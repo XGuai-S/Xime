@@ -14,11 +14,14 @@ import org.junit.Test
  */
 class SchemeCodeIndexTest {
 
-    /** 真实小鹤音形单字条目取码结果（最短且长度 ≥ 2）。 */
+    /**
+     * 真实小鹤音形单字满四码取码结果（composeCodes 的 charCodes 参数要求
+     * 单字 → 满四码列表，与 buildCharCodes 的返回值类型一致）。
+     */
     private val charCodes = mapOf(
-        "现" to "xm", "在" to "zdut", "目" to "mu", "录" to "lue",
-        "高" to "gc", "低" to "dir", "漂" to "pnd", "亮" to "llw",
-        "输" to "uui", "入" to "rup", "法" to "fa",
+        "现" to listOf("xm"), "在" to listOf("zdut"), "目" to listOf("mu"), "录" to listOf("lue"),
+        "高" to listOf("gc"), "低" to listOf("dir"), "漂" to listOf("pnd"), "亮" to listOf("llw"),
+        "输" to listOf("uui"), "入" to listOf("rup"), "法" to listOf("fa"),
     )
 
     @Test
@@ -70,60 +73,59 @@ class SchemeCodeIndexTest {
     }
 
     @Test
-    fun `单字码优先取最短且长度不小于二的码`() {
+    fun `单字码按字典序取满四码列表`() {
+        // buildCharCodes 只收满四码（FULL_CODE_LENGTH=4）的单字条目
         val built = SchemeCodeIndex.buildCharCodes(
             sequenceOf(
-                "在" to "z",
                 "在" to "zdut",
-                "可" to "k",
+                "在" to "zdub",
                 "可" to "kedk",
-                "现" to "xm",
-                "现" to "xmw",
                 "现" to "xmwe",
+                "现" to "xmwd",
             )
         )
-        assertEquals("zdut", built["在"])
-        assertEquals("kedk", built["可"])
-        assertEquals("xm", built["现"])
+        // 满四码按字典序稳定排序，取前 MAX_FULL_CODES_PER_CHAR 个
+        assertEquals(listOf("zdub", "zdut"), built["在"])
+        assertEquals(listOf("kedk"), built["可"])
+        assertEquals(listOf("xmwd", "xmwe"), built["现"])
     }
 
     @Test
-    fun `只有单码的字用该码`() {
+    fun `不足四码的字不收录`() {
+        // 1 码/2 码均不满足 FULL_CODE_LENGTH=4，建不出字码
         val built = SchemeCodeIndex.buildCharCodes(
             sequenceOf(
                 "了" to "l",
-                "目" to "m",
+                "目" to "mu",
             )
         )
-        assertEquals("l", built["了"])
-        assertEquals("m", built["目"])
+        assertNull(built["了"])
+        assertNull(built["目"])
     }
 
     @Test
-    fun `非字母编码与空词条被忽略`() {
+    fun `非字母编码与空词条与不足四码被忽略`() {
         val built = SchemeCodeIndex.buildCharCodes(
             sequenceOf(
-                "" to "xm",
-                "现" to "x m",
-                "在" to "",
-                "目" to "mu",
+                "" to "xm",       // 空词条
+                "现" to "x m",    // 含空格非字母
+                "在" to "",       // 空码
+                "目" to "mu",     // 不足四码
             )
         )
         assertNull(built["现"])
         assertNull(built["在"])
-        assertEquals("mu", built["目"])
+        assertNull(built["目"])
     }
 
     @Test
     fun `单字条目建码后可直接生成两字词编码`() {
         val built = SchemeCodeIndex.buildCharCodes(
             sequenceOf(
-                "现" to "xm",
-                "在" to "z",
+                "现" to "xmwe",
                 "在" to "zdut",
-                "目" to "m",
-                "目" to "mu",
-                "录" to "lue",
+                "目" to "mubk",
+                "录" to "luek",
             )
         )
         assertEquals(listOf("xmzd"), SchemeCodeIndex.composeCodes("现在", built))

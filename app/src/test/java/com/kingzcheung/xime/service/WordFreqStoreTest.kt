@@ -11,20 +11,21 @@ class WordFreqStoreTest {
     // ── isCountableWord ──
 
     @Test
-    fun `双字以上纯词可计入`() {
+    fun `汉字词可计入_含单字与连续汉字串`() {
         assertTrue(WordFreqStore.isCountableWord("今天"))
         assertTrue(WordFreqStore.isCountableWord("天气不错"))
-        assertTrue(WordFreqStore.isCountableWord("hello"))
+        // 单字汉字也计入（词频表是上屏历史镜像，只按字面记录）
+        assertTrue(WordFreqStore.isCountableWord("今"))
     }
 
     @Test
-    fun `单字标点空白超长不可计入`() {
-        assertFalse(WordFreqStore.isCountableWord("今"))
-        assertFalse(WordFreqStore.isCountableWord("，"))
-        assertFalse(WordFreqStore.isCountableWord(" "))
-        assertFalse(WordFreqStore.isCountableWord(""))
-        assertFalse(WordFreqStore.isCountableWord("a"))
-        assertFalse(WordFreqStore.isCountableWord("123456789012345678901234567890123")) // 33 字
+    fun `非汉字与空串超长不可计入`() {
+        // 单字汉字 "今" 现在计入，不再列入不可计入项
+        assertFalse(WordFreqStore.isCountableWord("，")) // 标点
+        assertFalse(WordFreqStore.isCountableWord(" ")) // 空白
+        assertFalse(WordFreqStore.isCountableWord("")) // 空串
+        assertFalse(WordFreqStore.isCountableWord("a")) // 英文
+        assertFalse(WordFreqStore.isCountableWord("123456789012345678901234567890123")) // 33 字数字串
     }
 
     @Test
@@ -77,8 +78,10 @@ class WordFreqStoreTest {
     @Test
     fun `不可计入的词不改表`() {
         val table = emptyMap<String, Map<String, Int>>()
-        assertTrue(WordFreqStore.withCommit(table, "a", "单") === table)
+        // 编码为空：不记录（无法回查）
         assertTrue(WordFreqStore.withCommit(table, "", "今天") === table)
+        // 非汉字内容（含空白/标点/英文/数字）不计，返回原表
+        assertTrue(WordFreqStore.withCommit(table, "a", "abc") === table)
     }
 
     // ── reorder ──

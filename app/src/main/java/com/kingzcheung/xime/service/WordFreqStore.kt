@@ -85,11 +85,11 @@ internal object WordFreqStore {
         return table
     }
 
-    /** 序列化为文本（稳定顺序：按编码首次出现顺序，编码内按频数降序）。 */
+    /** 序列化为文本（稳定顺序：按编码字母序，编码内按频数降序）。 */
     fun serialize(table: Map<String, Map<String, Int>>): String {
         val sb = StringBuilder()
         sb.append(HEADER).append('\n')
-        for ((code, words) in table) {
+        for ((code, words) in table.toSortedMap()) {
             for ((word, count) in words.entries.sortedByDescending { it.value }) {
                 sb.append(word).append('\t').append(code).append('\t').append(count).append('\n')
             }
@@ -243,7 +243,7 @@ internal object WordFreqStore {
             sb.append("sort: by_weight\n")
             sb.append("use_preset_vocabulary: false\n")
             sb.append("...\n")
-            for ((code, words) in table) {
+            for ((code, words) in table.toSortedMap()) {
                 for ((word, count) in words.entries.sortedByDescending { it.value }) {
                     sb.append(word).append('\t').append(code).append('\t').append(count).append('\n')
                 }

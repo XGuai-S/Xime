@@ -240,10 +240,9 @@ fun CandidateBar(
             displayCandidates = taken
             displayComments = s.comments
             displayImages = emptyList()
-
-            // 不加「更多候选」按钮：横排数量由「每页候选词数」设置控制，
-            // 超出屏宽的部分靠横向滑动查看（canScrollForward 仅影响右侧宽度预留）。
-            hasAnyMore = false
+            // 展开候选按钮：候选数超出本页（每页候选词数设置）或横排未看到末尾时
+            // 显示「更多候选」箭头，点击进入展开候选面板查看跨页全量候选。
+            hasAnyMore = s.hasMore || candidateListState.canScrollForward
             showLeftIcon = false
             displayAssociation = remember(s.associationCandidates, taken, s.inputText, textMeasurer) {
                 if (taken.isEmpty()) {
