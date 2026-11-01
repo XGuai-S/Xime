@@ -256,10 +256,20 @@ fun CandidateBar(
                     }
                     val leftPx = with(density) { rowPaddingPx + 32.dp.toPx() }
                     val rowWidthPx = screenWidthPx - leftPx - rightSidePx
-                    val regularWidthPx = taken.sumOf { c ->
-                        measureText(c).toDouble() + itemPaddingPx
-                    }.toFloat()
                     val dividerWidthPx = with(density) { 9.dp.toPx() }
+                    // 候选横向 LazyRow 可滚动，可见的只有前几条；联想只填剩余空间。
+                    // 全量 sumOf 测量 50 条候选（pageSize 设置大时）在组合期主线程做
+                    // 50 次文本测量是候选栏卡顿的直接原因——改为累计测量，候选宽超出
+                    // 行宽即停（剩余空间已为 0，联想放不下，无需再测）。
+                    var regularWidthPx = 0f
+                    for (c in taken) {
+                        val w = measureText(c) + itemPaddingPx
+                        if (regularWidthPx + w >= rowWidthPx - dividerWidthPx) {
+                            regularWidthPx = rowWidthPx - dividerWidthPx
+                            break
+                        }
+                        regularWidthPx += w
+                    }
                     val availablePx = rowWidthPx - regularWidthPx - dividerWidthPx
 
                     var used = 0f

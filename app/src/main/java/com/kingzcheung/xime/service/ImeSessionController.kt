@@ -94,9 +94,19 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 标记输入框存在 composing 区域：endComposingInputBox 仅在此标记下执行 setComposingText("") 清空，
         // 否则该调用会在光标处插入空串，光标处有选中文字时等于删除选区。
         service.markInputBoxComposing()
+        val cursorArg = if (caretOffset < 0 || caretOffset >= displayText.length) 1 else caretOffset + 1
+        // 内容与光标均未变时跳过重复 setComposingText：候选首词显示在输入框模式下
+        // 每次按键都会 sync，但候选首词没变化（如继续打码但首候选相同）时 IPC 是纯浪费，
+        // 会卡住主线程（跨进程 Binder 到宿主）。内容变化才真正写入。
+        if (service.lastInputBoxComposingText == displayText &&
+            service.lastInputBoxComposingCaret == cursorArg
+        ) {
+            return
+        }
+        service.lastInputBoxComposingText = displayText
+        service.lastInputBoxComposingCaret = cursorArg
         ic.beginBatchEdit()
         try {
-            val cursorArg = if (caretOffset < 0 || caretOffset >= displayText.length) 1 else caretOffset + 1
             ic.setComposingText(displayText, cursorArg)
         } finally {
             ic.endBatchEdit()

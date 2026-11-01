@@ -2853,6 +2853,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * Android 无法查询宿主编辑器的 composing 状态，由写入点主动标记。
      */
     private var inputBoxComposingActive = false
+    /** 上次写入输入框 composing 区的文本与光标参数：内容未变时跳过重复 setComposingText IPC。 */
+    internal var lastInputBoxComposingText: String? = null
+    internal var lastInputBoxComposingCaret: Int = Int.MIN_VALUE
 
     /** 标记刚向输入框写入了 composing 文本（showInputBoxComposition / 语音 partial）。 */
     internal fun markInputBoxComposing() {
@@ -2878,6 +2881,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
         }
         inputBoxComposingActive = false
+        lastInputBoxComposingText = null
+        lastInputBoxComposingCaret = Int.MIN_VALUE
     }
 
     /**
