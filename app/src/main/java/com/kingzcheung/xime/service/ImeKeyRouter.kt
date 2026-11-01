@@ -18,6 +18,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+
+
+/** 热路径预编译：避免每键重复编译正则与分配常量集合。 */
+private val DIGIT_REGEX = Regex("[0-9]")
+private val LETTER_REGEX = Regex("[a-zA-Z]")
+private val CALC_OP_KEYS: Set<String> = setOf("+", "-", "*", "/", ".")
 /**
  * 按键输入路由。
  *
@@ -199,7 +205,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val pendingEnglish = candState.pendingEnglishText
 
         // 非计算器键清除计算器状态
-        if (!key.matches(Regex("[0-9]")) && key !in listOf("+", "-", "*", "/", ".")) {
+        if (!key.matches(DIGIT_REGEX) && key !in CALC_OP_KEYS) {
             if (service.calculatorEngine.isActive() || service.calculatorEngine.getCandidate() != null) {
                 service.calculatorEngine.clear()
                 updateCalculatorCandidates()
@@ -207,8 +213,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         }
 
         // 计算器模式：追踪数字、运算符和小数点
-        if (key.matches(Regex("[0-9]")) || key in listOf("+", "-", "*", "/", ".")) {
-            if (key.matches(Regex("[0-9]")) || key == ".") {
+        if (key.matches(DIGIT_REGEX) || key in CALC_OP_KEYS) {
+            if (key.matches(DIGIT_REGEX) || key == ".") {
                 service.calculatorEngine.handleDigit(key)
             } else {
                 service.calculatorEngine.handleOperator(key)
@@ -235,7 +241,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 字母键不进入此分支（即使 pendingEnglish 非空），需要继续积累编码
         // 英文模式（isAsciiMode）下非字母键（QWERTY 上滑的数字/符号、数字/符号面板）
         // 直接上屏，不进入 Rime 引擎与 pendingEnglish 累积（上滑字符即输即上）。
-        if ((isAsciiMode || pendingEnglish.isNotEmpty()) && !key.matches(Regex("[a-zA-Z]"))) {
+        if ((isAsciiMode || pendingEnglish.isNotEmpty()) && !key.matches(LETTER_REGEX)) {
             val finalKey = key
             withContext(Dispatchers.Main) {
                 // 直接上屏模式：pendingEnglish 对应字符已逐字落盘，只提交增量键值。
@@ -270,7 +276,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val char = key
         val keyCode = key.lowercase()[0].code
         val mask = if (isShifted) KeyEvent.META_SHIFT_ON else 0
-        val isLetter = key.matches(Regex("[a-zA-Z]"))
+        val isLetter = key.matches(LETTER_REGEX)
         val isShiftedChinese = isShifted && isChinese && isLetter
 
         // 非 ASCII 可打印字符（全角符号/中文标点）：直接上屏，不进入 Rime 引擎。
@@ -710,7 +716,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             }
             else -> {
                 if (key.length == 1) {
-                    val isLetter = key.matches(Regex("[a-zA-Z]"))
+                    val isLetter = key.matches(LETTER_REGEX)
                     val isChineseMode = !service.uiState.value.isAsciiMode
                     if (isLetter && isChineseMode) {
                         // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进面板输入框
@@ -804,11 +810,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * 真正拿到 RimeProcessResult 的调用点）。
      */
     private suspend fun refreshAfterKey(committedText: String?) {
-        val capturedInputText = service.rimeEngine.getInput()
-        val capturedCandidates = service.rimeEngine.getCandidatesWithComments()
-        val capturedIsAscii = service.rimeEngine.isAsciiMode()
-        val capturedHasNext = service.rimeEngine.hasNextPage()
-        val capturedHasPrev = service.rimeEngine.hasPrevPage()
+        // 一次锁内取完整快照（原 5 次独立 tryLock 会在锁竞争时各自静默返回默认值，
+        // 导致候选栏状态不一致/闪烁；合并后锁获取 5→1 次且快照自洽）。
+        val snapshot = service.rimeEngine.getProcessSnapshot()
+        val capturedInputText = snapshot.inputText
+        val capturedCandidates = snapshot.candidates
+        val capturedIsAscii = snapshot.isAsciiMode
+        val capturedHasNext = snapshot.hasNextPage
+        val capturedHasPrev = snapshot.hasPrevPage
         // 候选词变换（hotPath 插件能力）：内联刷新路径（无 RimeProcessResult），
         // key-processing 线程同步调用；ascii 场景不变换（调用点语义与 transformFor 一致）
         val transformed = if (capturedInputText.isNotEmpty() && !capturedIsAscii) {

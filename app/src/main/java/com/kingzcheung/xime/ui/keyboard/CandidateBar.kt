@@ -245,7 +245,11 @@ fun CandidateBar(
             hasAnyMore = s.hasMore || candidateListState.canScrollForward
             showLeftIcon = false
             displayAssociation = remember(s.associationCandidates, taken, s.inputText, textMeasurer) {
-                if (taken.isEmpty()) {
+                // 联想为空（绝大多数打字场景）时直接返回，跳过全部文本测量——
+                // 原先仍会进入 else 分支跑候选宽度累计循环，纯属浪费。
+                if (s.associationCandidates.isEmpty()) {
+                    emptyList()
+                } else if (taken.isEmpty()) {
                     s.associationCandidates.take(PredictionManager.MAX_ASSOCIATION_COUNT)
                 } else {
                     val measureText = { text: String ->

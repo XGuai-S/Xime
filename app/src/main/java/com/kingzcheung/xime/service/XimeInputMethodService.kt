@@ -2470,15 +2470,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         updateCursorUpdateMonitoring()
     }
 
+    /** 上次请求的 CURSOR_UPDATE 模式：未变化时不重复发 IPC。 */
+    private var lastCursorUpdateMode: Int = Int.MIN_VALUE
+
     /** 根据当前硬件键盘状态管理光标位置更新监听。 */
     private fun updateCursorUpdateMonitoring() {
-        currentInputConnection?.requestCursorUpdates(
-            if (hasHardwareKeyboard) {
-                InputConnection.CURSOR_UPDATE_MONITOR or InputConnection.CURSOR_UPDATE_IMMEDIATE
-            } else {
-                0
-            }
-        )
+        val mode = if (hasHardwareKeyboard) {
+            InputConnection.CURSOR_UPDATE_MONITOR or InputConnection.CURSOR_UPDATE_IMMEDIATE
+        } else {
+            0
+        }
+        // requestCursorUpdates 是跨进程 Binder 调用；每次键盘弹出都重发同一模式纯属浪费。
+        if (mode == lastCursorUpdateMode) return
+        lastCursorUpdateMode = mode
+        currentInputConnection?.requestCursorUpdates(mode)
     }
 
     private var anchorCoords = floatArrayOf(0f, 0f, 0f, 0f)
@@ -2648,9 +2653,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         updateCursorUpdateMonitoring()
     }
 
+    /** applyWindowBackground 上次应用的状态签名：主题/深色/紧凑/浮动均未变时跳过。 */
+    private var lastWindowBgSignature: String? = null
+
     internal fun applyWindowBackground() {
         val state = uiState.value
         val isDark = isDarkTheme()
+        // 主题、深浅、紧凑、浮动都没变时直接跳过：原先每次键盘弹出都重建 ColorDrawable、
+        // 重设导航栏颜色、setDecorFitsSystemWindows 并 requestApplyInsets（强制全树
+        // 重新分发 insets → relayout），是键盘弹出延迟感的来源之一。
+        val signature = "${state.themeId}|$isDark|${state.isCompact}|${state.isFloatingMode}"
+        if (signature == lastWindowBgSignature) return
+        lastWindowBgSignature = signature
         try {
             val theme = com.kingzcheung.xime.ui.theme.KeyboardThemes.getThemeById(state.themeId)
             // 图片背景无法映射到 window 层，用主题主色作为导航栏/窗口兜底色；

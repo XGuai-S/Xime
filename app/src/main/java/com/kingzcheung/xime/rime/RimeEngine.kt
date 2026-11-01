@@ -313,6 +313,37 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 一次锁内取完整按键后快照：input / candidates / ascii / hasNext / hasPrev。
+     *
+     * [refreshAfterKey] 原先 5 次独立 tryLock（每次可能因锁竞争静默返回默认值），
+     * 造成候选栏状态不一致（如 getCandidates 成功但 getInput 返回空）。合并为单次
+     * tryLock 内串行 native 调用，锁获取从 5 次降为 1 次，且快照内部自洽。
+     */
+    fun getProcessSnapshot(): RimeProcessResult {
+        if (!isInitialized) return RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
+        return tryLocked(RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)) {
+            if (!nativeHasSession() && !nativeCreateSession())
+                return@tryLocked RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
+            val input = nativeGetInput() ?: ""
+            val candidates = (nativeGetCandidatesWithComments() ?: emptyArray()).map { pair ->
+                RimeCandidate(
+                    text = pair.getOrElse(0) { "" },
+                    comment = pair.getOrElse(1) { "" }
+                )
+            }.toTypedArray()
+            RimeProcessResult(
+                processed = true,
+                committedText = "",
+                inputText = input,
+                preeditText = "",
+                candidates = candidates,
+                isAsciiMode = nativeIsAsciiMode(),
+                hasNextPage = nativeHasNextPage(),
+                hasPrevPage = nativeHasPrevPage(),
+            )
+        }
+    }
     fun getCandidates(): Array<String> {
         return tryLocked(emptyArray()) {
             if (!nativeHasSession()) return@tryLocked emptyArray()
