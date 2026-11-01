@@ -353,16 +353,43 @@ internal object AutoWordStore {
         code: String,
         known: Set<String>,
         prefixMatch: Boolean = false,
-    ): List<String> {
+    ): List<String> = hitsFor(temp, fixed, code, known, prefixMatch).map { it.word }
+
+    /**
+     * 造词候选命中：词 + 来源。供候选栏区分「临时词（未晋升）/ 固定词（已定型）」。
+     *
+     * 与 [candidatesFor] 是同一套筛选逻辑（后者即 `map { it.word }`），
+     * 单独留 [candidatesFor] 是为了不破坏既有调用与测试的 `List<String>` 契约。
+     */
+    data class Hit(
+        val word: String,
+        /** true = 临时词库（还没晋升）；false = 固定词库（已定型）。 */
+        val fromTemp: Boolean,
+        /** 临时词库的选中次数；固定词库恒为 0。 */
+        val count: Int,
+    )
+
+    /**
+     * 同 [candidatesFor]，但返回带来源的命中列表。
+     */
+    fun hitsFor(
+        temp: Map<String, Map<String, Entry>>,
+        fixed: Map<String, Map<String, Int>>,
+        code: String,
+        known: Set<String>,
+        prefixMatch: Boolean = false,
+    ): List<Hit> {
         if (code.isEmpty()) return emptyList()
-        val out = ArrayList<String>()
+        val out = ArrayList<Hit>()
         // seen 初始就装入引擎已有词：让完整命中段与结尾过滤都省掉重复判断
         val seen = HashSet<String>(known)
         // 1) 完整编码命中：固定库按权重降序，临时库垫底
         fixed[code]?.entries?.sortedByDescending { it.value }?.forEach { (word, _) ->
-            if (seen.add(word)) out += word
+            if (seen.add(word)) out += Hit(word, fromTemp = false, count = 0)
         }
-        temp[code]?.forEach { (word, _) -> if (seen.add(word)) out += word }
+        temp[code]?.forEach { (word, entry) ->
+            if (seen.add(word)) out += Hit(word, fromTemp = true, count = entry.count)
+        }
         // 2) 前缀命中（仅 prefixMatch=true 时）：输入是某个已录编码的前缀（且没敲完）时也让词可见
         if (prefixMatch && code.length >= PREFIX_MIN_INPUT) {
             var added = 0
@@ -376,21 +403,23 @@ internal object AutoWordStore {
             for ((word, _) in prefixFixed) {
                 if (added >= MAX_PREFIX_CANDIDATES) break
                     if (!seen.add(word)) continue
-                out += word
+                out += Hit(word, fromTemp = false, count = 0)
                 added++
             }
             if (added < MAX_PREFIX_CANDIDATES) {
-                val prefixTemp = ArrayList<Pair<String, Long>>()
+                val prefixTemp = ArrayList<Triple<String, Long, Int>>()
                 for ((c, words) in temp) {
                     if (c.length > code.length && c.startsWith(code)) {
-                        for ((word, entry) in words) prefixTemp += word to entry.lastSeen
+                        for ((word, entry) in words) {
+                            prefixTemp += Triple(word, entry.lastSeen, entry.count)
+                        }
                     }
                 }
                 prefixTemp.sortByDescending { it.second }
-                for ((word, _) in prefixTemp) {
+                for ((word, _, count) in prefixTemp) {
                     if (added >= MAX_PREFIX_CANDIDATES) break
                     if (!seen.add(word)) continue
-                    out += word
+                    out += Hit(word, fromTemp = true, count = count)
                     added++
                 }
             }

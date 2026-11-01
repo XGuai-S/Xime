@@ -317,6 +317,67 @@ class AutoWordStoreTest {
         assertTrue(AutoWordStore.candidatesFor(emptyMap(), emptyMap(), "xyz", emptySet()).isEmpty())
     }
 
+    // ── hitsFor：带来源的命中（候选栏区分临时词/固定词） ──
+
+    @Test
+    fun `hitsFor_区分临时与固定_并带选中次数`() {
+        val fixed = mapOf("jt" to mapOf("今天" to 30))
+        val temp = mapOf(
+            "jt" to mapOf(
+                "今天哦" to AutoWordStore.Entry("今天哦", "jt", now, 0, now),
+                "今天吧" to AutoWordStore.Entry("今天吧", "jt", now, 2, now),
+            )
+        )
+        val got = AutoWordStore.hitsFor(temp, fixed, "jt", emptySet())
+        assertEquals(listOf("今天", "今天哦", "今天吧"), got.map { it.word })
+        assertEquals(false, got[0].fromTemp)
+        assertEquals(true, got[1].fromTemp)
+        assertEquals(0, got[1].count)
+        assertEquals(true, got[2].fromTemp)
+        assertEquals(2, got[2].count)
+    }
+
+    @Test
+    fun `hitsFor_与candidatesFor结果完全一致`() {
+        val fixed = mapOf("xm" to mapOf("现在" to 20), "xmz" to mapOf("现在做" to 10))
+        val temp = mapOf(
+            "xm" to mapOf("现在吗" to AutoWordStore.Entry("现在吗", "xm", now, 1, now)),
+            "xmz" to mapOf("现在走" to AutoWordStore.Entry("现在走", "xmz", now, 0, now)),
+        )
+        for (code in listOf("xm", "xmz", "x")) {
+            for (prefix in listOf(false, true)) {
+                val viaWords = AutoWordStore.candidatesFor(temp, fixed, code, emptySet(), prefix)
+                val viaHits = AutoWordStore.hitsFor(temp, fixed, code, emptySet(), prefix)
+                    .map { it.word }
+                assertEquals("code=$code prefix=$prefix", viaWords, viaHits)
+            }
+        }
+    }
+
+    @Test
+    fun `hitsFor_前缀命中也带来源与次数`() {
+        val temp = mapOf(
+            "xmzd" to mapOf("现在知道" to AutoWordStore.Entry("现在知道", "xmzd", now, 3, now))
+        )
+        val got = AutoWordStore.hitsFor(emptyMap(), emptyMap(), "xm", emptySet(), prefixMatch = true)
+            .filter { it.word == "现在知道" }
+        val gotTemp = AutoWordStore.hitsFor(temp, emptyMap(), "xm", emptySet(), prefixMatch = true)
+        assertEquals(1, gotTemp.size)
+        assertEquals("现在知道", gotTemp[0].word)
+        assertEquals(true, gotTemp[0].fromTemp)
+        assertEquals(3, gotTemp[0].count)
+        assertTrue(got.isEmpty())
+    }
+
+    @Test
+    fun `hitsFor_引擎已有词不重复`() {
+        val fixed = mapOf("xzml" to mapOf("现在目录" to 20))
+        assertTrue(
+            AutoWordStore.hitsFor(fixed = fixed, temp = emptyMap(), code = "xzml",
+                known = setOf("现在目录")).isEmpty()
+        )
+    }
+
     @Test
     fun `候选合并_编码没打完也出词_前缀命中固定库`() {
         val fixed = mapOf("xmzd" to mapOf("现在" to 20))

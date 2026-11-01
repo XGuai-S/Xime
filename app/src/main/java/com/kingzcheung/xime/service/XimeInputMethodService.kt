@@ -3742,7 +3742,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (isT9 || isAscii || code.isEmpty()) return null
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         if (!autoWordConfig.enabled) return null
-        val extra = AutoWordStore.candidatesFor(
+        val extra = AutoWordStore.hitsFor(
             temp = autoWordTemp,
             fixed = autoWordFixed,
             code = code,
@@ -3758,10 +3758,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         } else {
             engineCandidates.indices.map { CandidateAction.engine(it) }
         }
+        // 造词候选的注释标记：区分「临时词（未晋升）/ 固定词（已定型）」。
+        // 临时词显示累计选中次数（刚拼出来为 0 次 → 显示「新」；选过 1 次 →「1次」）。
+        // 简洁起见：固定词库（已晋升）不显示任何标记。
+        // 注意：comments 必须与 candidates 严格平行，否则候选错位/越界。
+        val extraComments = extra.map { hit ->
+            if (!hit.fromTemp) "" else if (hit.count <= 0) "新" else "${hit.count}次"
+        }
         return CandidateOrderStore.Reordered(
-            candidates = engineCandidates + extra,
-            comments = engineComments + extra.map { "" },
-            actions = baseActions + extra.map { CandidateAction.plugin(it) },
+            candidates = engineCandidates + extra.map { it.word },
+            comments = engineComments + extraComments,
+            actions = baseActions + extra.map { CandidateAction.plugin(it.word) },
         )
     }
 
