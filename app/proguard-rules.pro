@@ -32,3 +32,10 @@
 -dontwarn java.lang.management.RuntimeMXBean
 
 -processkotlinnullchecks remove
+
+# ── 打包提速：降低 R8 优化强度 ──
+# 实测（arm64 proot，8Gen3，本机 load 基线约 4）：R8 优化阶段占整个打包约 80%
+# （minifyReleaseWithR8 ≈4 分钟 / 总 4m43s）。
+# 取舍：完全 -dontoptimize 可把整体降到 2m16s，但 APK 从 25.7MB 膨胀到 34.8MB（+35%），
+# 代价过大。改用「只跑 1 轮优化 + 保留通用优化集」，在体积与速度间取得平衡。
+-optimizationpasses 1
