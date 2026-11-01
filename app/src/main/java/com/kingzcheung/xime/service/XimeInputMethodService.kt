@@ -223,16 +223,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal var pendingDeleteCount = 0
 
     init {
+        // 按键任务按入队顺序在 key-process 单线程上执行（天然 FIFO），主线程只负责
+        // 按序 start，不做 join 等待——打字时主线程不再被 rime 处理 + 候选刷新阻塞，
+        // 候选/预编辑区刷新与按键反馈解耦，连续快速输入不卡顿不跟手。
+        // 单线程 executor 保证 job 串行执行，顺序与入队一致；UI 更新经 uiEventChannel
+        // （CONFLATED）回主线程。
         serviceScope.launch {
             keyJobs.consumeEach { job ->
                 try {
-                    job.join()
-                } catch (e: CancellationException) {
-                    // 服务销毁时正常取消：必须继续向上抛出，否则消费者会吞掉取消信号
-                    throw e
+                    job.start()
                 } catch (e: Throwable) {
-                    // 单个按键任务失败不能让消费者协程退出，否则后续按键/候选点选会永久堆积失效
-                    FileLogger.e(TAG, "key job failed, keep consuming", e)
+                    // 单个按键任务启动失败不能让消费者协程退出，否则后续按键/候选点选会永久堆积失效
+                    FileLogger.e(TAG, "key job failed to start, keep consuming", e)
                 }
             }
         }
@@ -264,6 +266,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * attachBaseContext，字段初始化时 `getFilesDir()` 为 null，只能在 [onCreate]
      * 里用已 attach 的 context 加载。上屏时更新、防抖落盘（见 [recordWordFrequency]）。
      */
+    @Volatile
     internal var wordFreqTable: Map<String, Map<String, Int>> = emptyMap()
     /**
      * 自动造词临时词库（编码 → 词 → 条目）。
@@ -271,8 +274,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 与 [candidateOrderTable] 同一加载约束（onCreate 里用已 attach 的 context 加载）。
      * 上屏时记录、晋升时更新并防抖落盘，见 [recordWordFrequency]。
      */
+    @Volatile
     internal var autoWordTemp: Map<String, Map<String, AutoWordStore.Entry>> = emptyMap()
     /** 自动造词固定词库（编码 → 词 → 权重），晋升时更新落盘；作为 custom_phrase 注入 rime。 */
+    @Volatile
     internal var autoWordFixed: Map<String, Map<String, Int>> = emptyMap()
     /**
      * 黑名单词库：长按候选删除的词（词 → 删除时的编码），显示候选时按编码整条剔除
@@ -3721,7 +3726,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /** 防抖到期的写盘任务；持有引用才能只撤它自己（见 onDestroy）。 */
     private val wordFreqSaveRunnable = Runnable {
         wordFreqSavePending = false
-        saveWordData()
+        // 写盘（用户手改合并 + 词频/词库三件套落盘 + rime dict 重写）挪到 IO 线程，
+        // 防抖到期的瞬间不阻塞主线程（打字停顿/上屏时不再出现一次顿挫）。
+        serviceScope.launch(Dispatchers.IO) { saveWordData() }
     }
 
     /**
