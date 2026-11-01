@@ -75,13 +75,14 @@ class AutoWordStoreTest {
     }
 
     @Test
-    fun `窗口内一次上屏不晋升`() {
+    fun `窗口内一次上屏即晋升_门槛为1`() {
+        // PROMOTE_MIN_COUNT=1：每个词选中 1 次就够门槛，两个词都会晋升
         var temp = AutoWordStore.record(emptyMap(), "jt", "今天", now)
         temp = AutoWordStore.record(temp, "jt", "天气", now + 1000)
         val promotion = AutoWordStore.promote(temp, emptyMap(), now + 1000)
-        assertTrue(promotion.promoted.isEmpty())
-        assertTrue(promotion.fixed.isEmpty())
-        assertEquals(2, promotion.temp["jt"]?.size)
+        assertEquals(2, promotion.promoted.size)
+        assertEquals(2, promotion.fixed["jt"]?.size)
+        assertNull(promotion.temp["jt"])
     }
 
     @Test
@@ -104,7 +105,9 @@ class AutoWordStoreTest {
         val later = now + 31 * dayMs
         val promotion = AutoWordStore.promote(temp, emptyMap(), later)
         assertNull(promotion.temp["jt"])
-        assertEquals(1, promotion.temp["tq"]?.size)
+        // 新词 count=1 已达晋升门槛：移出临时库进固定库
+        assertNull(promotion.temp["tq"])
+        assertEquals(1, promotion.fixed["tq"]?.size)
     }
 
     @Test
@@ -126,22 +129,24 @@ class AutoWordStoreTest {
     }
 
     @Test
-    fun `首次上屏超窗口但最近只用一次_留在临时库`() {
+    fun `晋升门槛为1次_选中一次即晋升固定词库`() {
         val entry = AutoWordStore.Entry("今天", "jt", now - 100 * dayMs, 1, now - dayMs)
         val temp = mapOf("jt" to mapOf("今天" to entry))
         val promotion = AutoWordStore.promote(temp, emptyMap(), now)
-        assertTrue(promotion.promoted.isEmpty())
-        assertEquals(1, promotion.temp["jt"]?.size)
+        // PROMOTE_MIN_COUNT=1：选中 1 次就够晋升，不再留在临时库
+        assertEquals(1, promotion.promoted.size)
+        assertEquals("今天", promotion.promoted[0].word)
+        assertEquals(10, promotion.fixed["jt"]?.get("今天"))
     }
 
     @Test
-    fun `首次上屏很久但窗口内仍在用_不淘汰`() {
-        // 首次上屏在 100 天前，但 1 天前刚用过：晋升窗口虽已过，仍要保留（淘汰按最后上屏算）
+    fun `首次上屏很久但窗口内仍在用_照常晋升`() {
+        // 首次上屏在 100 天前，但 1 天前刚用过：淘汰按最后上屏算，仍在窗口内 → 达门槛即晋升
         val entry = AutoWordStore.Entry("今天", "jt", now - 100 * dayMs, 1, now - dayMs)
         val temp = mapOf("jt" to mapOf("今天" to entry))
         val promotion = AutoWordStore.promote(temp, emptyMap(), now)
-        assertTrue(promotion.promoted.isEmpty())
-        assertEquals(1, promotion.temp["jt"]?.size)
+        assertEquals(1, promotion.promoted.size)
+        assertEquals("今天", promotion.promoted[0].word)
     }
 
     @Test
@@ -177,10 +182,23 @@ class AutoWordStoreTest {
 
     @Test
     fun `promote幂等_无变化返回原表`() {
-        val temp = AutoWordStore.record(emptyMap(), "jt", "今天", now)
-        val promotion = AutoWordStore.promote(temp, emptyMap(), now)
-        assertTrue(promotion.temp === temp)
+        // 空表无事可做：必须原样返回，不做任何拷贝
+        val emptyTemp = emptyMap<String, Map<String, AutoWordStore.Entry>>()
+        val promotion = AutoWordStore.promote(emptyTemp, emptyMap(), now)
+        assertTrue(promotion.temp === emptyTemp)
         assertTrue(promotion.fixed === emptyMap<String, Map<String, Int>>())
+    }
+
+    @Test
+    fun `promote未达门槛_内容不变且不晋升`() {
+        // 用 minCount=2 显式构造「次数不够」的场景：不晋升，临时库内容原样保留。
+        // 注意判据是内容相等（==）而非引用相等：promote 内部重建了 map，
+        // 只在内容一致时回退返回原表。
+        val entry = AutoWordStore.Entry("今天", "jt", now, 1, now)
+        val temp = mapOf("jt" to mapOf("今天" to entry))
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now, minCount = 2)
+        assertTrue(promotion.promoted.isEmpty())
+        assertEquals(temp, promotion.temp)
     }
 
     // ── parse / serialize ──

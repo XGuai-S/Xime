@@ -389,12 +389,14 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         )
         // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）。
         // 按当前输入编码过滤：黑名单条目带删除时的编码，只屏蔽该编码下的词。
+        // 过滤会重排下标，因此把造词临时下标一并传入，让 filter 内部做旧→新下标重映射。
         val blacklisted = WordBlacklistStore.filter(
             candidates = withAutoWords?.candidates ?: engineCandidates,
             comments = withAutoWords?.comments ?: engineComments,
             actions = withAutoWords?.actions ?: engineActions,
             table = service.wordBlacklist,
             code = rawInputText,
+            autoWordTempIndices = withAutoWords?.autoWordTempIndices ?: emptySet(),
         )
         service.candidateState.value = service.candidateState.value.copy(
             // T9 保持合成显示态同源；非 T9 仅显示层用 preedit 回显，inputText 保留原始键入串
@@ -408,6 +410,8 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             hasNextPage = hasNextPage,
             hasPrevPage = hasPrevPage,
             candidateActions = blacklisted?.actions ?: withAutoWords?.actions ?: engineActions,
+            autoWordTempIndices = blacklisted?.autoWordTempIndices
+                ?: withAutoWords?.autoWordTempIndices ?: emptySet(),
             preeditCaretPos = displayCaretOffset(display.text, rawInputText)
         )
     }

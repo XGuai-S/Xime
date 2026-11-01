@@ -15,6 +15,11 @@ sealed interface CandidateBarState {
         val associationCandidates: List<String> = emptyList(),
         /** 编码显示串中的光标偏移（字符，-1 = 末尾/不适用），编码编辑光标可视化用。 */
         val preeditCaretPos: Int = -1,
+        /**
+         * [candidates] 中属于临时词库（未晋升的自动造词）的下标集合。
+         * 渲染时给这些候选加「◌」前缀做区分；符号只作用于显示，点选上屏仍用原文。
+         */
+        val autoWordTempIndices: Set<Int> = emptySet(),
     ) : CandidateBarState
 
     data class AssociationOnly(
@@ -76,6 +81,7 @@ sealed interface CandidateBarState {
             /** 大写金额模式的算式回显（[capitalAmountAmount] 为空表示不显示）。 */
             capitalAmountExpression: String = "",
             capitalAmountAmount: String = "",
+            autoWordTempIndices: Set<Int> = emptySet(),
         ): CandidateBarState {
             val hasCandidates = candidates.isNotEmpty()
             val hasAssociations = associationCandidates.isNotEmpty()
@@ -102,6 +108,7 @@ sealed interface CandidateBarState {
                         hasMore = hasCandidates && hasNextPage,
                         associationCandidates = associationCandidates,
                         preeditCaretPos = preeditCaretPos,
+                        autoWordTempIndices = autoWordTempIndices,
                     )
                 !isComposing && !hasInput && hasAssociations && !hasCandidates ->
                     AssociationOnly(
@@ -116,6 +123,7 @@ sealed interface CandidateBarState {
                         preeditText = preeditText,
                         hasMore = hasCandidates && hasNextPage,
                         preeditCaretPos = preeditCaretPos,
+                        autoWordTempIndices = autoWordTempIndices,
                     )
                 else -> Idle
             }

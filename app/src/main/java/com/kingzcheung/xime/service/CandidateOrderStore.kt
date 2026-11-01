@@ -104,6 +104,11 @@ internal object CandidateOrderStore {
         val candidates: List<String>,
         val comments: List<String>,
         val actions: List<CandidateAction>,
+        /**
+         * [candidates] 中属于临时词库（未晋升的自动造词）的下标集合。
+         * 渲染层据此加「◌」前缀区分；空集 = 不标记（黑名单/词频重排等路径不涉及造词）。
+         */
+        val autoWordTempIndices: Set<Int> = emptySet(),
     )
 
     /**

@@ -547,6 +547,10 @@ fun CandidateBar(
                                 { callbacks.onCandidateLongPress(index) }
                             } else null,
                             textColor = visuals.textColor,
+                            // 临时词库（未晋升的自动造词）加「◌」前缀区分；固定词库与引擎候选不加。
+                            // 只影响显示，点选上屏仍用 candidates 原文（见 onCandidateSelect）。
+                            markerPrefix = if ((state as? CandidateBarState.ChineseCandidates)
+                                    ?.autoWordTempIndices?.contains(index) == true) "◌" else "",
                             comment = if (showComments) {
                                 when (val s = state) {
                                     is CandidateBarState.ChineseCandidates -> s.comments.getOrElse(index) { "" }
@@ -877,6 +881,8 @@ fun CandidateItem(
     onClick: () -> Unit,
     textColor: Color,
     comment: String = "",
+    /** 显示在词前的小标记（如临时词库的「◌」）：只参与渲染，不影响上屏文本。 */
+    markerPrefix: String = "",
     isSelected: Boolean = false,
     accentColor: Color = Color(0xFF1A73E8),
     selectedTextColor: Color = Color(0xFF1A73E8),
@@ -902,6 +908,18 @@ fun CandidateItem(
             .padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (markerPrefix.isNotEmpty()) {
+            // 标记用弱化色 + 小字号：既能区分「这是还没定型的造词」，又不抢词的视觉重心
+            Text(
+                text = markerPrefix,
+                color = textColor.copy(alpha = 0.45f),
+                fontSize = (fontSize.value * 13f / 19f).sp,
+                fontWeight = FontWeight.Normal,
+                maxLines = 1,
+                fontFamily = candidateFontFamily
+            )
+            Spacer(modifier = Modifier.width(1.dp))
+        }
         Text(
             text = text,
             color = if (isSelected) selectedTextColor else textColor,

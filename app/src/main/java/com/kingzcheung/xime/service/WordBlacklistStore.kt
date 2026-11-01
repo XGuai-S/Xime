@@ -89,16 +89,25 @@ internal object WordBlacklistStore {
         actions: List<CandidateAction>,
         table: Map<String, Map<String, Int>>,
         code: String,
+        /** 剔除前的临时词下标（见 [CandidateOrderStore.Reordered.autoWordTempIndices]）。
+         *  剔除会重排下标，这里按「旧下标 → 新下标」重新映射，否则标记会串到别的候选上。 */
+        autoWordTempIndices: Set<Int> = emptySet(),
     ): CandidateOrderStore.Reordered? {
         if (candidates.isEmpty() || table.isEmpty()) return null
         val blocked = blockedFor(table, code)
         if (blocked.isEmpty()) return null
         val kept = candidates.indices.filter { candidates[it] !in blocked }
         if (kept.size == candidates.size) return null
+        // 旧下标 → 新下标（剔除后位置前移）
+        val remappedTempIndices = HashSet<Int>()
+        kept.forEachIndexed { newIndex, oldIndex ->
+            if (oldIndex in autoWordTempIndices) remappedTempIndices += newIndex
+        }
         return CandidateOrderStore.Reordered(
             candidates = kept.map { candidates[it] },
             comments = kept.map { comments.getOrElse(it) { "" } },
             actions = kept.map { actions.getOrElse(it) { CandidateAction.engine(it) } },
+            autoWordTempIndices = remappedTempIndices,
         )
     }
 

@@ -31,4 +31,12 @@ data class CandidateState(
     val capitalAmountExpression: String = "",
     /** 上条算式对应的大写金额（如 `壹佰陆拾捌元整`）；与 [capitalAmountExpression] 同为空表示不显示。 */
     val capitalAmountAmount: String = "",
+    /**
+     * [candidates] 中属于**临时词库**（自动造词但尚未晋升）的下标集合。
+     * 渲染层据此给这些候选加「◌」前缀做视觉区分，与固定词库（已晋升）/引擎候选分开。
+     *
+     * 只存下标、不改 [candidates] 本体：候选文本同时被上屏、黑名单、输入框首词等
+     * 非显示路径消费，标记符号绝不能混进文本（否则会把「◌词」写进用户词库）。
+     */
+    val autoWordTempIndices: Set<Int> = emptySet(),
 )

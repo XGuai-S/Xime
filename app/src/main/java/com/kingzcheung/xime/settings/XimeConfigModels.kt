@@ -413,7 +413,7 @@ data class AutoWordConfig(
     val promoteDays: Int = 7,
     /** 窗口内需达到的上屏次数。默认 2。 */
     @SerialName("promote_count")
-    val promoteCount: Int = 2,
+    val promoteCount: Int = 1,
     /** 是否把相邻两次上屏的词拼接成生词（如「现在」+「目录」→「现在目录」）。默认 true。 */
     @SerialName("combo_enabled")
     val comboEnabled: Boolean = true,

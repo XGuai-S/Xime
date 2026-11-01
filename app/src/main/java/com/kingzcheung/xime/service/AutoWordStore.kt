@@ -11,7 +11,7 @@ import java.io.File
  * 每次上屏的词先进**临时词库**（[TEMP_FILE_NAME]，带首次上屏时间与累计次数）；
  * 临时词库与固定词库的词都会在输入对应编码时**直接合并进候选栏**（不经 rime、
  * 不占用快捷短语 custom_phrase.txt），被用户选中上屏即计数；
- * 同一词被选中满 2 次晋升到**固定词库**（[FIXED_FILE_NAME]）。
+ * 同一词被选中满 1 次晋升到**固定词库**（[FIXED_FILE_NAME]）。
  * 超过 7 天没再被选中的词在 [prune] / [promote] 中淘汰，不会无限堆积；
  * 临时词库文件**不限大小**（不设条数/字节上限），体积完全靠 7 天过期控制——
  * 既不担心文件撑爆，也不会出现满额后新词学不进来的问题。
@@ -44,7 +44,7 @@ internal object AutoWordStore {
     internal const val PROMOTE_WINDOW_DAYS = 7
 
     /** 窗口内需达到的上屏次数。 */
-    internal const val PROMOTE_MIN_COUNT = 2
+    internal const val PROMOTE_MIN_COUNT = 1
 
     /** 前缀命中时最多补进候选栏的词数：短编码命中面宽，不封顶会把候选栏尾部塞满。 */
     private const val MAX_PREFIX_CANDIDATES = 8
@@ -59,7 +59,7 @@ internal object AutoWordStore {
     internal const val COMBO_MAX_CHARS = 4
 
     private const val TEMP_HEADER =
-        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 2 次晋升固定词库；超过 7 天没再被选中则删除）"
+        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 1 次晋升固定词库；超过 7 天没再被选中则删除）"
 
     private const val FIXED_HEADER = "# 固定词库：词\t编码\t权重（由临时词库晋升，输入时合并进候选栏出候选）"
 

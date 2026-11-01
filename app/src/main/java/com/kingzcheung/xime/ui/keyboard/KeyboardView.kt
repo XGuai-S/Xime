@@ -336,7 +336,7 @@ fun KeyboardView(
                 cs.associationCandidates, cs.pendingEnglishText, cs.isShowingRecentClipboard, cs.hasNextPage,
                 state.isCalculatorMode, handwritingCandidates, handwritingComments, showHandwritingCandidates,
                 railExpanded, cs.preeditCaretPos, state.recentClipboardItems,
-                cs.capitalAmountExpression, cs.capitalAmountAmount,
+                cs.capitalAmountExpression, cs.capitalAmountAmount, cs.autoWordTempIndices,
             ) {
                 if (showHandwritingCandidates) {
                     CandidateBarState.AssociationOnly(
@@ -368,6 +368,8 @@ fun KeyboardView(
                         },
                         capitalAmountExpression = cs.capitalAmountExpression,
                         capitalAmountAmount = cs.capitalAmountAmount,
+                        // 展开态（railExpanded）候选来自别处，与 cs 下标不同源，不传标记
+                        autoWordTempIndices = if (railExpanded.isEmpty()) cs.autoWordTempIndices else emptySet(),
                     )
                 }
             }
