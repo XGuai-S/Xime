@@ -273,6 +273,12 @@ internal object AutoWordStore {
         now: Long,
         windowDays: Int = PROMOTE_WINDOW_DAYS,
         minCount: Int = PROMOTE_MIN_COUNT,
+        /**
+         * 本次上屏**用户实际按下的编码**。同一个词在临时库可能挂着多个编码
+         * （组合生词按单字规则生成的全部组合），晋升时只把这个编码收进固定词库，
+         * 避免固定词库出现「一词多音」。为空时退回该词命中次数最多的编码。
+         */
+        preferCode: String = "",
     ): Promotion {
         if (temp.isEmpty()) return Promotion(temp, fixed, emptyList())
         val limit = windowMillis(windowDays)
@@ -295,10 +301,39 @@ internal object AutoWordStore {
             }
         }
         if (promoted.isEmpty() && nextTemp == temp) return Promotion(temp, fixed, emptyList())
-
         val nextFixed = LinkedHashMap<String, LinkedHashMap<String, Int>>()
         for ((code, words) in fixed) nextFixed[code] = LinkedHashMap(words)
+        // 一词一码：临时词库允许一个词挂多个编码（组合生词按单字规则会生成全部组合），
+        // 但固定词库只收**一个**编码，否则出现「一词多音」（「阿红」挂 4 条）。
+        // 取舍优先级：
+        //   1. 本次用户实际按键的编码 [preferCode]（用户习惯优先，下次照打能搜到）
+        //   2. 该词命中次数最多的编码（最常用的那个）
+        //   3. 先出现的那条（入 map 顺序稳定，结果可复现）
+        val bestByWord = LinkedHashMap<String, Entry>()
         for (entry in promoted) {
+            val prev = bestByWord[entry.word]
+            if (prev == null) {
+                bestByWord[entry.word] = entry
+                continue
+            }
+            val prevPreferred = prev.code == preferCode
+            val currPreferred = entry.code == preferCode
+            bestByWord[entry.word] = when {
+                currPreferred && !prevPreferred -> entry
+                !currPreferred && prevPreferred -> prev
+                entry.count > prev.count -> entry
+                else -> prev
+            }
+        }
+        for (entry in bestByWord.values) {
+            // 该词此前若已挂在别的编码下（历史遗留多音），先清掉旧编码上的同名条目
+            val staleCodes = nextFixed.keys.filter {
+                it != entry.code && nextFixed[it]?.containsKey(entry.word) == true
+            }
+            for (stale in staleCodes) {
+                nextFixed[stale]?.remove(entry.word)
+                if (nextFixed[stale]?.isEmpty() == true) nextFixed.remove(stale)
+            }
             nextFixed.getOrPut(entry.code) { LinkedHashMap() }[entry.word] = promoteWeight(entry.count)
         }
         return Promotion(nextTemp, nextFixed, promoted)
@@ -462,9 +497,19 @@ internal object AutoWordStore {
         return runCatching { parseTemp(text) }.getOrElse { emptyMap() }
     }
 
-    /** 读固定词库；不存在或读失败返回空表。 */
+    /**
+     * 读固定词库并做一词一码收敛；不存在或读失败返回空表。
+     *
+     * 收敛只作用于返回的内存表，**不写盘**。需要把旧的多音数据一并修掉时，
+     * 用 [loadFixedRaw] 拿到未收敛版本自行比对后 [saveFixed]。
+     */
     @Synchronized
-    fun loadFixed(context: android.content.Context): Map<String, Map<String, Int>> {
+    fun loadFixed(context: android.content.Context): Map<String, Map<String, Int>> =
+        dedupeFixed(loadFixedRaw(context))
+
+    /** 读固定词库的**原始**内容（不做一词一码收敛）。 */
+    @Synchronized
+    fun loadFixedRaw(context: android.content.Context): Map<String, Map<String, Int>> {
         val visibleText = UserConfigDir.readText(context, FIXED_FILE_NAME)
         val visibleStamp = UserConfigDir.stamp(context, FIXED_FILE_NAME)
         fixedBaselineText = visibleText ?: ""
@@ -476,6 +521,34 @@ internal object AutoWordStore {
             fixedPrivateFile(context),
         ) ?: return emptyMap()
         return runCatching { parseFixed(text) }.getOrElse { emptyMap() }
+    }
+
+    /**
+     * 一词一码收敛：固定词库里同一个词若挂在多个编码下（历史版本把组合生词的
+     * 全部编码一起晋升，导致「一词多音」——如「阿红」挂 aags/aahs/eegs/eehs 4 条），
+     * 只保留权重最高的那条，其余清掉。
+     *
+     * 为什么在读取时收敛而不是只改晋升：用户已有的固定词库文件就是带多音的，
+     * 只改写入路径不会自愈，下次启动读进来仍是脏的。这里做一次幂等收敛，
+     * 配合[promote] 的写入约束，新旧数据一并收口。
+     *
+     * @return 无需收敛时返回原表（引用相同，便于调用方跳过落盘）
+     */
+    internal fun dedupeFixed(table: Map<String, Map<String, Int>>): Map<String, Map<String, Int>> {
+        // 词 → (编码, 权重)：一个词只留权重最高的那个编码
+        val bestByWord = LinkedHashMap<String, Pair<String, Int>>()
+        for ((code, words) in table) {
+            for ((word, weight) in words) {
+                val prev = bestByWord[word]
+                if (prev == null || weight > prev.second) bestByWord[word] = code to weight
+            }
+        }
+        if (bestByWord.size == table.values.sumOf { it.size }) return table
+        val out = LinkedHashMap<String, LinkedHashMap<String, Int>>()
+        for ((word, best) in bestByWord) {
+            out.getOrPut(best.first) { LinkedHashMap() }[word] = best.second
+        }
+        return out
     }
 
     /**

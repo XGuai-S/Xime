@@ -201,6 +201,82 @@ class AutoWordStoreTest {
         assertEquals(temp, promotion.temp)
     }
 
+    // ── 一词一码（固定词库不出现一词多音） ──
+
+    @Test
+    fun `promote_同词多编码_只晋升一个`() {
+        // 模拟「阿红」在临时库挂了 4 个编码（组合生词按单字规则生成的全部组合）
+        val codes = listOf("aags", "aahs", "eegs", "eehs")
+        var temp = emptyMap<String, Map<String, AutoWordStore.Entry>>()
+        for (c in codes) temp = AutoWordStore.record(temp, c, "阿红", now, 2)
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now)
+        // 固定词库只能有 1 条「阿红」
+        val fixedCount = promotion.fixed.values.sumOf { if (it.containsKey("阿红")) 1 else 0 }
+        assertEquals(1, fixedCount)
+        // 临时库里的多编码条目都被取走
+        assertEquals(4, promotion.promoted.size)
+    }
+
+    @Test
+    fun `promote_优先收用户实际按键的编码`() {
+        val codes = listOf("aags", "aahs")
+        var temp = emptyMap<String, Map<String, AutoWordStore.Entry>>()
+        for (c in codes) temp = AutoWordStore.record(temp, c, "阿红", now, 2)
+        // 用户这次实际按的是 aahs（即使 aags 先入表）
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now, preferCode = "aahs")
+        assertEquals(1, promotion.fixed["aahs"]?.size)
+        assertNull(promotion.fixed["aags"])
+    }
+
+    @Test
+    fun `promote_未指定编码时取次数最多的`() {
+        var temp = AutoWordStore.record(emptyMap(), "aags", "阿红", now, 1)
+        temp = AutoWordStore.record(temp, "aahs", "阿红", now, 5)
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now)
+        assertEquals(1, promotion.fixed["aahs"]?.size)
+        assertNull(promotion.fixed["aags"])
+    }
+
+    @Test
+    fun `promote_清掉历史遗留的多音条目`() {
+        // 历史固定词库已有多音脏数据：晋升时把旧编码上的同名条目清掉
+        val oldFixed = mapOf(
+            "aags" to mapOf("阿红" to 20),
+            "aahs" to mapOf("阿红" to 20),
+        )
+        val temp = AutoWordStore.record(emptyMap(), "eegs", "阿红", now, 3)
+        val promotion = AutoWordStore.promote(temp, oldFixed, now, preferCode = "eegs")
+        assertEquals(1, promotion.fixed["eegs"]?.size)
+        assertNull(promotion.fixed["aags"]?.get("阿红"))
+        assertNull(promotion.fixed["aahs"]?.get("阿红"))
+    }
+
+    @Test
+    fun `dedupeFixed_收敛一词多音_保留最高权重`() {
+        val dirty = mapOf(
+            "aags" to mapOf("阿红" to 10),
+            "aahs" to mapOf("阿红" to 20),
+            "eegs" to mapOf("阿红" to 20),
+            "bmuj" to mapOf("白名单" to 20),
+            "bmdj" to mapOf("白名单" to 20),
+            "izbc" to mapOf("臭宝" to 20),
+        )
+        val clean = AutoWordStore.dedupeFixed(dirty)
+        // 每个词只剩一条
+        assertEquals(1, clean.values.sumOf { if (it.containsKey("阿红")) 1 else 0 })
+        assertEquals(1, clean.values.sumOf { if (it.containsKey("白名单")) 1 else 0 })
+        assertEquals(1, clean["izbc"]?.size)
+        // 保留权重最高的那条（首个 weight=20 的编码）
+        assertEquals(20, clean.values.first { it.containsKey("阿红") }["阿红"])
+    }
+
+    @Test
+    fun `dedupeFixed_本就一词一码时返回原表`() {
+        val clean = mapOf("aags" to mapOf("阿红" to 20), "izbc" to mapOf("臭宝" to 20))
+        assertTrue(clean === AutoWordStore.dedupeFixed(clean))
+    }
+
+
     // ── parse / serialize ──
 
     @Test

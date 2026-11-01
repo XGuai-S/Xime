@@ -675,7 +675,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         candidateOrderTable = CandidateOrderStore.load(this)
         wordFreqTable = WordFreqStore.load(this)
         autoWordTemp = AutoWordStore.loadTemp(this)
-        autoWordFixed = AutoWordStore.loadFixed(this)
+        // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
+        // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
+        // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
+        val rawFixed = AutoWordStore.loadFixedRaw(this)
+        val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
+        autoWordFixed = cleanFixed
+        if (cleanFixed !== rawFixed) {
+            // 确实发生了收敛：立即写盘，下次启动读到干净表
+            autoWordFixed = AutoWordStore.saveFixed(this, cleanFixed)
+            FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
+                "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
+        }
         wordBlacklist = WordBlacklistStore.load(this)
         FileLogger.d(
             TAG,
@@ -3623,16 +3634,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 已收录过的（任意一个编码下命中）→ 这次上屏算一次选中，只在**已存在**的
             // 编码上计数，避免每次上屏把多余编码也刷一遍；已晋升固定词库则不再计数。
             val recordedCodes = codes.filter { autoWordTemp[it]?.containsKey(text) == true }
+            val actualCode = freqCode.ifEmpty { codes.first() }
             when {
-                recordedCodes.isNotEmpty() -> recordAutoWord(text, recordedCodes, autoWordConfig)
+                // 已收录过：在已存在的编码上计数，并把实际按键编码作为晋升时的首选
+                recordedCodes.isNotEmpty() ->
+                    recordAutoWord(text, recordedCodes, autoWordConfig, preferCode = actualCode)
                 codes.any { autoWordFixed[it]?.containsKey(text) == true } -> Unit
                 // 新词只记**用户实际敲的那个编码**（freqCode）：此前把该词全部理论编码
                 // 一起入库，3 字词 2-3 个码、多音字更多，导致词库条数按编码数倍数膨胀。
                 // 只记实际编码既贴合用户习惯，也不会造出没人会打的冗余条目。
                 else -> recordAutoWord(
                     text,
-                    listOf(freqCode.ifEmpty { codes.first() }),
+                    listOf(actualCode),
                     autoWordConfig,
+                    preferCode = actualCode,
                 )
             }
         }
@@ -3677,7 +3692,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /**
      * 收录一个自动造词：按 [codes] 逐个进临时词库并晋升。
      *
-     * 一个词可有多个编码（3 字词：三首码 + 前两字首码加第三字前两码），全部收录；
+     * **一词一个编码**：调用方只传该词最实用的那一条（[codes] 正常只有 1 个元素）。
+     * 早先会把多音字组合出的全部编码一起入库，固定词库因此出现「一词多音」
+     * （同一个词挂 3-4 个编码），已按一词一码收口；这里保留遍历只为兼容历史调用。
      * 编码为空（组合词编不出来）时不收录。
      *
      * [initialCount] 新条目的初始次数：普通收录 1（首次上屏算一次候选选中），
@@ -3689,6 +3706,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         codes: List<String>,
         config: com.kingzcheung.xime.settings.AutoWordConfig,
         initialCount: Int = 1,
+        /** 本次用户实际按下的编码：晋升固定词库时只收这一个（一词一码）。 */
+        preferCode: String = "",
     ) {
         // 声明了 no_auto_word / 配置了 auto_word.no_auto_word_dicts 的词典词条
         // （如个人词库 XGuai_user.dict.yaml）：不参与自动造词链——
@@ -3710,6 +3729,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 autoWordTemp, autoWordFixed, System.currentTimeMillis(),
                 windowDays = config.promoteDays,
                 minCount = config.promoteCount,
+                // 一词一码：固定词库只收用户实际按的那个编码，避免多音字一词多音
+                preferCode = preferCode,
             )
             autoWordTemp = promotion.temp
             autoWordFixed = promotion.fixed
