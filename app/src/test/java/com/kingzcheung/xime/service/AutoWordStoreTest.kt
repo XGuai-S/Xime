@@ -116,6 +116,25 @@ class AutoWordStoreTest {
     }
 
     @Test
+    fun `首次上屏超窗口但最近仍在用_可晋升固定词库`() {
+        val entry = AutoWordStore.Entry("今天", "jt", now - 100 * dayMs, 2, now - dayMs)
+        val temp = mapOf("jt" to mapOf("今天" to entry))
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now)
+        assertEquals(1, promotion.promoted.size)
+        assertEquals("今天", promotion.promoted[0].word)
+        assertEquals(20, promotion.fixed["jt"]?.get("今天"))
+    }
+
+    @Test
+    fun `首次上屏超窗口但最近只用一次_留在临时库`() {
+        val entry = AutoWordStore.Entry("今天", "jt", now - 100 * dayMs, 1, now - dayMs)
+        val temp = mapOf("jt" to mapOf("今天" to entry))
+        val promotion = AutoWordStore.promote(temp, emptyMap(), now)
+        assertTrue(promotion.promoted.isEmpty())
+        assertEquals(1, promotion.temp["jt"]?.size)
+    }
+
+    @Test
     fun `首次上屏很久但窗口内仍在用_不淘汰`() {
         // 首次上屏在 100 天前，但 1 天前刚用过：晋升窗口虽已过，仍要保留（淘汰按最后上屏算）
         val entry = AutoWordStore.Entry("今天", "jt", now - 100 * dayMs, 1, now - dayMs)

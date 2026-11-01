@@ -207,6 +207,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }.asCoroutineDispatcher()
     
     internal val keyJobs = Channel<Job>(Channel.UNLIMITED)
+    /**
+     * 在途按键计数（发送 +1 / job 完成 -1）。
+     *
+     * Channel<Job> 没有 size API，无法直接得知积压深度；用这个计数器近似
+     * 「key-process 尚未处理完的按键数」。>1 表示队列有积压，是快打卡顿的证据。
+     */
+    internal val keyJobsInFlight = java.util.concurrent.atomic.AtomicInteger(0)
+    /**
+     * keyJobs 积压埋点计数（非线程安全，仅用于「每 N 键记一次」的日志降频）。
+     * handleKeyPress 在主线程串行调用，无需同步。
+     */
+    internal var queueDepthLogCounter = 0
     internal val uiEventChannel = Channel<suspend () -> Unit>(Channel.CONFLATED)
 
     /**
@@ -3405,7 +3417,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val words = LinkedHashSet<String>()
         val noFreq = LinkedHashSet<String>()
         val noAutoWord = LinkedHashSet<String>()
-        val singles = HashMap<String, MutableSet<String>>()
         val snapshot = ArrayList<Triple<String, Long, Long>>()
         val loadedNames = ArrayList<String>()
 
@@ -3428,10 +3439,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 排除集按词典级别判定：该词典声明了 nofreq / no_auto_word 才排除其词条。
                 if (noFreqByDict[name] == true) noFreq.add(word)
                 if (noAutoWordByDict[name] == true) noAutoWord.add(word)
-                // 只收单字（码点数判定，增补平面汉字占两个 char），由 SchemeCodeIndex 只留满四码。
-                if (code.isNotEmpty() && word.codePointCount(0, word.length) == 1) {
-                    singles.getOrPut(word) { HashSet() }.add(code)
-                }
+                // 单字码不再从主词典混杂收集：改由专名单字表（auto_word.char_dict，
+                // 缺省 Flypy_char）提供。主码表里单字的简码与全码混在一起，拿它当造词
+                // 基底会编出用户实际打不出来的码；纯单字表（每字一行满四码）才可靠。
             },
         )
 
@@ -3444,9 +3454,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
         }
 
-        val charCodes = SchemeCodeIndex.buildCharCodes(
-            singles.asSequence().flatMap { (ch, codes) -> codes.asSequence().map { ch to it } }
-        )
+        val charCodes = SchemeCodeIndex.buildCharCodes(loadCharDictEntries(cfg.charDict, snapshot))
         val result = SchemeDictCache(words, noFreq, noAutoWord, charCodes)
         dictSnapshot = snapshot.toList()
         schemeDictCache = result
@@ -3455,6 +3463,61 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             TAG,
             "scheme dict refreshed: ${words.size} words, ${charCodes.size} chars from ${loadedNames.joinToString()}"
         )
+    }
+
+    /**
+     * 读自动造词的单字码基底：[name] 为词典名（不含 `.dict.yaml`），返回 (字, 码) 序列。
+     *
+     * 只读这一张表，不递归 import_tables：造词基底必须干净（每字一行满四码），
+     * 递归会把主码表的简码混进来。文件不存在或读失败返回空序列，此时造词自然停摆
+     * （编不出码 = 不造该词），不会退回乱码基底。
+     *
+     * 兼容可见目录与私有目录：先用 UserConfigDir 取可见侧，取不到再试 rime 私有目录。
+     */
+    private fun loadCharDictEntries(
+        name: String,
+        snapshot: MutableList<Triple<String, Long, Long>>? = null,
+    ): Sequence<Pair<String, String>> {
+        if (name.isBlank()) return emptySequence()
+        val ctx = this@XimeInputMethodService
+        val fileName = "$name.dict.yaml"
+        // 优先可见目录（UserConfigDir.readText），其次 rime 私有目录；命中哪侧就把
+        // 该侧文件记入快照，否则改了单字表也不会触发下一轮重建（缓存会一直用旧码）。
+        val visibleText = com.kingzcheung.xime.settings.UserConfigDir.readText(ctx, fileName)
+        if (visibleText != null) {
+            // 可见侧快照：stamp 只给 (秒, 字节数)，路径用「可见目录 + 文件名」拼出，
+            // 与主词典快照的绝对路径同形，缓存命中判定才能一致。
+            com.kingzcheung.xime.settings.UserConfigDir.stamp(ctx, fileName)?.let { (m, sz) ->
+                val abs = java.io.File(
+                    com.kingzcheung.xime.settings.UserConfigDir.absoluteDir, fileName
+                ).absolutePath
+                snapshot?.add(Triple(abs, m * 1000L, sz))
+            }
+            return parseCharEntries(visibleText, name)
+        }
+        val dir = com.kingzcheung.xime.settings.SchemaManager.getRimeDir(ctx)
+        val file = java.io.File(dir, fileName)
+        if (!file.isFile) return emptySequence()
+        snapshot?.add(Triple(file.absolutePath, file.lastModified(), file.length()))
+        val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
+            ?: return emptySequence()
+        return parseCharEntries(text, name)
+    }
+
+    /**
+     * 解析单字表文本为 (字, 码) 序列，并打日志。
+     *
+     * 用 [DictionaryHelper.parseCodeTable] 而不是 parseDictEntries：后者要求文件里有
+     * Rime 头部的 `...` 分隔符才把后续行当词条，而纯单字表（如 Flypy_char.dict.yaml）
+     * 往往直接就是 `字<TAB>码` 两列、没有 `...`，用 parseDictEntries 会解析出 0 条。
+     */
+    private fun parseCharEntries(text: String, name: String): Sequence<Pair<String, String>> {
+        val entries = ArrayList<Pair<String, String>>()
+        for (e in com.kingzcheung.xime.settings.DictionaryHelper.parseCodeTable(text)) {
+            if (e.word.isNotEmpty() && e.code.isNotEmpty()) entries += e.word to e.code
+        }
+        FileLogger.d(TAG, "char dict '$name' loaded: ${entries.size} entries")
+        return entries.asSequence()
     }
 
     /** 把解析结果刷到字段（均为 volatile / 原子赋值，主线程读安全）。 */
@@ -3488,6 +3551,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val code = candidateState.value.inputText
             .ifEmpty { candidateState.value.preeditText }
             .ifEmpty { lastSelectedCandidateCode.orEmpty() }
+        // 反查模式（` 引导符）上屏的字**不进词频、不造词**：
+        // 反查是「按字找码」，上屏的字与 ` 后面的码没有任何输入法编码关系，
+        // 记进词频会写入 `` `aaek `` / `` hc` `` 这类脏编码（历史已污染过 9 类条目），
+        // 造词也会拼出不存在的词。这里从入口一刀切断：
+        // 既拦截 `  引导的输入码，也拦截反查候选的快捷码（[lastSelectedCandidateCode] 兜底值）。
+        if (code.contains('`')) {
+            // 反查上屏同样要打断组合链：它不是正常输入的字词序列。
+            lastSelectedCandidateWord = null
+            lastSelectedCandidateCode = null
+            lastCommittedWord = ""
+            return
+        }
         // 本次上屏的词在启用方案里能打出的**全部**编码（按三个总规则组合）。
         // 造词基底只用该字的**满四码**条目（简码不参与），多音字会得到多个组合码。
         // 单字返回空（单字本身不用造词），但**不影响组合链**：见下方的 lastCommittedWord。
@@ -3508,9 +3583,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (effectiveCode.isEmpty()) {
             lastSelectedCandidateWord = null
             lastSelectedCandidateCode = null
-            // 组合链必须照常推进：单字（composeCodes 返回空）或编码临时缺失时若直接跳过，
-            // lastCommittedWord 就停在上一次，下一次上屏永远拼不出「一」+「键」→「一键」。
-            // 词频可以不记，但「这次上屏了什么」这个事实必须记住。
+            // 词频可以不记（编不出码），但**组合生词与组合链必须照常推进**：
+            // 单字上屏（composeCodes 返回空）是最常见的组合场景（「一」+「键」→「一键」），
+            // 若在这里直接 return，组合逻辑永远走不到，表现为「字词上屏不组词」。
+            recordComboWord(text, autoWordConfig)
+            // 「这次上屏了什么」必须记住，下一次才能与它拼接。
             lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
             return
         }
@@ -3549,33 +3626,52 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             when {
                 recordedCodes.isNotEmpty() -> recordAutoWord(text, recordedCodes, autoWordConfig)
                 codes.any { autoWordFixed[it]?.containsKey(text) == true } -> Unit
-                else -> recordAutoWord(text, codes, autoWordConfig)
-            }
-        }
-        // 组合生词：把上一次上屏的词与本次的词拼接成新词进临时词库
-        // （如「现在」+「目录」→「现在目录」，长度由 combo_min/max_chars 控制）。
-        // 编码按三个总规则从满四码单字拼出；任一字没有满四码就不造（编不出来等于打不出来）。
-        // 组合产生的词初始次数为 0：它只是候选，被用户选中后才开始计数（见 [recordAutoWord]）。
-        if (autoWordConfig.comboEnabled) {
-            val comboText = AutoWordStore.comboWord(
-                prevWord = lastCommittedWord,
-                word = text,
-                minChars = autoWordConfig.comboMinChars,
-                maxChars = autoWordConfig.comboMaxChars,
-            )
-            if (comboText != null) {
-                recordAutoWord(
-                    comboText,
-                    SchemeCodeIndex.composeCodes(comboText, schemeCharCodes),
+                // 新词只记**用户实际敲的那个编码**（freqCode）：此前把该词全部理论编码
+                // 一起入库，3 字词 2-3 个码、多音字更多，导致词库条数按编码数倍数膨胀。
+                // 只记实际编码既贴合用户习惯，也不会造出没人会打的冗余条目。
+                else -> recordAutoWord(
+                    text,
+                    listOf(freqCode.ifEmpty { codes.first() }),
                     autoWordConfig,
-                    initialCount = 0,
                 )
             }
         }
+        // 组合生词（与编码能否生成无关，两条上屏路径共用 [recordComboWord]）。
+        recordComboWord(text, autoWordConfig)
         // 本次上屏成为下一次组合的「上一次」：仅在满足组合条件（汉字词）时更新，
         // 否则把组合链打断（粘贴、英文、标点等不应与下一次上屏拼接）。
         lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
         scheduleWordFreqSave()
+    }
+
+    /**
+     * 组合生词：把上一次上屏的词与本次上屏的词拼接成新词进临时词库
+     * （「现在」+「目录」→「现在目录」，长度由 combo_min/max_chars 控制）。
+     *
+     * 编码按方案单字规则从满四码拼出；任一字没有满四码就不造（编不出来等于打不出来）。
+     * 组合产生的词初始次数为 0：它只是候选，被用户**选中上屏**后才开始计数
+     * （见 [AutoWordStore.record]），累计到 promote_count 次晋升固定词库。
+     *
+     * 无条件执行（只要 comboEnabled 且前后两词都是汉字）：单字上屏是最常见的组合
+     * 场景（「一」+「键」→「一键」），不能因为「单字编不出组合码」就跳过拼接。
+     */
+    private fun recordComboWord(text: String, cfg: com.kingzcheung.xime.settings.AutoWordConfig) {
+        if (!cfg.comboEnabled) return
+        val comboText = AutoWordStore.comboWord(
+            prevWord = lastCommittedWord,
+            word = text,
+            minChars = cfg.comboMinChars,
+            maxChars = cfg.comboMaxChars,
+        ) ?: return
+        // 该词按方案单字规则能打出的**全部**编码，一条不落收录：
+        // 2 字词 = 各字前 2 码（多音字会得到多个组合）；
+        // 3 字词 = 两种形态（各字首码 / 前两字首码 + 第三字前 2 码）。
+        // 不能只取 firstOrNull()：composeCodes 按「短码优先」排序，3 字词的
+        // 4 码形态永远排在后面被丢掉，用户按 4 码打时搜不到该词，
+        // 表现为「3 字两种编码只有一种生效」。
+        val comboCodes = SchemeCodeIndex.composeCodes(comboText, schemeCharCodes)
+        if (comboCodes.isEmpty()) return
+        recordAutoWord(comboText, comboCodes, cfg, initialCount = 0)
     }
 
     /**
@@ -3598,14 +3694,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // （如个人词库 XGuai_user.dict.yaml）：不参与自动造词链——
         // 不进临时/固定词库、不参与组合生词。但仍是方案词典正常候选。
         if (word in noAutoWordWords) return
+        var changed = false
         for (code in codes) {
             if (code.isEmpty()) continue
-            val now = System.currentTimeMillis()
-            val temp = AutoWordStore.record(autoWordTemp, code, word, now, initialCount)
+            val temp = AutoWordStore.record(autoWordTemp, code, word, nowForRecord(), initialCount)
             if (temp === autoWordTemp) continue
             autoWordTemp = temp
+            changed = true
+        }
+        // promote 只跑一次（不在每个编码循环里重复）：
+        // 一个词有多个编码（如 3 字词 2-3 个），每次上屏对全部编码 record 后统一晋升一次，
+        // 避免 5 万条词库被重复全表遍历 N 遍。
+        if (changed) {
             val promotion = AutoWordStore.promote(
-                autoWordTemp, autoWordFixed, now,
+                autoWordTemp, autoWordFixed, System.currentTimeMillis(),
                 windowDays = config.promoteDays,
                 minCount = config.promoteCount,
             )
@@ -3613,6 +3715,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             autoWordFixed = promotion.fixed
         }
     }
+
+    /** 统一的当前毫秒时间戳（record 内多次调用保持一致性，避免跨毫秒边界）。 */
+    private fun nowForRecord(): Long = System.currentTimeMillis()
 
     /**
      * 把自动造词（临时+固定词库）中编码匹配当前输入的词合并进候选尾部。
@@ -3634,11 +3739,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         isT9: Boolean,
         isAscii: Boolean,
     ): CandidateOrderStore.Reordered? {
-        FileLogger.d(
-            TAG,
-            "mergeAutoWord ENTER: code='$code' isT9=$isT9 isAscii=$isAscii " +
-                "temp=${autoWordTemp.size} fixed=${autoWordFixed.size} engine=${engineCandidates.size}"
-        )
         if (isT9 || isAscii || code.isEmpty()) return null
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         if (!autoWordConfig.enabled) return null
@@ -3648,11 +3748,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             code = code,
             known = engineCandidates.toHashSet(),
             prefixMatch = autoWordConfig.prefixMatch,
-        )
-        FileLogger.d(
-            TAG,
-            "mergeAutoWord: code='$code' enabled=${autoWordConfig.enabled} prefixMatch=${autoWordConfig.prefixMatch} " +
-                "temp=${autoWordTemp.size} fixed=${autoWordFixed.size} engine=${engineCandidates.size} extra=${extra.size} extra=$extra"
         )
         if (extra.isEmpty()) return null
         // 引擎候选无显式 actions 时（非 T9 无插件变换：显示 index 即引擎 index），

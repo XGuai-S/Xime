@@ -257,12 +257,13 @@ internal object AutoWordStore {
     }
 
     /**
-     * 晋升与淘汰：
-     * - 首次上屏起窗口（7 天）内上屏满 2 次的词 → 移入固定词库（权重按次数换算，供 custom_phrase 使用）；
-     * - 超过窗口天数没再上屏的词 → 从临时库淘汰。
+     * 晋升与淘汰（两个窗口同源：都从**最后一次上屏**算起，即滚动窗口）。
+     * - 最近 [windowDays] 天内上屏满 [minCount] 次的词 → 移入固定词库（权重按次数换算）；
+     * - 超过 [windowDays] 天没再上屏的词 → 从临时库淘汰。
      *
-     * 两个窗口都取 [windowDays]（默认 7 天，可在 xime.yaml 的 `auto_word.promote_days` 调整）：
-     * 晋升从**首次**上屏算起，淘汰从**最后**上屏算起——常用的词不会被误删。
+     * 早先版本晋升从**首次**上屏算起，导致「首次上屏后 7 天内没攒够次数」的词
+     * 永远无法晋升（windowPassed 恒真），实测 5 万条临时词库 0 条晋升。
+     * 改为按 lastSeen 判定后，常用词只要最近仍在使用就能晋升。
      *
      * 每次上屏后调用，幂等：无待晋升/待淘汰时返回原表。
      */
@@ -280,14 +281,15 @@ internal object AutoWordStore {
         val nextTemp = LinkedHashMap<String, LinkedHashMap<String, Entry>>()
         for ((code, words) in temp) {
             for ((word, entry) in words) {
-                val windowPassed = now - entry.firstSeen > limit
+                // 窗口一律从「最后一次上屏」算起（滚动）：淘汰与晋升同一判据，
+                // 避免首次上屏超期后晋升永久失效。
                 val stale = now - entry.lastSeen > limit
                 when {
-                    // 窗口内攒够次数：晋升固定词库
-                    !windowPassed && entry.count >= needCount -> promoted += entry
-                    // 超过窗口没再上屏：淘汰
+                    // 超过窗口没再上屏：淘汰（优先于晋升，避免复活久不用的词）
                     stale -> Unit
-                    // 仍在窗口内：留在临时库继续观察
+                    // 窗口内攒够次数：晋升固定词库
+                    entry.count >= needCount -> promoted += entry
+                    // 仍在窗口内但次数不够：留在临时库继续观察
                     else -> nextTemp.getOrPut(code) { LinkedHashMap() }[word] = entry
                 }
             }
@@ -354,7 +356,8 @@ internal object AutoWordStore {
     ): List<String> {
         if (code.isEmpty()) return emptyList()
         val out = ArrayList<String>()
-        val seen = HashSet<String>()
+        // seen 初始就装入引擎已有词：让完整命中段与结尾过滤都省掉重复判断
+        val seen = HashSet<String>(known)
         // 1) 完整编码命中：固定库按权重降序，临时库垫底
         fixed[code]?.entries?.sortedByDescending { it.value }?.forEach { (word, _) ->
             if (seen.add(word)) out += word
@@ -372,7 +375,7 @@ internal object AutoWordStore {
             prefixFixed.sortByDescending { it.second }
             for ((word, _) in prefixFixed) {
                 if (added >= MAX_PREFIX_CANDIDATES) break
-                if (word in known || !seen.add(word)) continue
+                    if (!seen.add(word)) continue
                 out += word
                 added++
             }
@@ -386,13 +389,13 @@ internal object AutoWordStore {
                 prefixTemp.sortByDescending { it.second }
                 for ((word, _) in prefixTemp) {
                     if (added >= MAX_PREFIX_CANDIDATES) break
-                    if (word in known || !seen.add(word)) continue
+                    if (!seen.add(word)) continue
                     out += word
                     added++
                 }
             }
         }
-        return out.filter { it !in known }
+        return out
     }
 
     /** 晋升权重：次数越多权重越高（与 [CandidateOrderStore.fullOrderWeights] 同一量级）。 */

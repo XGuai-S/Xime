@@ -481,6 +481,17 @@ data class AutoWordConfig(
      */
     @SerialName("no_freq_dicts")
     val noFreqDicts: List<String> = emptyList(),
+    /**
+     * 自动造词的**单字码来源词典**（词典文件名去掉 `.dict.yaml` 后缀，如 `Flypy_char`）。
+     *
+     * 组合生词/新词的编码按该词典里的单字满四码拼出（2 字各取前 2 码；3 字两种；
+     * 4 字及以上取前三字首码 + 尾字首码）。为空时退回「从方案全部词典里收集单字码」的
+     * 旧行为——但混用简码/全码的词典会让造出的码打不出来，因此推荐显式指定一张纯单字表。
+     *
+     * 该词典不参与候选、只作造词基底，需存在于 rime 目录（可见目录或私有目录均可）。
+     */
+    @SerialName("char_dict")
+    val charDict: String = "Flypy_char",
 )
 
 /**

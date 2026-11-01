@@ -133,6 +133,14 @@ class RimeEngine {
 
     companion object {
         private const val TAG = "RimeEngine"
+        /**
+         * 按键重试等锁上限。
+         *
+         * 按键在 key-process 单线程上串行执行，等锁太久会把后续按键全部堵死；
+         * 太短则部署/维护瞬间仍会丢键。100ms 是「让用户几乎感知不到丢键，
+         * 又不至于让快打排队」的折中。
+         */
+        private const val KEY_LOCK_RETRY_WAIT_MS = 100L
         private var instance: RimeEngine? = null
         private var deploymentCallback: ((Boolean, String) -> Unit)? = null
 
@@ -169,6 +177,71 @@ class RimeEngine {
     private val initLock = Any()
     @Volatile
     private var userDataDir: String = ""
+
+    /**
+     * 最近一次快照里的引擎原始候选文本缓存。
+     *
+     * 用途：选词/删词时需要把「显示层索引」映射回「引擎原始索引」
+     * （[resolveRimeCandidateIndex] 本质是一次 indexOf 查找）。原先调用方每次都
+     * 重新 `getCandidates()` 走一遍 JNI + 全量数组转换，只为查一个下标；
+     * 而这份候选在每个按键后的快照里已经拿到过了，直接复用即可。
+     *
+     * 只由持锁路径写入（快照/候选查询成功后），读侧无锁且允许短暂过期：
+     * 一旦有新快照写入就会覆盖。缓存为空时调用方回退真实 JNI 查询。
+     */
+    @Volatile
+    private var cachedCandidates: List<String> = emptyList()
+
+    /**
+     * 最近一次快照里的组合编码（input）缓存。
+     *
+     * 用途：撞码保护（avoid_auto_select）每个字母键都要读一次「当前编码」来拼 nextCode，
+     * 原先固定调 `getInput()` 走 JNI；而每次按键处理完的快照里已经有最新编码了，
+     * 直接复用可省掉每键一次 JNI（中文快打时是纯热路径）。
+     * 缓存为空表示未知，调用方回退真实查询。
+     */
+    @Volatile
+    private var cachedInputText: String = ""
+
+    /** 写入候选缓存（仅在已持 rimeLock 的成功路径里调用）。 */
+    private fun updateCandidatesCache(candidates: Array<RimeCandidate>) {
+        cachedCandidates = candidates.map { it.text }
+    }
+
+    /** 写入编码缓存（与候选缓存同源，仅在已持 rimeLock 的成功路径里调用）。 */
+    private fun updateInputTextCache(input: String) {
+        cachedInputText = input
+    }
+
+    /**
+     * 作废两份快照缓存。
+     *
+     * 在「直接改写引擎组合状态」的操作后调用（setInput / clearComposition /
+     * selectCandidate / commit / deleteCandidate / switchSchema 等）：这些操作绕过了
+     * 快照写入路径，若不失效会让调用方读到与引擎不一致的旧编码/旧候选
+     * （典型后果：撞码保护拿旧编码拼 nextCode，选词索引映射按旧候选查错位）。
+     * 作废后调用方会自动回退真实 JNI 查询，行为与优化前一致。
+     */
+    private fun invalidateSnapshotCaches() {
+        cachedCandidates = emptyList()
+        cachedInputText = ""
+    }
+
+    /**
+     * 读取最近一次快照的组合编码（不触碰 native、不取锁）。
+     *
+     * 供 avoid_auto_select 拼 nextCode 等「只需知道当前编码」的场景复用，省一次 JNI。
+     * 编码可能比真实引擎状态旧一个按键（新快照写入即覆盖），调用方对时序敏感时应用
+     * [getInput] 真实查询。
+     */
+    fun getCachedInputText(): String = cachedInputText
+
+    /**
+     * 读取最近一次快照的引擎原始候选（不触碰 native、不取锁，开销为一次字段读）。
+     *
+     * 返回空列表表示尚未缓存（如键盘刚启动还没处理过按键），调用方应回退 JNI 查询。
+     */
+    fun getCachedCandidates(): List<String> = cachedCandidates
 
     /**
      * 管理路径（初始化/部署/会话创建/方案切换等）：阻塞等待锁。
@@ -294,13 +367,22 @@ class RimeEngine {
     }
 
     fun processKeyAndGetResult(keycode: Int, mask: Int): RimeProcessResult {
-        if (!isInitialized) return RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
-        return tryLocked(RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)) {
-            if (!nativeHasSession() && !nativeCreateSession())
-                return@tryLocked RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
-            nativeProcessKeyAndGetResult(keycode, mask)
+        if (!isInitialized) return emptyProcessResult()
+        val result = tryLocked(emptyProcessResult()) {
+            if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked emptyProcessResult()
+            val r = nativeProcessKeyAndGetResult(keycode, mask)
+            // 同步刷新两处缓存：下一键的 avoid_auto_select / 选词索引映射可直接复用，
+            // 省掉之后各自的 getInput() / getCandidates() 独立 JNI。
+            updateCandidatesCache(r.candidates)
+            updateInputTextCache(r.inputText)
+            r
         }
+        return result
     }
+
+    /** 空结果（未处理）的统一样本，避免各处重复构造。 */
+    private fun emptyProcessResult() =
+        RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
 
     fun getProcessResult(processed: Boolean): RimeProcessResult {
         if (!isInitialized) return RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
@@ -309,7 +391,10 @@ class RimeEngine {
         // 释放旧 translations）并发会导致悬空 → ScriptTranslation::Peek 空指针崩溃。
         // 部署/编译持锁期间拿不到锁直接返回空结果（不进 native），避免阻塞调用线程。
         return tryLocked(RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)) {
-            nativeGetProcessResult(processed)
+            val r = nativeGetProcessResult(processed)
+            updateCandidatesCache(r.candidates)
+            updateInputTextCache(r.inputText)
+            r
         }
     }
 
@@ -332,6 +417,8 @@ class RimeEngine {
                     comment = pair.getOrElse(1) { "" }
                 )
             }.toTypedArray()
+            updateCandidatesCache(candidates)
+            updateInputTextCache(input)
             RimeProcessResult(
                 processed = true,
                 committedText = "",
@@ -373,12 +460,14 @@ class RimeEngine {
         return tryLocked(emptyArray()) {
             if (!nativeHasSession()) return@tryLocked emptyArray()
             val rawCandidates = nativeGetCandidatesWithComments() ?: emptyArray()
-            rawCandidates.map { pair ->
+            val mapped = rawCandidates.map { pair ->
                 RimeCandidate(
                     text = pair.getOrElse(0) { "" },
                     comment = pair.getOrElse(1) { "" }
                 )
             }.toTypedArray()
+            updateCandidatesCache(mapped)
+            mapped
         }
     }
 
@@ -420,7 +509,9 @@ class RimeEngine {
     fun selectCandidate(index: Int): Boolean {
         return tryLocked(false) {
             if (!nativeHasSession()) return@tryLocked false
-            nativeSelectCandidate(index)
+            val ok = nativeSelectCandidate(index)
+            if (ok) invalidateSnapshotCaches()
+            ok
         }
     }
 
@@ -489,7 +580,9 @@ class RimeEngine {
 
     fun commit(): String {
         return tryLocked("") {
-            nativeCommit() ?: ""
+            val text = nativeCommit() ?: ""
+            if (text.isNotEmpty()) invalidateSnapshotCaches()
+            text
         }
     }
 
@@ -497,6 +590,7 @@ class RimeEngine {
         if (!nativeHasSession()) return
         tryLocked(Unit) {
             nativeClearComposition()
+            invalidateSnapshotCaches()
         }
     }
 
@@ -514,7 +608,9 @@ class RimeEngine {
         if (!isInitialized) return false
         return tryLocked(false) {
             if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked false
-            nativeSetInput(input)
+            val ok = nativeSetInput(input)
+            if (ok) invalidateSnapshotCaches()
+            ok
         }
     }
 

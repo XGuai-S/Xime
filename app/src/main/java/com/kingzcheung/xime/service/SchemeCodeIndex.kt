@@ -107,28 +107,49 @@ internal object SchemeCodeIndex {
         val perCharCodes: List<List<String>> = chars.map { ch ->
             charCodes[ch]?.takeIf { it.isNotEmpty() } ?: return emptyList()
         }
-        val result: List<String> = when (chars.size) {
-            2 -> combine(perCharCodes[0].map { it.take(PER_CHAR_CODE_LENGTH) },
-                         perCharCodes[1].map { it.take(PER_CHAR_CODE_LENGTH) })
-            3 -> combine(
-                perCharCodes[0].map { it.take(1) },
-                perCharCodes[1].map { it.take(1) },
-                perCharCodes[2].map { it.take(1) },
-            ) + combine(
-                perCharCodes[0].map { it.take(1) },
-                perCharCodes[1].map { it.take(1) },
-                perCharCodes[2].map { it.take(PER_CHAR_CODE_LENGTH) },
+        // 按「编码形态」分组，每组单独保留配额后再合并。
+        // 原因：3 字词有两种形态（三首码 3 码 / 前两字首码+第三字前 2 码 4 码），
+        // 若把两种形态揉成一个列表再按「短码优先」截断，多音字产生的 3 码形态
+        // 很容易占满 16 条配额，4 码形态被整体丢弃，表现为「3 字两种编码只有一种
+        // 生效」（用户按 4 码打时搜不到该词）。分组配额保证每种形态都有位置。
+        val formGroups: List<List<String>> = when (chars.size) {
+            2 -> listOf(
+                combine(perCharCodes[0].map { it.take(PER_CHAR_CODE_LENGTH) },
+                        perCharCodes[1].map { it.take(PER_CHAR_CODE_LENGTH) })
+            )
+            3 -> listOf(
+                // 形态一：各字首码
+                combine(
+                    perCharCodes[0].map { it.take(1) },
+                    perCharCodes[1].map { it.take(1) },
+                    perCharCodes[2].map { it.take(1) },
+                ),
+                // 形态二：前两字首码 + 第三字前 2 码
+                combine(
+                    perCharCodes[0].map { it.take(1) },
+                    perCharCodes[1].map { it.take(1) },
+                    perCharCodes[2].map { it.take(PER_CHAR_CODE_LENGTH) },
+                ),
             )
             // 4 字及以上：前三字首码 + 尾字首码（中间的字不取）
-            else -> combine(perCharCodes[0].map { it.take(1) },
-                            perCharCodes[1].map { it.take(1) },
-                            perCharCodes[2].map { it.take(1) },
-                            perCharCodes.last().map { it.take(1) })
+            else -> listOf(
+                combine(perCharCodes[0].map { it.take(1) },
+                        perCharCodes[1].map { it.take(1) },
+                        perCharCodes[2].map { it.take(1) },
+                        perCharCodes.last().map { it.take(1) })
+            )
         }
-        return result
-            .filter { it.isNotEmpty() }
+        val perFormQuota = maxOf(1, MAX_CODES_PER_WORD / formGroups.size)
+        return formGroups
+            .flatMap { group ->
+                group.filter { it.isNotEmpty() }
+                    .distinct()
+                    // 每种形态内部也短码优先，让该形态的 firstOrNull 最实用
+                    .sortedWith(compareBy<String> { it.length }.thenBy { it })
+                    .take(perFormQuota)
+            }
             .distinct()
-            // 短码优先，超上限时截断：既限制词库编码条数，也让 firstOrNull 是最实用的码
+            // 整体仍短码优先（调用方 firstOrNull 取的是最实用的码）
             .sortedWith(compareBy<String> { it.length }.thenBy { it })
             .take(MAX_CODES_PER_WORD)
     }

@@ -599,19 +599,19 @@ keyboard:
       # delete：单击删除、长按重复删、上滑清空、下滑撤回、左滑按住快速删除（滑动幅度越大越快，抬手即停）、右滑清空输入
       delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: repeat_delete, label: "快速删除" }, swipe_right: { action: command, value: clear_composition } }
       # ── 第四行功能键（位置/是否出现由上方 layout.rows 第四行决定；行为在此定义）──
-      # 控制行宽度比：四个侧键等宽 1.1、空格 2.5（末行 5 键；含数字行时即第五行），中英键盘一致
+      # 控制行宽度比：四个侧键等宽 0.9、空格 2.5（末行 5 键；含数字行时即第五行），中英键盘一致
       # 123：单击直达九键数字键盘，长按切符号面板（命令值走键盘按键路由）
-      mode_change: { width: 1.1, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
+      mode_change: { width: 0.9, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
       # 空格键：单击上屏空格；长按语音输入；上下滑切换中/英文（Rime 官方 ascii_mode 开关）；左右滑移动光标
       # 长按若想改为「重复空格」：long_press: { values: [ { action: repeat_space, value: 5 } ] }
       space: { width: 2.5, tap: { action: space }, long_press: { values: [ { label: "语音", action: voice } ] }, swipe_up: { action: toggle_ascii, label: "中/英" }, swipe_down: { action: toggle_ascii, label: "中/英" }, swipe_left: { action: cursor_left, value: 1, label: "左移光标" }, swipe_right: { action: cursor_right, value: 1, label: "右移光标" } }
       # 回车键
       # 回车键：上滑重复上一次上屏内容（action: repeat 走「重复上一次输入」同一实现）
-      enter: { width: 1.1, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
+      enter: { width: 0.9, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
       #  逗号键，label 为中文显示，value 为英文显示+提交值
-      comma: { width: 1.1, tap: { label: "，", value: "," }, swipe_up: { label: "？", value: "?" } , long_press: { display: "bubble", values: [ ",","."] }}
+      comma: { width: 0.9, tap: { label: "，", value: "," }, swipe_up: { label: "？", value: "?" } , long_press: { display: "bubble", values: [ ",","."] }}
       # 句号键（Rime 官方 punctuator 中 "." 的提交值）。label 中文显示、value 英文显示+提交值
-      period: { width: 1.1, tap: { label: "。", value: "." }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
+      period: { width: 0.9, tap: { label: "。", value: "." }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
       # 中/英切换键，label 为按键显示文字
       earth: { tap: { label: "@language", action: "toggle_ascii" }, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
     
@@ -665,17 +665,17 @@ keyboard:
 # delete：单击删除、长按重复删、上滑清空、下滑撤回、左滑按住快速删除（滑动幅度越大越快，抬手即停）、右滑清空输入
       delete: { width: 1.4, tap: { action: delete }, long_press: { values: [ { action: delete, label: "删除" } ] }, swipe_up: { action: clear_all, label: "上滑清空" }, swipe_down: { action: undo_clear, label: "下滑撤回" }, swipe_left: { action: repeat_delete, label: "快速删除" }, swipe_right: { action: command, value: clear_composition } }
       # 123：单击直达九键数字键盘，长按切符号面板（宽度比同中文键盘：侧键 1.1、空格 2.5）
-      mode_change: { width: 1.1, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
+      mode_change: { width: 0.9, tap: { label: "123", action: command, value: mode_change_number }, long_press: { display: bubble, values: [ { label: 符号, action: command, value: mode_change_common_symbol } ] } }
       # 空格键：单击上屏空格；长按语音输入；上下滑切换中/英文；左右滑移动光标
       # 长按若想改为「重复空格」：long_press: { values: [ { action: repeat_space, value: 5 } ] }
       space: { width: 2.5, tap: { action: space }, long_press: { values: [ { label: "语音", action: voice } ] }, swipe_up: { action: toggle_ascii, label: "中/英" }, swipe_down: { action: toggle_ascii, label: "中/英" }, swipe_left: { action: cursor_left, value: 1, label: "左移光标" }, swipe_right: { action: cursor_right, value: 1, label: "右移光标" } }
       # 回车键
       # 回车键
       # 回车键：上滑重复上一次上屏内容（与中文键盘同语义）
-      enter: { width: 1.1, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
+      enter: { width: 0.9, tap: { action: enter }, swipe_up: { action: repeat, label: "重复" } }
       #  逗号键，label 为中文显示，value 为英文显示+提交值
-      comma: { width: 1.1, tap: { label: ".", value: "." }, swipe_up: { label: ",", value: "," } }
-      period: { width: 1.1, tap: { label: ".", value: "." } }
+      comma: { width: 0.9, tap: { label: ".", value: "." }, swipe_up: { label: ",", value: "," } }
+      period: { width: 0.9, tap: { label: ".", value: "." } }
       # 中/英切换键，label 为按键显示文字
       earth: { tap: { label: "@language", action: "toggle_ascii" , bubble: false}, long_press: { display: "bubble", values: [ { label: "选择输入法", action: "command", value: "show_ime_picker" } ] } }
 
@@ -1138,6 +1138,11 @@ keyboard:
 auto_word:
   # 总开关：关闭后不收录、不统计（已生成的文件原样保留）
   enabled: true
+  # 自动造词的【单字码来源】词典名（去掉 .dict.yaml 后缀）：造词编码按该表里的单字
+  # 满四码拼出（2 字各取前 2 码；3 字生成两种；4 字及以上取前三字首码 + 尾字首码）。
+  # 推荐放一张纯单字表（每字一行满四码），如小鹤音形的 Flypy_char；留空则退回从方案
+  # 全部词典里混杂收集（主码表单字简码/全码混合，易编出打不出来的码）。
+  char_dict: Flypy_char
   # 临时词库保留天数：超过该天数没再被选中的词删除（默认 7 天，不满晋升条件就删）
   promote_days: 7
   # 晋升固定词库所需被选中次数（点选或空格选中上屏各算一次）
