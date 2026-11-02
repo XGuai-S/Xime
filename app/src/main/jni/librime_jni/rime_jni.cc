@@ -26,6 +26,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unwind.h> // 信号安全的 native 调用栈采集
+#include <dlfcn.h>  // dladdr：崩溃时反查本 so 加载基址
+#include <pthread.h> // pthread_getname_np：崩溃时记录线程名
 
 #define LOG_TAG "XimeRime"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -200,7 +202,13 @@ public:
 
     bool hasSession()
     {
-        return session_id_ != 0;
+        // 必须同时满足 initialized_：librime 的 setup/initialize 未完成时
+        // Service::instance() 组件系统尚未建立，此时若存在残留 session_id_
+        // 就 call switchSchema -> select_schema -> ApplySchema，引擎构造里的
+        // switcher_ = New<Switcher>(this) 会因组件未注册而为空，
+        // 随后 switcher_->SetActiveSchema() 直接解引用空指针造成 SIGSEGV。
+        // 冷启动实测崩溃率超过 50%，日志 fault_addr=0x0 即此因。
+        return session_id_ != 0 && initialized_;
     }
 
     bool isMaintaining()
@@ -744,9 +752,19 @@ public:
 
     bool switchSchema(const char *schema_id)
     {
-        if (!rime || !session_id_)
+        if (!rime || !session_id_ || !initialized_)
         {
-            LOGE("switchSchema: rime or session not available");
+            // initialized_ 为假说明 setup/initialize 尚未完成（冷启动早期，
+            // 或刚 shutdown），此时任何 select_schema 都可能踩到未建好的组件系统
+            LOGE("switchSchema: rime/session/engine not ready");
+            return false;
+        }
+        // 空指针/空 id 保护：select_schema 会 new Schema(id)，id 非法时
+        // Schema::config_ 为空，后续 InitializeComponents/SetActiveSchema
+        // 会解引用空指针（引擎内部对 config 判空并不完整）。
+        if (!schema_id || !schema_id[0])
+        {
+            LOGE("switchSchema: empty schema_id");
             return false;
         }
 
@@ -1323,6 +1341,16 @@ public:
         // 目标方案与当前不同时只写缓存，随后的 switchSchema 自然生效
         if (!schema || schema->schema_id() != schema_id)
             return;
+        // 重建 Schema 会走 ApplySchema -> InitializeComponents -> 遍历配置树。
+        // 若此时引擎尚未完成 initialize（或方案 yaml 读不出），配置节点可能缺失，
+        // 遍历中对空 ConfigList/ConfigItem 解引用会 SIGSEGV（实测出现）。
+        // 引擎未就绪时放弃这次重放：覆盖值已写入 schema 配置，
+        // 下次 createSession/switchSchema 会自然带上，不影响功能。
+        if (!initialized_)
+        {
+            LOGD("applyPageSizeOverride: engine not initialized, skip re-apply");
+            return;
+        }
         session->ApplySchema(new rime::Schema(schema->schema_id()));
         LOGI("applyPageSizeOverride: re-applied schema '%s' (menu/page_size=%d)",
              schema_id, page_size_override_);
@@ -1345,13 +1373,20 @@ public:
 
     void setPageSize(const char *schema_id, int page_size)
     {
-        if (!rime)
+        if (!rime || !initialized_)
         {
-            LOGE("setPageSize: rime not available");
+            // initialized_ 为假表示 setup/initialize 尚未完成：此时配置树
+            // (schema_open / Service 组件) 都可能不完整，写入会踩空指针。
+            LOGE("setPageSize: rime/engine not ready");
             return;
         }
         if (page_size <= 0)
             return;
+        if (!schema_id || !schema_id[0])
+        {
+            LOGE("setPageSize: empty schema_id");
+            return;
+        }
         page_size_override_ = page_size;
         applyPageSizeOverride(schema_id);
     }
@@ -3111,6 +3146,10 @@ extern "C"
 
     static int g_native_crash_fd = -1;
     static bool g_signal_handler_installed = false;
+    // 本 so 加载基址（崩溃日志用来把绝对地址转成符号偏移）
+    static uintptr_t g_module_base = 0;
+    // 崩溃处理重入标志：保证同一时刻只有一个线程在写崩溃日志
+    static int g_crash_writing = 0;
 
     static void xime_safe_write(const char *s)
     {
@@ -3168,12 +3207,45 @@ extern "C"
 
     static void xime_native_crash_handler(int sig, siginfo_t *info, void * /*uctx*/)
     {
+        // 重入保护：本函数末尾会 raise(sig) 交还系统，若进程内多个线程同时崩溃
+        // （实测切方案时确有并发场景），两个线程会同时进入这里，
+        // write() 逐段输出必然交错，日志被写成
+        //   signal=0x6fb92b70400xb / module_base=\n==== NATIVE CRASH ====
+        // 这种无法解析的乱码。用原子交换抢占唯一写者：
+        // 抢不到的线程直接走末尾的重新抛出，让系统照常生成 tombstone。
+        if (__atomic_exchange_n(&g_crash_writing, 1, __ATOMIC_ACQ_REL))
+        {
+            signal(sig, SIG_DFL);
+            raise(sig);
+            return;
+        }
         if (g_native_crash_fd >= 0)
         {
             xime_safe_write("\n==== NATIVE CRASH ====\nsignal=");
             xime_safe_write_hex((uintptr_t)sig);
             xime_safe_write(" fault_addr=");
             xime_safe_write_hex((uintptr_t)info->si_addr);
+            // 记录线程名：native 崩溃常发生在非主线程（部署/后台推理），
+            // 只凭地址无法区分是哪个线程的上下文。pthread_getname_np 在信号
+            // 处理函数内是异步信号安全的（只读内核拷贝的线程名缓存）。
+            char tname[32];
+            tname[0] = '\0';
+            if (pthread_getname_np(pthread_self(), tname, sizeof(tname)) != 0)
+                tname[0] = '\0';
+            xime_safe_write("thread=");
+            xime_safe_write(tname[0] ? tname : "?");
+            xime_safe_write("\n");
+            // 记录本 so 的加载基址：每次 ASLR 基址不同，只有同时记录基址，
+            // 事后才能把绝对地址换算成符号表里的偏移（addr2line/nm 需要偏移）。
+            // 基址通过 dladdr 从本 so 内一个已知函数地址反推，结果缓存在静态变量里。
+            if (g_module_base == 0)
+            {
+                Dl_info dl;
+                if (dladdr((void *)&xime_native_crash_handler, &dl) != 0)
+                    g_module_base = (uintptr_t)dl.dli_fbase;
+            }
+            xime_safe_write("module_base=");
+            xime_safe_write_hex(g_module_base);
             xime_safe_write("\nbacktrace:\n");
             XimeBacktraceState bt;
             bt.count = 0;
@@ -3184,6 +3256,13 @@ extern "C"
                 xime_safe_write_hex((uintptr_t)i);
                 xime_safe_write(" ");
                 xime_safe_write_hex(bt.frames[i]);
+                // 本 so 内的帧额外输出偏移，可直接喂给 addr2line / nm
+                if (g_module_base != 0 && bt.frames[i] > g_module_base &&
+                    bt.frames[i] - g_module_base < 0x10000000ULL)
+                {
+                    xime_safe_write("  off=");
+                    xime_safe_write_hex(bt.frames[i] - g_module_base);
+                }
                 xime_safe_write("\n");
             }
             xime_safe_write("==== END ====\n");

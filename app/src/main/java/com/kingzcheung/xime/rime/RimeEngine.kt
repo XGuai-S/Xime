@@ -642,7 +642,15 @@ class RimeEngine {
 
     fun setPageSize(schemaId: String, pageSize: Int) {
         if (!isInitialized) return
-        nativeSetPageSize(schemaId, pageSize)
+        // 必须走 rimeLock：nativeSetPageSize 内部在「会话正用该方案」时会
+        // 重建 Schema（applyPageSizeOverride -> session->ApplySchema），
+        // 这跟 switchSchema 里的 ApplySchema 是同一类破坏性操作。
+        // 原实现没加锁，冷启动时方案重建可能同时在两个线程推进，
+        // 两边各自 ApplySchema 会并发重写引擎组件的配置树，
+        // 实测 SIGSEGV（shared_ptr<ConfigData>::operator-> 空指针）。
+                locked {
+            nativeSetPageSize(schemaId, pageSize)
+        }
     }
 
     fun switchSchema(schemaId: String): Boolean {
