@@ -153,17 +153,18 @@ object RimeConfigHelper {
         if (enabledSchemas.isEmpty()) return false
         for (schemaId in enabledSchemas) {
             val mainDict = SchemaManager.getMainDictName(context, schemaId)
-            if (!prismArtifactOk(buildDir, mainDict ?: schemaId)) return false
-            // 主词典决定 table.bin（复用他人词典的方案共用同一份 table）
+            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            // 纯 punctuator/lua 方案（无 table 词典、无 reverse_lookup）不产生任何
+            // bin 产物（如 numbers 仅 punct_translator），不应要求产物，直接放行。
+            if (mainDict == null && reverseDict == null) continue
             if (mainDict != null) {
+                // prism/table 按主词典名产出（复用他人词典的方案共用同一份产物）
+                if (!prismArtifactOk(buildDir, mainDict)) return false
                 if (!tableArtifactOk(buildDir, mainDict)) return false
             }
-            // 反查词典决定 reverse.bin（reverse_lookup 段，非 table 产物）。
-            // 仅在对应词典文件真实存在时才要求 reverse.bin——内置方案可能引用
-            // 未随包分发的词典（如 rime-wubi 的 pinyin_simp 声明 stroke 反查但
-            // 不提供 stroke.dict.yaml），librime 会静默跳过、不产出 reverse.bin，
-            // 若仍强制校验会让部署永远判定未完成。
-            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            // 反查词典决定 reverse.bin。仅在对应词典文件真实存在时才要求——
+            // 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
+            // stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过不产出。
             if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
                 if (!reverseArtifactOk(buildDir, reverseDict)) return false
             }
@@ -262,17 +263,18 @@ object RimeConfigHelper {
             // （历史 bug：只看「schema.yaml 存在」就判定完成，导致 deploy 被短路跳过，
             //  build 里永远没有 .bin → 引擎无词库 → engine=0 打不出字。）
             val mainDict = SchemaManager.getMainDictName(context, schemaId)
-            if (!prismArtifactOk(buildDir, mainDict ?: schemaId)) return false
-            // 主词典决定 table.bin（复用他人词典的方案共用同一份 table）
+            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            // 纯 punctuator/lua 方案（无 table 词典、无 reverse_lookup）不产生任何
+            // bin 产物（如 numbers 仅 punct_translator），不应要求产物，直接放行。
+            if (mainDict == null && reverseDict == null) continue
             if (mainDict != null) {
+                // prism/table 按主词典名产出（复用他人词典的方案共用同一份产物）
+                if (!prismArtifactOk(buildDir, mainDict)) return false
                 if (!tableArtifactOk(buildDir, mainDict)) return false
             }
-            // 反查词典决定 reverse.bin（reverse_lookup 段，非 table 产物）。
-            // 仅在对应词典文件真实存在时才要求 reverse.bin——内置方案可能引用
-            // 未随包分发的词典（如 rime-wubi 的 pinyin_simp 声明 stroke 反查但
-            // 不提供 stroke.dict.yaml），librime 会静默跳过、不产出 reverse.bin，
-            // 若仍强制校验会让部署永远判定未完成。
-            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            // 反查词典决定 reverse.bin。仅在对应词典文件真实存在时才要求——
+            // 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
+            // stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过不产出。
             if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
                 if (!reverseArtifactOk(buildDir, reverseDict)) return false
             }
