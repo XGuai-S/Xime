@@ -172,7 +172,9 @@ class ClipboardManager private constructor(private val context: Context) {
                 }
             }
             if (retries > 0) {
-                Handler(Looper.getMainLooper()).postDelayed({ readClipboard(retries - 1) }, 100L)
+                // 复用已持有的 mainHandler：原先每次重试都 new 一个 Handler，
+                // 剪贴板同步高频触发时会持续产生短命对象。
+                mainHandler.postDelayed({ readClipboard(retries - 1) }, 100L)
             } else {
                 Log.w(TAG, "Failed to read clipboard after all retries")
             }
