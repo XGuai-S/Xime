@@ -57,7 +57,8 @@ fun HandwritingLookupKeyboard(
     var settledCount by remember { mutableIntStateOf(0) }
     var fadingPrefix by remember { mutableIntStateOf(0) }
     var gonePrefix by remember { mutableIntStateOf(0) }
-    var currentStrokePoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
+    // 正在书写的笔画：原地追加，避免每帧 `List.plus` 整表复制（同主手写键盘）。
+    val currentStrokePoints = remember { mutableStateListOf<StrokePoint>() }
     var dragVersion by remember { mutableIntStateOf(0) }
     var lastStrokeEndMs by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
@@ -164,23 +165,19 @@ fun HandwritingLookupKeyboard(
                                 val dist = (ch.position - down.position).getDistance()
                                 if (dist > 12f) {
                                     dragged = true
-                                    currentStrokePoints =
-                                        listOf(StrokePoint(down.position.x, down.position.y))
+                                    currentStrokePoints.clear()
+                                    currentStrokePoints.add(StrokePoint(down.position.x, down.position.y))
                                     dragVersion++
                                 }
                             } else {
-                                currentStrokePoints =
-                                    currentStrokePoints + StrokePoint(ch.position.x, ch.position.y)
-                                dragVersion++
+                                currentStrokePoints.add(StrokePoint(ch.position.x, ch.position.y))
                             }
                         } else {
                             if (dragged) {
-                                val finalStroke = currentStrokePoints
-                                if (finalStroke.size >= 2) {
-                                    strokes.add(finalStroke)
-                                    currentStrokePoints = emptyList()
+                                if (currentStrokePoints.size >= 2) {
+                                    strokes.add(currentStrokePoints.toList())
                                 }
-                                currentStrokePoints = emptyList()
+                                currentStrokePoints.clear()
                                 lastStrokeEndMs = System.currentTimeMillis()
                                 if (strokes.isNotEmpty()) scheduleRecognition()
                             }
@@ -190,19 +187,22 @@ fun HandwritingLookupKeyboard(
                 }
             })
 
-        key(dragVersion) {
-            Canvas(Modifier.fillMaxSize()) {
-                // 三段渲染（同主手写键盘）：消失段不画、变淡段 0.3 透明度。
-                // 正在书写的笔画必须无条件渲染（尚未进入 strokes）
-                if (gonePrefix < fadingPrefix && gonePrefix < strokes.size) {
-                    renderStrokes(
-                        strokes.drop(gonePrefix).take(fadingPrefix - gonePrefix),
-                        emptyList(),
-                        keyTextColor.copy(alpha = 0.3f),
-                    )
-                }
-                renderStrokes(strokes.drop(fadingPrefix), currentStrokePoints, keyTextColor)
+        // 同主手写键盘：去掉 key(dragVersion) 包裹，让状态变化只触发重绘而非重建子树。
+        Canvas(Modifier.fillMaxSize()) {
+            // 三段渲染（同主手写键盘）：消失段不画、变淡段 0.3 透明度。
+            // 正在书写的笔画必须无条件渲染（尚未进入 strokes）
+            if (gonePrefix < fadingPrefix && gonePrefix < strokes.size) {
+                renderStrokes(
+                    strokes.subList(gonePrefix, fadingPrefix),
+                    emptyList(),
+                    keyTextColor.copy(alpha = 0.3f),
+                )
             }
+            renderStrokes(
+                strokes.subList(fadingPrefix.coerceIn(0, strokes.size), strokes.size),
+                currentStrokePoints,
+                keyTextColor,
+            )
         }
 
         Column(Modifier.fillMaxSize()) {

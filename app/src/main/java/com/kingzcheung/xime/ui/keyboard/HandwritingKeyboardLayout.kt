@@ -125,7 +125,14 @@ fun HandwritingKeyboardLayout(
     var fadingPrefix by remember { mutableIntStateOf(0) }
     // 视觉消失前缀（头部）：变淡 450ms 后推进，渲染时跳过
     var gonePrefix by remember { mutableIntStateOf(0) }
-    var currentStrokePoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
+    // 正在书写的笔画：用 [androidx.compose.runtime.snapshots.SnapshotStateList] 原地追加。
+    //
+    // 原先每次触摸移动都执行 `currentStrokePoints = currentStrokePoints + StrokePoint(...)`，
+    // `List.plus` 会**复制整个列表**：一笔 200 帧就是 O(n^2) 次元素拷贝 + 200 次
+    // MutableState 写入。而整根指针手势的 eachGesture/do-while 是长驻协程，
+    // 高频写入会不断打断并重跑整个绘制块。改为单次分配、原地 add，配合绘制块
+    // 内的视图订阅（见 Canvas 处注释）把每帧开销降为 O(1) 摊还。
+    val currentStrokePoints = remember { mutableStateListOf<StrokePoint>() }
     var dragVersion by remember { mutableIntStateOf(0) }
     var lastStrokeEndMs by remember { mutableLongStateOf(0L) }
     var pressedButton by remember { mutableIntStateOf(-1) }
@@ -328,24 +335,35 @@ fun HandwritingKeyboardLayout(
             }
         }
 
-        key(dragVersion) {
-            Canvas(Modifier.fillMaxSize()) {
-                // 三段渲染：[0,gonePrefix) 已消失不画；[gonePrefix,fadingPrefix) 变淡中；
-                // [fadingPrefix,end) 正常显示。正在书写的笔画（currentStrokePoints）必须
-                // 无条件渲染——它尚未进入 strokes，包进条件会导致笔迹写完才显示
-                if (gonePrefix < fadingPrefix && gonePrefix < strokes.size) {
-                    renderStrokes(
-                        strokes.drop(gonePrefix).take(fadingPrefix - gonePrefix),
-                        emptyList(),
-                        keyTextColor.copy(alpha = 0.3f),
-                    )
-                }
+        // 笔迹绘制：**不再用 `key(dragVersion)` 包住 Canvas**。
+        //
+        // 旧实现把整块 Canvas 放进 key(dragVersion)，而 dragVersion 在每次触摸移动
+        // 都会 +1，等价于每一帧销毁并重新 compose 整个绘制子树（Canvas 节点、
+        // 修饰符链、lambda 全部重建）——手写时笔画跟手差、发热的直接原因。
+        //
+        // 改为：绘制 lambda 里显式读取 states（strokes / fadingPrefix 等 / currentStrokePoints），
+        // 由 Compose 把这些读取记录为该 Canvas 的绘制依赖。状态变化只触发
+        // **重绘**（draw pass），不重建节点树。Canvas 的 draw lambda 自身就在
+        // 绘制阶段读取，因此这里天然形成对状态的订阅。
+        Canvas(Modifier.fillMaxSize()) {
+            // 三段渲染：[0,gonePrefix) 已消失不画；[gonePrefix,fadingPrefix) 变淡中；
+            // [fadingPrefix,end) 正常显示。正在书写的笔画（currentStrokePoints）必须
+            // 无条件渲染——它尚未进入 strokes，包进条件会导致笔迹写完才显示。
+            //
+            // 注：下面的 drop/take 仍在绘制阶段执行，但只产生**视图**（浅拷贝引用），
+            // 且绘制阶段本来就要遍历这些笔画，摊还成本远低于重建整棵子树。
+            if (gonePrefix < fadingPrefix && gonePrefix < strokes.size) {
                 renderStrokes(
-                    strokes.drop(fadingPrefix),
-                    currentStrokePoints,
-                    keyTextColor,
+                    strokes.subList(gonePrefix, fadingPrefix),
+                    emptyList(),
+                    keyTextColor.copy(alpha = 0.3f),
                 )
             }
+            renderStrokes(
+                strokes.subList(fadingPrefix.coerceIn(0, strokes.size), strokes.size),
+                currentStrokePoints,
+                keyTextColor,
+            )
         }
 
         val buttonActions = remember {
@@ -397,21 +415,21 @@ fun HandwritingKeyboardLayout(
                                         lastStrokeEndMs = 0L
                                         dragged = true
                                         pressedButton = -1
-                                        currentStrokePoints = listOf(StrokePoint(sx, sy))
+                                        currentStrokePoints.clear()
+                                        currentStrokePoints.add(StrokePoint(sx, sy))
                                         dragVersion++
                                     }
                                 } else {
-                                    currentStrokePoints = currentStrokePoints + StrokePoint(ch.position.x, ch.position.y)
-                                    dragVersion++
+                                    currentStrokePoints.add(StrokePoint(ch.position.x, ch.position.y))
                                 }
                             } else {
                                 if (dragged) {
-                                    val finalStroke = currentStrokePoints
-                                    if (finalStroke.size >= 2) {
-                                        strokes.add(finalStroke)
-                                        currentStrokePoints = emptyList()
+                                    // 定稿：快照成不可变列表再入 strokes（strokes 持有它做
+                                    // 识别/渲染，之后不能再被书写缓冲改动）。
+                                    if (currentStrokePoints.size >= 2) {
+                                        strokes.add(currentStrokePoints.toList())
                                     }
-                                    currentStrokePoints = emptyList()
+                                    currentStrokePoints.clear()
                                     onStrokeEnd()
                                     if (strokes.isNotEmpty()) {
                                         scheduleRecognition()

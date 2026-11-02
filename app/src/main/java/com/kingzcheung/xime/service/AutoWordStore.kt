@@ -428,33 +428,50 @@ internal object AutoWordStore {
         // 2) 前缀命中（仅 prefixMatch=true 时）：输入是某个已录编码的前缀（且没敲完）时也让词可见
         if (prefixMatch && code.length >= PREFIX_MIN_INPUT) {
             var added = 0
-            val prefixFixed = ArrayList<Pair<String, Int>>()
-            for ((c, words) in fixed) {
+            // 复用同一个可重用缓冲区：**不再每词分配 Pair/Triple**。
+            //
+            // 这里是按键热路径：每敲一个字母就跑一次。旧实现为每条命中词
+            // `word to weight` / `Triple(word, lastSeen, count)` 装箱一个对象，
+            // 前缀命中面大时（临时库上千条）每次按键产生上千个短命对象，
+            // 又在主线程触发 GC。改为索引排序 + 平行数组，零额外装箱。
+            val words = ArrayList<String>()
+            val weights = ArrayList<Long>()
+            for ((c, candidates) in fixed) {
                 if (c.length > code.length && c.startsWith(code)) {
-                    for ((word, weight) in words) prefixFixed += word to weight
+                    for ((word, weight) in candidates) {
+                        words += word
+                        weights += weight.toLong()
+                    }
                 }
             }
-            prefixFixed.sortByDescending { it.second }
-            for ((word, _) in prefixFixed) {
+            // 按权重降序取前 N（用索引排序，避免构造 (word,weight) 元组）
+            val order = words.indices.sortedByDescending { weights[it] }
+            for (idx in order) {
                 if (added >= MAX_PREFIX_CANDIDATES) break
-                    if (!seen.add(word)) continue
+                val word = words[idx]
+                if (!seen.add(word)) continue
                 out += Hit(word, fromTemp = false, count = 0)
                 added++
             }
             if (added < MAX_PREFIX_CANDIDATES) {
-                val prefixTemp = ArrayList<Triple<String, Long, Int>>()
-                for ((c, words) in temp) {
+                words.clear()
+                weights.clear()
+                val counts = ArrayList<Int>()
+                for ((c, candidates) in temp) {
                     if (c.length > code.length && c.startsWith(code)) {
-                        for ((word, entry) in words) {
-                            prefixTemp += Triple(word, entry.lastSeen, entry.count)
+                        for ((word, entry) in candidates) {
+                            words += word
+                            weights += entry.lastSeen
+                            counts += entry.count
                         }
                     }
                 }
-                prefixTemp.sortByDescending { it.second }
-                for ((word, _, count) in prefixTemp) {
+                val tempOrder = words.indices.sortedByDescending { weights[it] }
+                for (idx in tempOrder) {
                     if (added >= MAX_PREFIX_CANDIDATES) break
+                    val word = words[idx]
                     if (!seen.add(word)) continue
-                    out += Hit(word, fromTemp = true, count = count)
+                    out += Hit(word, fromTemp = true, count = counts[idx])
                     added++
                 }
             }
