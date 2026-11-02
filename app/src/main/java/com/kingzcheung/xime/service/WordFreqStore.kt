@@ -100,7 +100,7 @@ internal object WordFreqStore {
     /**
      * 记一次上屏：该 (编码, 词) 频数 +1。
      *
-     * 返回原表表示无需变更（词不可计入、编码为空、或已达表上限且是新编码）。
+     * 返回原表表示无需变更（词不可计入或编码为空）。
      */
     fun withCommit(
         table: Map<String, Map<String, Int>>,
