@@ -45,6 +45,7 @@ import com.kingzcheung.xime.handwriting.HW_RECOGNIZE_WINDOW_LIMIT
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
 import com.kingzcheung.xime.handwriting.renderStrokes
+import com.kingzcheung.xime.handwriting.strokeViewFrom
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.ui.isTablet
 import kotlinx.coroutines.Dispatchers
@@ -360,7 +361,7 @@ fun HandwritingKeyboardLayout(
                 )
             }
             renderStrokes(
-                strokes.subList(fadingPrefix.coerceIn(0, strokes.size), strokes.size),
+                strokes.strokeViewFrom(fadingPrefix),
                 currentStrokePoints,
                 keyTextColor,
             )

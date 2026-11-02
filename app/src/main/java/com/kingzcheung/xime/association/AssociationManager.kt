@@ -20,7 +20,10 @@ object AssociationManager {
     private var context: Context? = null
     
     suspend fun initialize(ctx: Context): Boolean = withContext(Dispatchers.IO) {
-        context = ctx
+        // 必须转成 applicationContext：本对象是进程级单例，直接持有传入的 Context
+        // 会把 InputMethodService / Activity 钉在内存里（服务重建后旧实例永不回收）。
+        // 应用上下文与进程同生命周期，不会泄漏。
+        context = ctx.applicationContext
         if (isInitialized) {
             FileLogger.d(TAG, "Already initialized")
             return@withContext true

@@ -23,6 +23,7 @@ import com.kingzcheung.xime.handwriting.HandwritingStrokeFx
 import com.kingzcheung.xime.handwriting.OverlappedHandwritingRecognizer
 import com.kingzcheung.xime.handwriting.StrokePoint
 import com.kingzcheung.xime.handwriting.renderStrokes
+import com.kingzcheung.xime.handwriting.strokeViewFrom
 import com.kingzcheung.xime.keyboard.KeyboardDimensions
 import com.kingzcheung.xime.ui.isTablet
 import com.kingzcheung.xime.viewmodel.KeyboardUiState
@@ -199,7 +200,7 @@ fun HandwritingLookupKeyboard(
                 )
             }
             renderStrokes(
-                strokes.subList(fadingPrefix.coerceIn(0, strokes.size), strokes.size),
+                strokes.strokeViewFrom(fadingPrefix),
                 currentStrokePoints,
                 keyTextColor,
             )

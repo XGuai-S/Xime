@@ -53,7 +53,8 @@ object HandwritingEngine {
             // 先释放旧 client 的绑定，避免重复 initialize 泄漏 ServiceConnection
             inferenceClient?.unbind()
             inferenceClient = client
-            appContext = ctx
+            // 单例持有 applicationContext，避免钉住 InputMethodService / Activity
+            appContext = ctx.applicationContext
             client.onDisconnected = {
                 // 进程被回收后系统 AUTO_CREATE 自动重启只恢复 binder，模型不会自己回来：
                 // 仅软重置本地"已加载"标志（不 unbind，保留自动重启），下次落笔由

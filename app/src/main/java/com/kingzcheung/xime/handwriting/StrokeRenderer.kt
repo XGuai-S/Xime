@@ -6,6 +6,20 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import kotlin.math.sqrt
 
+/**
+ * 截取 [from] 起的笔画切片，**不拷贝元素**（返回原列表视图）。
+ *
+ * 绘制阶段原先用 `drop(n)`：它每次都复制一份新 List。手写时每帧都会调用，
+ * 活动窗口内笔画累积到几十条，逐帧复制纯属浪费。这里走 `subList` 视图，
+ * 语义完全等价、零拷贝。
+ */
+internal fun List<List<StrokePoint>>.strokeViewFrom(from: Int): List<List<StrokePoint>> {
+    val start = from.coerceIn(0, size)
+    if (start == 0) return this
+    if (start >= size) return emptyList()
+    return subList(start, size)
+}
+
 private const val MIN_WIDTH = 12f
 private const val MAX_WIDTH = 36f
 private const val MIN_SPEED = 0.3f
