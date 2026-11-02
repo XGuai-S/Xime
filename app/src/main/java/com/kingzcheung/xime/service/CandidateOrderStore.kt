@@ -38,7 +38,14 @@ import java.io.File
  * 手改内容合回内存表（新增/修改保留、删除也尊重，见 [UserDataMerge]），不会被下一次
  * 保存冲掉。
  */
-internal object CandidateOrderStore {
+/**
+ * 候选排序表最多容纳的编码数。
+ *
+ * 一条编码对应一整组全序权重，4096 条已覆盖重度用户的全部常用码；
+ * 超出后不再收录新编码，保证 candidate_order.txt 体积有界（见 withFullOrder）。
+ */
+private const val MAX_CODES = 4096
+object CandidateOrderStore {
 
     /** 词频表文件名（可见配置目录与 xime.yaml 同级；回退时也用它。备份引擎按此名打包/恢复）。 */
     internal const val FILE_NAME = "candidate_order.txt"
@@ -155,6 +162,13 @@ internal object CandidateOrderStore {
     ): Map<String, Map<String, Int>> {
         if (code.isEmpty() || ordered.isEmpty()) return table
         val weights = fullOrderWeights(ordered)
+        // 编码数上限：只对**新编码**设卡。
+        //
+        // 拖动候选排序会为每个编码写一整组全序（不是单条），长期使用后
+        // candidate_order.txt 会随「敲过的不同编码」无限膨胀——文件越大启动解析越慢。
+        // 已达上限时拒绝新增编码，但**允许更新已有编码**（否则用户就没法再调整
+        // 现已排序过的那些词了）。
+        if (code !in table && table.size >= MAX_CODES) return table
         val next = LinkedHashMap(table)
         next[code] = weights
         return next

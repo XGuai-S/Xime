@@ -51,9 +51,16 @@ class RimeUserFileSyncContractTest {
         // 用「逐行扫描 + 记录当前作用域是否已同步」而不是比较全局下标：
         // 一个文件里可能有多个部署入口（ImeSchemaController 就有三个），
         // 全局下标只能验证第一个，漏掉的入口测不出来——本测试最初正是因此漏报。
+        // 覆盖**全部**部署入口，不只输入法主链路：
+        //   - RimeConfigHelper.ensureDeployment  首次/修复部署（build 缺失或产物损坏）
+        //   - SetupWizardScreen                  安装向导部署（用户重装/迁移后手工改过配置的场景）
+        // 这两处原先都漏了同步，表现为「改了配置点部署不生效」，
+        // 而旧用例只盯前面两个文件，正是漏报的原因——所以清单要含全部入口。
         val files = listOf(
             "app/src/main/java/com/kingzcheung/xime/service/ImeSchemaController.kt",
             "app/src/main/java/com/kingzcheung/xime/viewmodel/SchemaSettingsViewModel.kt",
+            "app/src/main/java/com/kingzcheung/xime/rime/RimeConfigHelper.kt",
+            "app/src/main/java/com/kingzcheung/xime/ui/settings/SetupWizardScreen.kt",
         )
         var deploySites = 0
         files.forEach { path ->
@@ -78,7 +85,10 @@ class RimeUserFileSyncContractTest {
                 }
             }
         }
-        assertTrue("应至少检查到 4 处部署调用，实际 $deploySites", deploySites >= 4)
+        // 当前 5 处：ImeSchemaController 1 + SchemaSettingsViewModel 1 +
+        // RimeConfigHelper 2（增量失败回退全量）+ SetupWizardScreen 1。
+        // 少于 5 处说明某个入口被删/重命名，测试清单需要同步更新。
+        assertTrue("应至少检查到 5 处部署调用，实际 $deploySites", deploySites >= 5)
     }
 
     @Test

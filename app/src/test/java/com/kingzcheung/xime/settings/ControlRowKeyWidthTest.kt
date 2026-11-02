@@ -66,13 +66,14 @@ class ControlRowKeyWidthTest {
     }
 
     @Test
-    fun `控制行四侧键等宽 1dot1 且空格为 2dot5`() {
-        // 用户指定比例：四个侧键等宽 1.1，空格 2.5，中英键盘一致。
-        // 侧键等宽意味着逗号/句号不再比 123/回车窄。
+    fun `控制行四侧键等宽 0dot9 且空格为 2dot5`() {
+        // 用户确认的目标比例：四个侧键等宽 0.9，空格 2.5，中英键盘一致。
+        // 侧键等宽意味着逗号/句号不再比 123/回车窄；0.9 相对 1.1 让侧键更紧凑、
+        // 空格更突出。本用例锁的是「四键等宽」这一不变量，具体数值随用户选择走。
         for (layout in listOf("qwerty", "qwerty_en")) {
             val keys = section(realYaml(), layout)
             for (id in controlRow - "space") {
-                assertWidth(1.1f, keys[id]?.width)
+                assertWidth(0.9f, keys[id]?.width)
             }
             assertWidth(2.5f, keys["space"]?.width)
         }

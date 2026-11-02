@@ -49,8 +49,8 @@ class KeyWidthConfigTest {
         assertWidth(2.5f, zh["space"]!!.width)
         assertWidth(1.4f, zh["delete"]!!.width)
         assertWidth(1.4f, zh["shift"]!!.width)
-        assertWidth(1.1f, zh["enter"]!!.width)
-        assertWidth(1.1f, zh["mode_change"]!!.width)
+        assertWidth(0.9f, zh["enter"]!!.width)
+        assertWidth(0.9f, zh["mode_change"]!!.width)
         // 字母键不写 width → 渲染层按 1 等宽处理
         assertWidth(null, zh["q"]!!.width)
     }

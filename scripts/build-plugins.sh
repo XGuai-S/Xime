@@ -1,55 +1,42 @@
 #!/bin/bash
-# 构建所有 TS 插件 xipk 包（Rust CLI: tools/xime-plugin）
+# 构建内置插件 xipk 包（Rust CLI: tools/xime-plugin，内置 rolldown，无需 Node）
 #
-# 使用方式：
-#   bash scripts/build-plugins.sh                    # 编译 + 打包到 build/plugin-release/
-#   bash scripts/build-plugins.sh --with-assets      # 同时同步内置插件到 app assets
+# 作用：把 ./plugins/<name> 的 TS 源码编译成单文件 IIFE，打包成 xipk，
+#       并拷进 app/src/main/assets/plugins/，供 release APK 内置。
 #
-# 插件源码为 TypeScript（plugins/<name>/main.ts + manifest.json + resources/），
-# 由 xipm CLI 编译为 IIFE 单文件 main.js 后打包为 xipk。
+# 为什么必须有这一步：release APK 的内置插件来自 assets/plugins/*.xipk。
+# 不跑本脚本就没有 xipk，release 装出来插件列表里不会出现内置插件
+# （BuiltinPluginAssetsTest 守的就是这个坑）。
+set -euo pipefail
 
-set -e
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLI="$PROJECT_DIR/tools/xime-plugin/target/release/xipm"
 
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-# 内置插件（随 APK 打包进 assets/plugins，安装后开箱可用；debug 与 release 一致）
+# 随包内置的插件清单（新增内置插件时加到这里）
 BUNDLED_PLUGINS="webdav-backup"
 
-WITH_ASSETS=0
-CLI_ARGS=()
-for arg in "$@"; do
-  if [ "$arg" = "--with-assets" ]; then
-    WITH_ASSETS=1
-  else
-    CLI_ARGS+=("$arg")
-  fi
-done
-
-echo "=== 构建 TS 插件 xipk 包（xipm CLI）==="
-
-cd "$PROJECT_DIR/tools/xime-plugin"
-cargo run --quiet -- pack --all \
-  --plugins-dir "$PROJECT_DIR/plugins" \
-  --out "$PROJECT_DIR/build/plugin-js" \
-  --release-dir "$PROJECT_DIR/build/plugin-release" \
-  "${CLI_ARGS[@]+"${CLI_ARGS[@]}"}"
-
-if [ "$WITH_ASSETS" = "1" ]; then
-  ASSETS_DIR="$PROJECT_DIR/app/src/main/assets/plugins"
-  echo ""
-  echo "=== 同步内置插件到 assets ==="
-  rm -f "$ASSETS_DIR"/*.xipk
-  for name in $BUNDLED_PLUGINS; do
-    if ls "$PROJECT_DIR/build/plugin-release/$name"-*.xipk >/dev/null 2>&1; then
-      cp "$PROJECT_DIR/build/plugin-release/$name"-*.xipk "$ASSETS_DIR/"
-      echo "  ↳ $name"
-    else
-      echo "  ! 未找到 $name 的 xipk 产物"
-      exit 1
-    fi
-  done
+# 1) 编译 CLI（首次或源码变更时；之后 cargo 会快速跳过）
+if [ ! -x "$CLI" ]; then
+    echo "→ 构建插件工具链 xipm ..."
+    ( cd "$PROJECT_DIR/tools/xime-plugin" && cargo build --release )
 fi
 
+if [ ! -x "$CLI" ]; then
+    echo "✗ 未找到 $CLI，构建失败" >&2
+    exit 1
+fi
+
+# 2) 逐个打包
+for name in $BUNDLED_PLUGINS; do
+    src="$PROJECT_DIR/plugins/$name"
+    if [ ! -d "$src" ]; then
+        echo "✗ 缺少插件源码目录 plugins/$name" >&2
+        exit 1
+    fi
+    echo "→ 打包 $name"
+    "$CLI" pack "$src" --with-assets
+done
+
 echo ""
-echo "=== 完成 ==="
-ls -lh "$PROJECT_DIR/build/plugin-release"/*.xipk
+echo "=== 内置插件产物 ==="
+ls -lh "$PROJECT_DIR/app/src/main/assets/plugins"/*.xipk

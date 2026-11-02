@@ -7,6 +7,7 @@ import com.kingzcheung.xime.settings.PersonalDictManager
 import com.kingzcheung.xime.settings.MarketVersionStore
 import com.kingzcheung.xime.settings.SchemaManager
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.io.FileOutputStream
@@ -64,6 +65,12 @@ object RimeConfigHelper {
     fun ensureDeployment(context: Context): Boolean {
         synchronized(deploymentLock) {
             val buildDir = File(context.filesDir, "rime/build")
+            // 部署前先把用户在可见目录（Documents/rime/xime）里的改动同步进
+            // Rime 工作目录。漏这一步的后果：用户改了方案/词典，点部署后
+            // 编译的仍是旧内容，表现为「改了没生效」，要等下次别的入口部署才生效。
+            // （契约测试「每一处部署调用之前都必须有同步」守的就是这条。）
+            runCatching { RimeUserFileSync.sync(context) }
+                .onFailure { FileLogger.w(TAG, "ensureDeployment: RimeUserFileSync.sync failed", it) }
             val currentHash = computeDeploymentHash(context)
             // 关键：hash 只覆盖源文件，不覆盖 build 产物。产物被
             // isBrokenBuildArtifact 判损坏删除后源文件并未变化 → hash 仍一致，

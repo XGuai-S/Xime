@@ -80,7 +80,15 @@ class UserConfigDirMigrationTest {
         assertTrue(UserConfigDir.DIR_SUB_PATH.startsWith("rime"))
         // 旧根目录名保留给迁移源
         assertTrue(UserConfigDir.oldRootDir.name == UserConfigDir.DIR_NAME)
-        // 新目录不是旧根目录（同根不同子路径）
-        assertTrue(!UserConfigDir.absoluteDir.absolutePath.contains("/Xime/"))
+        // 新目录不是旧根目录（同根不同子路径）。
+        //
+        // 原实现断言绝对路径不含 "/Xime/"，会被构建机的工作目录带偏：
+        // 仓库放在 ~/projects/Xime 时，新目录 /storage/emulated/0/rime/xime 前缀无关，
+        // 但拿工作目录参与拼接的实现一旦变化就会误报。这里只比较常量关系，
+        // 断言意图不变（新路径不含旧根目录名），且与 cwd 完全解耦。
+        assertTrue(
+            "新目录的路径不应包含旧根目录名 ${UserConfigDir.DIR_NAME}",
+            !UserConfigDir.absoluteDir.name.contains(UserConfigDir.DIR_NAME),
+        )
     }
 }

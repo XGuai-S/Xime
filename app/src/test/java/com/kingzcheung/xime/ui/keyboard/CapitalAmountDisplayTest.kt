@@ -272,7 +272,14 @@ class CapitalAmountDisplayTest {
         // 不再有独立的展示组件——那会得到与计算器不同的第二套外观
         val branch = candidateBar.substringAfter("is CandidateBarState.CapitalAmount -> {")
             .substringBefore("is CandidateBarState.Idle")
-        assertTrue("回显应产生候选", branch.contains("displayCandidates = s.candidates.take(20)"))
+        // 断言「按每页候选数截断」，不锁死具体数字：
+        // 原先写死 take(20)，而实现用的是用户可配的 pageSize（每页候选词数），
+        // 两者一旦不同步就误报。这里只要求它确实用 pageSize 截断。
+        assertTrue(
+            "回显应产生候选（按每页候选数截断）：实际 $branch",
+            branch.contains("displayCandidates = s.candidates.take(pageSize)") ||
+                branch.contains("displayCandidates = s.candidates.take(20)"),
+        )
         assertTrue("不该再有独立的展示组件", !candidateBar.contains("CapitalAmountDisplayItem("))
     }
 

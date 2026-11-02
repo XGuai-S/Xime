@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.ui.settings
 
 import android.content.Context
+import com.kingzcheung.xime.settings.RimeUserFileSync
 import android.content.Intent
 import android.provider.Settings
 import android.util.Log
@@ -610,6 +611,9 @@ private suspend fun doCompile(
 
             // 2. 部署 = 编译词库 + 创建 session（一步完成）
             onProgress("正在编译词库...")
+            // 向导可能是在用户已手工改过配置目录之后才走的（重装/迁移场景）：
+            // 部署前先同步可见目录改动，否则编译出来的是旧配置。
+            runCatching { RimeUserFileSync.sync(context) }
             engine.deploy()
             RimeConfigHelper.storeDeploymentHash(context)
             SettingsPreferences.setDeploymentDone(context, true)
