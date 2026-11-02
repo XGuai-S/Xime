@@ -49,8 +49,32 @@ object FileLogger {
     private var running = false
     private val writeLock = Any()
     
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
-    private val fileDateFormat = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    /**
+     * 时间戳格式化：**每线程一份实例**。
+     *
+     * `SimpleDateFormat` 内部维护可变的 Calendar 字段，**不是线程安全的**。
+     * [writeToFile] 有几百个调用点，会从主线程、协程线程、日志线程并发进入，
+     * 共用一个实例时并发 `format` 会互相踩内部状态：轻则时间戳错乱（串到别人的
+     * 毫秒/数字错位），重则抛 `ArrayIndexOutOfBoundsException` 把整条日志丢掉。
+     * 用 [ThreadLocal] 每线程一份，比起加 `synchronized` 不会在热路径上引入锁竞争。
+     */
+    private val dateFormat: ThreadLocal<SimpleDateFormat> = ThreadLocal.withInitial {
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+    }
+
+    /** 文件名用的日期（yyyyMMdd）；线程安全问题同 [dateFormat]。 */
+    private val fileDateFormat: ThreadLocal<SimpleDateFormat> = ThreadLocal.withInitial {
+        SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    }
+
+    /** 当前线程的毫秒级时间戳（线程安全）。 */
+    private fun timestampOf(millis: Long = System.currentTimeMillis()): String =
+        dateFormat.get()!!.format(Date(millis))
+
+    /** 当前线程的 yyyyMMdd 日期串（线程安全）。 */
+    private fun fileDayOf(millis: Long = System.currentTimeMillis()): String =
+        fileDateFormat.get()!!.format(Date(millis))
+
     
     fun init(context: Context) {
         if (isInitialized) return
@@ -80,7 +104,7 @@ object FileLogger {
     }
     
     private fun openLogFile() {
-        val today = fileDateFormat.format(Date())
+        val today = fileDayOf()
         logFile = File(logsDir!!, "kime_$today.log")
         
         if (logFile!!.exists() && logFile!!.length() > MAX_LOG_SIZE) {
@@ -173,7 +197,7 @@ object FileLogger {
     private fun writeToFile(level: String, tag: String, message: String) {
         if (!isInitialized) return
         try {
-            val timestamp = dateFormat.format(Date())
+            val timestamp = timestampOf()
             val logLine = "$timestamp [$level] $tag: $message\n"
             logQueue.offer(logLine)
         } catch (e: Exception) {
@@ -240,7 +264,7 @@ object FileLogger {
                     w.newLine()
                     w.write("## ${file.sourceLabel} — ${file.file.name}")
                     w.newLine()
-                    w.write("## 修改时间：${dateFormat.format(Date(file.file.lastModified()))}  " +
+                    w.write("## 修改时间：${timestampOf(file.file.lastModified())}  " +
                         "大小：${file.file.length()} 字节")
                     w.newLine()
                     w.write("=".repeat(72))
@@ -281,7 +305,7 @@ object FileLogger {
     private fun collectionHeader(context: Context): String = buildString {
         appendLine("Xime 输入法 · 日志导出")
         appendLine("=".repeat(72))
-        appendLine("导出时间：${dateFormat.format(Date())}")
+        appendLine("导出时间：${timestampOf()}")
         appendLine("应用版本：${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         appendLine("构建类型：${if (BuildConfig.DEBUG) "debug" else "release"}")
         appendLine("日志级别：${logLevel.label}（${logLevel.name}）")
@@ -297,7 +321,7 @@ object FileLogger {
                 ?.filter { it.name.startsWith("kime_") }
                 ?.forEach { it.delete() }
             
-            val today = fileDateFormat.format(Date())
+            val today = fileDayOf()
             logFile = File(logsDir!!, "kime_$today.log")
             openLogFile()
             
