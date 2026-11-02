@@ -298,6 +298,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 加载约束同上（onCreate 里用已 attach 的 context 加载）。
      */
     internal var wordBlacklist: Map<String, Map<String, Int>> = emptyMap()
+
+    /**
+     * 四张词库是否已从磁盘装载完毕。
+     *
+     * 词库加载已移到 IO 线程（见 onCreate），在它完成前内存表是**空表占位**。
+     * 此时绝不能让 [saveWordData] 落盘——空表写回会直接抹掉用户的造词/词频/排序数据。
+     * 因此所有「写盘」入口必须先过这个标记：未装载完就跳过，等装载完成后的
+     * 正常防抖/退出保存再把真实内容写出去。
+     */
+    @Volatile
+    private var wordTablesLoaded = false
     private val clipboardItemsState = mutableStateOf<List<com.kingzcheung.xime.clipboard.ClipboardItem>>(emptyList())
     private val voiceAmplitudeState = mutableFloatStateOf(0f)
     private val voiceSpectrumState = mutableStateOf(FloatArray(16))
@@ -671,38 +682,64 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         KeyTapLogger.enabled = SettingsPreferences.isKeyTapLogEnabled(this)
         KeyTapLogger.schemaProvider = { uiState.value.currentSchemaId }
         FileLogger.i(TAG, "XimeInputMethodService created")
-        // 候选排序词频表：在 onCreate（context 已 attach）加载，字段初始化时不可用
-        candidateOrderTable = CandidateOrderStore.load(this)
-        wordFreqTable = WordFreqStore.load(this)
-        autoWordTemp = AutoWordStore.loadTemp(this)
-        // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
-        // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
-        // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
-        val rawFixed = AutoWordStore.loadFixedRaw(this)
-        val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
-        autoWordFixed = cleanFixed
-        if (cleanFixed !== rawFixed) {
-            // 确实发生了收敛：立即写盘，下次启动读到干净表
-            autoWordFixed = AutoWordStore.saveFixed(this, cleanFixed)
-            FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
-                "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
-        }
-        wordBlacklist = WordBlacklistStore.load(this)
-        FileLogger.d(
-            TAG,
-            "AutoWordStore loaded: temp=${autoWordTemp.size} entries, fixed=${autoWordFixed.size} entries, " +
-                "tempTotal=${autoWordTemp.values.sumOf { it.size }}, fixedTotal=${autoWordFixed.values.sumOf { it.size }}"
-        )
-        // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 7 天）没再上屏
-        // 的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
-        val prunedTemp = AutoWordStore.prune(
-            autoWordTemp,
-            System.currentTimeMillis(),
-            com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
-        )
-        if (prunedTemp !== autoWordTemp) {
-            autoWordTemp = prunedTemp
-            scheduleWordFreqSave()
+        // 候选排序/词频/造词/黑名单四张词库：**整体挪到 IO 线程加载**。
+        //
+        // 这里原来在 onCreate（主线程，即输入法服务创建期间）同步 readText + 逐行
+        // split + 建嵌套 Map 四份文件。真机数据量下（历史遗留曾达 5 万条 / 2.4MB
+        // 临时词库）这一步是「第一次弹键盘明显迟滞」的主因——服务创建占住主线程，
+        // 窗口画不出来。词库只是候选排序的增强项：**空表时全链路照常工作**
+        // （CandidateOrderStore/reorder 与 hitsFor 命中空表即原样返回），
+        // 因此可以先让键盘秒开，再后台补齐。IO 线程读完后在主线程原子替换字段。
+        //
+        // 注意保持「读 + 收敛 + 写回 + prune」的顺序完整执行：这些操作之间共享
+        // 内存态与磁盘基线，拆开并发会互相覆盖。
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val orderTable = CandidateOrderStore.load(this@XimeInputMethodService)
+                val freqTable = WordFreqStore.load(this@XimeInputMethodService)
+                val tempTable = AutoWordStore.loadTemp(this@XimeInputMethodService)
+                // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
+                // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
+                // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
+                val rawFixed = AutoWordStore.loadFixedRaw(this@XimeInputMethodService)
+                val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
+                var fixedTable = cleanFixed
+                if (cleanFixed !== rawFixed) {
+                    // 确实发生了收敛：立即写盘，下次启动读到干净表
+                    fixedTable = AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
+                    FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
+                        "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
+                }
+                val blacklistTable = WordBlacklistStore.load(this@XimeInputMethodService)
+                // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 7 天）
+                // 没再上屏的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
+                val prunedTemp = AutoWordStore.prune(
+                    tempTable,
+                    System.currentTimeMillis(),
+                    com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
+                )
+                val needSave = prunedTemp !== tempTable
+                // 一次性在主线程发布，避免候选链路读到「一半新一半旧」的中间态
+                withContext(Dispatchers.Main) {
+                    wordTablesLoaded = true
+                    candidateOrderTable = orderTable
+                    wordFreqTable = freqTable
+                    autoWordTemp = prunedTemp
+                    autoWordFixed = fixedTable
+                    wordBlacklist = blacklistTable
+                    if (needSave) scheduleWordFreqSave()
+                    FileLogger.d(
+                        TAG,
+                        "Word tables ready: temp=${'$'}{autoWordTemp.size} entries, " +
+                            "fixed=${'$'}{autoWordFixed.size} entries, " +
+                            "tempTotal=${'$'}{autoWordTemp.values.sumOf { it.size }}, " +
+                            "fixedTotal=${'$'}{autoWordFixed.values.sumOf { it.size }}"
+                    )
+                }
+            } catch (t: Throwable) {
+                // 词库加载失败不应拖垮输入法：记日志后保持空表继续工作
+                FileLogger.e(TAG, "词库加载失败，候选排序/造词降级为空表", t)
+            }
         }
         FileLogger.i(
             TAG,
@@ -2989,6 +3026,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun saveCandidateOrder(code: String, ordered: List<String>) {
         if (ordered.isEmpty()) return
+        // 词库未装载完时内存表是空表占位，落盘会覆盖掉磁盘上的真实排序表
+        if (!wordTablesLoaded) return
         // 先吃进用户在配置目录里的手改，再叠加本次拖动结果
         candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
         candidateOrderTable = CandidateOrderStore.withFullOrder(candidateOrderTable, code, ordered)
@@ -3818,6 +3857,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun addWordBlacklist(word: String, code: String = "") {
         if (word.isEmpty()) return
+        // 词库未装载完时内存表是空表占位，落盘会覆盖掉磁盘上的真实黑名单
+        if (!wordTablesLoaded) return
         // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词
         wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
         val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
@@ -3882,6 +3923,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * （见 [UserDataMerge]），返回值必须采纳——不采纳的话下次保存又会冲掉。
      */
     private fun saveWordData() {
+        // 词库还没从磁盘装载完（onCreate 中的 IO 任务未完成，见 [wordTablesLoaded]）：
+        // 此刻内存里是空表占位，落盘会把空的词频/造词/排序**覆盖掉真实数据**。
+        // 直接跳过——装载完成后会有正常的上屏防抖与退出保存把内容写出去。
+        if (!wordTablesLoaded) {
+            FileLogger.w(TAG, "saveWordData skipped: 词库尚未装载完成，避免空表覆盖磁盘")
+            return
+        }
         wordFreqTable = WordFreqStore.save(this, wordFreqTable)
         autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
         autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
