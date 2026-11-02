@@ -465,7 +465,19 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             isAsciiMode = isAsciiMode,
             pendingEnglish = pendingEnglish,
         )
-        service.uiState.value = service.uiState.value.copy(isAsciiMode = isAsciiMode)
+        // 仅当值真的变化时才写入。
+        //
+        // 原实现无条件 copy()：`copy` 必然产生**新实例**，而 Compose 的 mutableStateOf
+        // 用 equals 判定是否变化——同值 copy 出的新对象 equals 相等，不会触发重组，
+        // 但 KeyboardContent 里 `remember(state, ...)` 把整个 uiState 当 key，
+        // 拿到的是新实例引用，于是 kbState 每次输入都被重建、KeyboardView 全量重组。
+        // 那处注释写着「候选变化时 KeyboardView 跳过重组」，实际因为这里每次赋新对象而失效
+        // （实测：连打 10 键产生 86 帧，其中大量是按键区无用重组）。
+        //
+        // 加判等后引用保持不变，键盘按键区得以真正跳过重组。
+        if (service.uiState.value.isAsciiMode != isAsciiMode) {
+            service.uiState.value = service.uiState.value.copy(isAsciiMode = isAsciiMode)
+        }
         // 展开态时刷新跨页全量候选并重置页码（编码已变化）
         service.refreshExpandedCandidates()
         // 候选展开页：编码删空（候选与联想均空）时自动收起，不留空页

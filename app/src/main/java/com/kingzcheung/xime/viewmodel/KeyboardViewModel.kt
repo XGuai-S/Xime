@@ -47,69 +47,84 @@ data class SchemaSwitchUiState(
     val currentIndex: Int = 0,
 )
 
+/**
+ * 键盘渲染所需的视图状态。
+ *
+ * ## 为什么大部分字段是委托而不是复制
+ *
+ * 这些字段与 [com.kingzcheung.xime.service.InputUIState] 同名同义，原先在
+ * `KeyboardContent` 里逐字段抄一遍（43 个字段手写复制）。两份状态靠人工同步，
+ * 漏一处就会出现「键盘显示英文、实际打中文」这类难复现的错位；而且每次输入
+ * 都要重新构造整个对象。
+ *
+ * 现在改为**委托读取**同一个 [InputUIState] 实例：
+ *   - 单一数据源，不存在两份状态不同步的可能；
+ *   - 调用方 `state.xxx` 写法完全不变，无需改动任何 UI 代码；
+ *   - 构造时只需传一个 [InputUIState]，不再逐字段抄写。
+ *
+ * 只有键盘渲染真正需要、而 [InputUIState] 里没有（或语义不同）的字段才保留为
+ * 独立属性，例如 [isDarkTheme]、[keyboardHeightDp]、[clipboardItems]。
+ */
 data class KeyboardUiState(
-    val isAsciiMode: Boolean = false,
-    val schemaName: String = "",
-    val currentSchemaId: String = "",
-    val schemas: List<SchemaInfo> = emptyList(),
-    val schemaSwitches: List<SchemaSwitchUiState> = emptyList(),
-    val enterKeyText: String = "发送",
+    /** 委托的权威状态源。 */
+    val source: com.kingzcheung.xime.service.InputUIState,
     val isDarkTheme: Boolean = false,
-    val darkMode: Int = 2,
-    val themeId: String = "ocean_blue",
     val keyboardHeightDp: Int = 0,
-    val keyboardBottomPaddingDp: Int = 0,
     val isDeploying: Boolean = false,
     val deploymentMessage: String = "",
     val clipboardItems: List<ClipboardItem> = emptyList(),
     val quickSendItems: List<ClipboardItem> = emptyList(),
     val recentClipboardItems: List<ClipboardItem> = emptyList(),
-    val isVoiceMode: Boolean = false,
-    val voiceSticky: Boolean = false,
     val voiceBottomActive: Boolean = false,
     val voiceLeftActive: Boolean = false,
     val voiceRightActive: Boolean = false,
-    val voicePluginName: String = "",
-    val voiceRecognitionState: RecognitionState = RecognitionState.IDLE,
-    val voiceRecognizedText: String = "",
-    val isSttEnabled: Boolean = true,
-    val toolbarButtons: List<String> = ToolbarButton.DEFAULT_VISIBLE.map { it.id },
-    /** 已启用插件声明的工具栏按钮（候选池），渲染时与内置按钮合并。 */
-    val toolbarPluginButtons: List<ToolbarButtonItem.Plugin> = emptyList(),
     val isCalculatorMode: Boolean = false,
-    val inputSessionId: Long = 0L,
-    /** 本次 inputSessionId 变化是否为 restarting（同一编辑框刷新，如发送消息后 app restartInput）：
-     *  restarting 不是新会话，KeyboardView 据此跳过 ascii 记忆状态机 reset（记忆被清会导致
-     *  退出面板时 fallback 到引擎的面板态，主键盘被误留英文）。 */
-    val isInputSessionRestarting: Boolean = false,
-    val isFloatingMode: Boolean = false,
     val isHandwritingMode: Boolean = false,
-    val floatingOffsetX: Int = 0,
-    val floatingOffsetY: Int = 0,
-    val t9ResetSignal: Long = 0L,
-    /** 大写金额模式「结束本次输入」信号：候选栏点选后自增，键盘据此退出模式并作废累积。
-     *  与 [t9ResetSignal] 同一套单向信号，避免键盘与服务各持一份模式状态。 */
-    val capitalAmountExitSignal: Long = 0L,
-    val swipeCancelEpoch: Long = 0L,
-    val t9RightCandidateSelectedCount: Long = 0L,
-    val t9SelectedCandidatePinyin: String = "",
-    val showQuickSendForm: Boolean = false,
-    val quickSendFormFocused: Boolean = false,
-    val quickSendEditingItemId: Long? = null,
-    val quickSendEditingItemText: String = "",
-    val quickSendEditingItemCode: String = "",
-    val toolPanelVisible: Boolean = false,
-    val toolPanelInputFocused: Boolean = false,
-    val toolPanelPluginId: String = "",
-    val toolPanelTitle: String = "",
-    val toolPanelPrefillText: String = "",
-    val toolPanelItems: List<PluginResultItem> = emptyList(),
-    val toolPanelLoading: Boolean = false,
-    val toolPanelRequestEpoch: Long = 0,
-    val toolPanelDisplay: String? = null,
-    val toolPanelUiNodes: List<com.kingzcheung.xime.plugin.core.config.UiNode>? = null,
-    val clipboardSyncEnabled: Boolean = false,
-)
+) {
+    val isAsciiMode: Boolean get() = source.isAsciiMode
+    val schemaName: String get() = source.schemaName
+    val currentSchemaId: String get() = source.currentSchemaId
+    val schemas: List<SchemaInfo> get() = source.schemas
+    val schemaSwitches: List<SchemaSwitchUiState> get() = source.schemaSwitches
+    val enterKeyText: String get() = source.enterKeyText
+    val darkMode: Int get() = source.darkMode
+    val themeId: String get() = source.themeId
+    val keyboardBottomPaddingDp: Int get() = source.keyboardBottomPaddingDp
+    val isVoiceMode: Boolean get() = source.isVoiceMode
+    val voiceSticky: Boolean get() = source.voiceSticky
+    val voicePluginName: String get() = source.voicePluginName
+    val voiceRecognitionState: RecognitionState get() = source.voiceRecognitionState
+    val voiceRecognizedText: String get() = source.voiceRecognizedText
+    val isSttEnabled: Boolean get() = source.isSttEnabled
+    val toolbarButtons: List<String> get() = source.toolbarButtons
+    val toolbarPluginButtons: List<ToolbarButtonItem.Plugin> get() = source.toolbarPluginButtons
+    val inputSessionId: Long get() = source.inputSessionId
+    val isInputSessionRestarting: Boolean get() = source.isInputSessionRestarting
+    val isFloatingMode: Boolean get() = source.isFloatingMode
+    val floatingOffsetX: Int get() = source.floatingOffsetX
+    val floatingOffsetY: Int get() = source.floatingOffsetY
+    val t9ResetSignal: Long get() = source.t9ResetSignal
+    val capitalAmountExitSignal: Long get() = source.capitalAmountExitSignal
+    val swipeCancelEpoch: Long get() = source.swipeCancelEpoch
+    val t9RightCandidateSelectedCount: Long get() = source.t9RightCandidateSelectedCount
+    val t9SelectedCandidatePinyin: String get() = source.t9SelectedCandidatePinyin
+    val showQuickSendForm: Boolean get() = source.showQuickSendForm
+    val quickSendFormFocused: Boolean get() = source.quickSendFormFocused
+    val quickSendEditingItemId: Long? get() = source.quickSendEditingItemId
+    val quickSendEditingItemText: String get() = source.quickSendEditingItemText
+    val quickSendEditingItemCode: String get() = source.quickSendEditingItemCode
+    val toolPanelVisible: Boolean get() = source.toolPanelVisible
+    val toolPanelInputFocused: Boolean get() = source.toolPanelInputFocused
+    val toolPanelPluginId: String get() = source.toolPanelPluginId
+    val toolPanelTitle: String get() = source.toolPanelTitle
+    val toolPanelPrefillText: String get() = source.toolPanelPrefillText
+    val toolPanelItems: List<PluginResultItem> get() = source.toolPanelItems
+    val toolPanelLoading: Boolean get() = source.toolPanelLoading
+    val toolPanelRequestEpoch: Long get() = source.toolPanelRequestEpoch
+    val toolPanelDisplay: String? get() = source.toolPanelDisplay
+    val toolPanelUiNodes: List<com.kingzcheung.xime.plugin.core.config.UiNode>? get() = source.toolPanelUiNodes
+    val clipboardSyncEnabled: Boolean get() = source.clipboardSyncEnabled
+}
 
 class KeyboardViewModel(application: Application) : AndroidViewModel(application) {
 

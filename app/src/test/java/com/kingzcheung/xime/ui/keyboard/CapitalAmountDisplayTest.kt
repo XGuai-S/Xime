@@ -338,12 +338,23 @@ class CapitalAmountDisplayTest {
 
     @Test
     fun `退出信号两端字段名一致`() {
-        // 服务 → 键盘的信号链，任一处漏传都会表现为「点选后仍留在模式里」
+        // 服务 → 键盘的信号链，任一处漏传都会表现为「点选后仍留在模式里」。
+        //
+        // 注意验证方式随架构调整过：KeyboardUiState 曾经是 InputUIState 的**逐字段复制**，
+        // 所以要逐个断言「X 字段被复制过来了」。现在改为**委托读取**同一个 InputUIState，
+        // 字段不再复制、也就不存在「漏传」这种可能——此时再断言复制语句反而会误报。
+        // 因此这里改成断言更强的性质：信号字段必须在 InputUIState 里定义，且 KeyboardUiState
+        // 必须**委托**读取它（而不是自己另存一份，那样两边才可能不同步）。
         assertTrue("InputUIState 缺少信号", source("InputUIState.kt").contains("val capitalAmountExitSignal: Long = 0,"))
-        assertTrue("KeyboardUiState 缺少信号", source("KeyboardViewModel.kt").contains("val capitalAmountExitSignal: Long = 0L,"))
         assertTrue(
-            "服务未下发信号",
-            source("XimeInputMethodService.kt").contains("capitalAmountExitSignal = state.capitalAmountExitSignal,"),
+            "KeyboardUiState 未委托读取信号（自己另存一份会与服务端不同步）",
+            source("KeyboardViewModel.kt").contains(
+                "val capitalAmountExitSignal: Long get() = source.capitalAmountExitSignal",
+            ),
+        )
+        assertTrue(
+            "KeyboardUiState 应委托同一个 InputUIState 实例，而不是复制字段",
+            source("KeyboardViewModel.kt").contains("val source: com.kingzcheung.xime.service.InputUIState,"),
         )
         assertTrue("KeyboardView 未传信号", keyboardView.contains("capitalAmountExitSignal = state.capitalAmountExitSignal,"))
         assertTrue(
