@@ -236,8 +236,16 @@ fun rememberSwipeBubbleDrawData(
 
     val paddingPx = with(density) { 10.dp.toPx() } * bubbleScale
 
+    // 长按图标 Bitmap 缓存。
+    // 原实现直接 remember(key) 返回 List<Bitmap>：key（长按图标 id 列表 +
+    // 文字颜色）每次变化都会生成新列表，旧 Bitmap 失去引用却不会立即回收，
+    // 长时间使用会持续堆积（实测 native Bitmap 计数 106 个）。
+    // 改为自己持有 holder，在 key 变化时对比旧列表并显式 recycle 掉不再使用的项，
+    // 同时保留仍在使用的项避免重复创建。
+    val longPressIconHolder = remember { LongPressIconHolder() }
     val longPressIconBitmaps = remember(swipeState.longPressDrawableIds, textColor) {
-        swipeState.longPressDrawableIds.mapNotNull { id ->
+        val wanted = swipeState.longPressDrawableIds
+        val fresh = wanted.mapNotNull { id ->
             val drawable = context.resources.getDrawable(id, context.theme)?.mutate() ?: return@mapNotNull null
             drawable.setTint(textColor)
             val w = drawable.intrinsicWidth.coerceAtLeast(1)
@@ -248,6 +256,12 @@ fun rememberSwipeBubbleDrawData(
             drawable.draw(bmpCanvas)
             bitmap
         }
+        longPressIconHolder.replace(wanted, fresh)
+        fresh
+    }
+    // 组合彻底离开时释放最后一批图标，避免键盘隐藏后仍驻留。
+    DisposableEffect(longPressIconHolder) {
+        onDispose { longPressIconHolder.releaseAll() }
     }
 
     return BubbleDrawData(
@@ -406,5 +420,36 @@ fun DrawScope.drawSwipeBubble(data: BubbleDrawData) {
         }
 
         canvas.restore()
+    }
+}
+
+/**
+ * 长按图标 Bitmap 的持有者。
+ *
+ * 职责：在缓存 key 变化时释放**不再被使用**的 Bitmap，避免 Compose 的
+ * remember(key) 只替换不回收造成的堆积。
+ *
+ * 只释放旧列表中与新列表不共享的项；新旧完全相同时不做任何事。
+ * recycle 前统一判 isRecycled，避免重复回收抛异常。
+ */
+internal class LongPressIconHolder {
+    private var ids: List<Int> = emptyList()
+    private var bitmaps: List<Bitmap> = emptyList()
+
+    fun replace(newIds: List<Int>, newBitmaps: List<Bitmap>) {
+        // 新列表已构建完成，旧列表可以安全释放（新对象不引用旧对象）
+        bitmaps.forEach { bmp ->
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+        ids = newIds
+        bitmaps = newBitmaps
+    }
+
+    fun releaseAll() {
+        bitmaps.forEach { bmp ->
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+        bitmaps = emptyList()
+        ids = emptyList()
     }
 }

@@ -432,12 +432,17 @@ private fun buildNode(file: File): FileNode {
             val writer = QRCodeWriter()
             val bitMatrix = writer.encode(url, BarcodeFormat.QR_CODE, size, size)
             val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
-            for (x in 0 until size) {
-                for (y in 0 until size) {
-                    bitmap.setPixel(x, y,
-                        if (bitMatrix[x, y]) Color.BLACK else Color.WHITE)
+            // setPixel 逐点写 512*512=26 万次，每点都有 JNI 开销。
+            // 改为一次性构建 int 数组后 setPixels 批写，性能提升数倍，
+            // 同时避免对 RGB_565 的逐点 setPixel 频繁格式转换。
+            val pixels = IntArray(size * size)
+            for (y in 0 until size) {
+                val row = y * size
+                for (x in 0 until size) {
+                    pixels[row + x] = if (bitMatrix[x, y]) Color.BLACK else Color.WHITE
                 }
             }
+            bitmap.setPixels(pixels, 0, size, 0, 0, size, size)
             bitmap
         } catch (e: Exception) {
             Log.e(TAG, "QR generation failed", e)
