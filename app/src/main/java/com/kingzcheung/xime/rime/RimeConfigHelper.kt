@@ -152,14 +152,48 @@ object RimeConfigHelper {
         val enabledSchemas = SchemaManager.getEnabledSchemas(context)
         if (enabledSchemas.isEmpty()) return false
         for (schemaId in enabledSchemas) {
-            val prism = File(buildDir, "$schemaId.prism.bin")
-            val table = File(buildDir, "$schemaId.table.bin")
-            if (!prism.isFile || !table.isFile) return false
-            if (isBrokenBuildArtifact(prism) || isBrokenBuildArtifact(table)) return false
+            val mainDict = SchemaManager.getMainDictName(context, schemaId)
+            if (!prismArtifactOk(buildDir, mainDict ?: schemaId)) return false
+            // 主词典决定 table.bin（复用他人词典的方案共用同一份 table）
+            if (mainDict != null) {
+                if (!tableArtifactOk(buildDir, mainDict)) return false
+            }
+            // 反查词典决定 reverse.bin（reverse_lookup 段，非 table 产物）。
+            // 仅在对应词典文件真实存在时才要求 reverse.bin——内置方案可能引用
+            // 未随包分发的词典（如 rime-wubi 的 pinyin_simp 声明 stroke 反查但
+            // 不提供 stroke.dict.yaml），librime 会静默跳过、不产出 reverse.bin，
+            // 若仍强制校验会让部署永远判定未完成。
+            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
+                if (!reverseArtifactOk(buildDir, reverseDict)) return false
+            }
         }
         return true
     }
 
+
+    /** 方案声明的 prism 产物按 schemaId 命名。 */
+    internal fun prismArtifactOk(buildDir: File, schemaId: String): Boolean {
+        val prism = File(buildDir, "$schemaId.prism.bin")
+        return prism.isFile && !isBrokenBuildArtifact(prism)
+    }
+
+    /** table 产物按 dictionary 名产出（复用他人词典的方案共用同一份 table）。 */
+    internal fun tableArtifactOk(buildDir: File, dictName: String): Boolean {
+        val table = File(buildDir, "$dictName.table.bin")
+        return table.isFile && !isBrokenBuildArtifact(table)
+    }
+
+    /** 反查词典产物按 reverse.bin 命名（reverse_lookup 段引用的词典，非 table 产物）。 */
+    internal fun reverseArtifactOk(buildDir: File, dictName: String): Boolean {
+        val reverse = File(buildDir, "$dictName.reverse.bin")
+        return reverse.isFile && !isBrokenBuildArtifact(reverse)
+    }
+
+    /** 该词典的源文件是否真实存在于用户 rime 目录（缺失则相关产物不应被强制要求）。 */
+    internal fun schemaHasDictFile(context: Context, dictName: String): Boolean {
+        return File(context.filesDir, "rime/$dictName.dict.yaml").isFile
+    }
     fun storeDeploymentHash(context: Context) {
         val hash = computeDeploymentHash(context)
         if (hash.isNotEmpty()) {
@@ -227,10 +261,20 @@ object RimeConfigHelper {
             // 不能作为「已部署」标志；必须以编译产物 prism.bin + table.bin 为准。
             // （历史 bug：只看「schema.yaml 存在」就判定完成，导致 deploy 被短路跳过，
             //  build 里永远没有 .bin → 引擎无词库 → engine=0 打不出字。）
-            val schemaArtifact = File(buildDir, "$schemaId.prism.bin")
-            val tableArtifact = File(buildDir, "$schemaId.table.bin")
-            if (!schemaArtifact.exists() || !tableArtifact.exists()) {
-                return false
+            val mainDict = SchemaManager.getMainDictName(context, schemaId)
+            if (!prismArtifactOk(buildDir, mainDict ?: schemaId)) return false
+            // 主词典决定 table.bin（复用他人词典的方案共用同一份 table）
+            if (mainDict != null) {
+                if (!tableArtifactOk(buildDir, mainDict)) return false
+            }
+            // 反查词典决定 reverse.bin（reverse_lookup 段，非 table 产物）。
+            // 仅在对应词典文件真实存在时才要求 reverse.bin——内置方案可能引用
+            // 未随包分发的词典（如 rime-wubi 的 pinyin_simp 声明 stroke 反查但
+            // 不提供 stroke.dict.yaml），librime 会静默跳过、不产出 reverse.bin，
+            // 若仍强制校验会让部署永远判定未完成。
+            val reverseDict = SchemaManager.getReverseLookupDictName(context, schemaId)
+            if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
+                if (!reverseArtifactOk(buildDir, reverseDict)) return false
             }
         }
 

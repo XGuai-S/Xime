@@ -567,6 +567,79 @@ object SchemaManager {
         } catch (e: Exception) { null }
     }
 
+    /**
+     * 解析 schema 引用的全部 dictionary 名（去重，按出现顺序）。
+     * 一个方案可能有多个 translator（如 wubi86_pinyin 同时引用 wubi86 与 pinyin_simp），
+     * librime 的 table.bin 按 dictionary 名产出，而非 schemaId——部署完整性校验必须
+     * 按这些真实词典名校验，否则复用他人词典的方案（wubi86_pinyin / t9_pinyin）会
+     * 永远找不到 $schemaId.table.bin 而被误判为未部署。
+     */
+    /**
+     * 解析 schema 的「主词典」名（决定需要哪个 table.bin）。
+     *
+     * 只认顶层 `translator:` 段下的 `dictionary:`——`reverse_lookup:` 段的 dictionary
+     * （反查词典，如 pinyin_simp 的 stroke、wubi86_pinyin 的 pinyin_simp）产出的是
+     * reverse.bin 而非 table.bin，混在一起会把反查词典误判为缺 table.bin 的缺省项。
+     *
+     * 多个 translator（如翻译器列表含 table_translator + script_translator）时取首个
+     * 非空 dictionary；无 translator 段的方案回退 schemaId 自身。
+     */
+    fun getMainDictName(context: Context, schemaId: String): String? {
+        val schemaFile = File(getRimeDir(context), "$schemaId.schema.yaml")
+        if (!schemaFile.exists()) return null
+        return try {
+            var inTranslator = false
+            var found: String? = null
+            for (raw in schemaFile.readLines()) {
+                // 顶层 key（无前导空格，且非注释）切换段
+                if (raw.isNotEmpty() && !raw[0].isWhitespace()) {
+                    if (raw.startsWith("translator:")) {
+                        inTranslator = true
+                        continue
+                    }
+                    if (inTranslator) inTranslator = false
+                }
+                if (inTranslator) {
+                    val m = Regex("""^\s+dictionary\s*:\s*['\"]?(\w[\w-]*)['\"]?""")
+                        .find(raw)
+                    if (m != null) {
+                        found = m.groupValues.getOrNull(1)
+                        break
+                    }
+                }
+            }
+            found
+        } catch (e: Exception) { null }
+    }
+
+    /** 解析 schema 的「反查词典」名（决定需要哪个 reverse.bin）。 */
+    fun getReverseLookupDictName(context: Context, schemaId: String): String? {
+        val schemaFile = File(getRimeDir(context), "$schemaId.schema.yaml")
+        if (!schemaFile.exists()) return null
+        return try {
+            var inReverse = false
+            var found: String? = null
+            for (raw in schemaFile.readLines()) {
+                if (raw.isNotEmpty() && !raw[0].isWhitespace()) {
+                    if (raw.startsWith("reverse_lookup:")) {
+                        inReverse = true
+                        continue
+                    }
+                    if (inReverse) inReverse = false
+                }
+                if (inReverse) {
+                    val m = Regex("""^\s+dictionary\s*:\s*['\"]?(\w[\w-]*)['\"]?""")
+                        .find(raw)
+                    if (m != null) {
+                        found = m.groupValues.getOrNull(1)
+                        break
+                    }
+                }
+            }
+            found
+        } catch (e: Exception) { null }
+    }
+
     fun hasDictFile(context: Context, schemaId: String): Boolean {
         val dictName = getReferencedDictName(context, schemaId) ?: schemaId
         val f = File(getRimeDir(context), "$dictName.dict.yaml")
