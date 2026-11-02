@@ -389,7 +389,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 if (isAsciiMode && committed.isNotEmpty() && result.inputText.isEmpty() && result.candidates.isEmpty()) {
                     val current = candState.pendingEnglishText
                     val newPending = current + committed
-                    service.candidateState.value = service.candidateState.value.copy(pendingEnglishText = newPending)
+                    // 本段在 keyProcessingDispatcher 工作线程：Compose mutableStateOf 非线程安全
+                    service.updateCandidateState { it.copy(pendingEnglishText = newPending) }
                     // 直接上屏模式：只提交 Rime 返回的增量字符（如智能引号转换结果），
                     // 整段 pending 对应的文本已逐字上屏，不可重复提交。
                     withContext(Dispatchers.Main) {
@@ -847,21 +848,21 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             // 回删替换也会破坏受限宿主的输入。NO_SUGGESTIONS 只是宿主
             // 不要内联补全，候选栏联想仍提供（与退格/applyComposition 路径同口径）。
             val secret = service.isSecretEditor()
-            service.candidateState.value = service.candidateState.value.copy(
+            service.updateCandidateState { it.copy(
                 inputText = capturedInputText,
                 candidates = filteredTexts,
                 candidateComments = filteredComments,
                 isComposing = capturedInputText.isNotEmpty(),
-                associationCandidates = if (secret || ((capturedIsAscii || !service.isChineseMode) && pendingEnglish.isEmpty())) emptyList() else service.candidateState.value.associationCandidates,
+                associationCandidates = if (secret || ((capturedIsAscii || !service.isChineseMode) && pendingEnglish.isEmpty())) emptyList() else it.associationCandidates,
                 isShowingRecentClipboard = false,
                 hasNextPage = capturedHasNext,
                 hasPrevPage = capturedHasPrev,
                 candidateActions = transformed?.actions ?: emptyList()
-            )
+            ) }
             if (capturedIsAscii != service.uiState.value.isAsciiMode) {
                 FileLogger.i(XimeInputMethodService.TAG, "keyRouter UI refresh: ascii ${service.uiState.value.isAsciiMode}->$capturedIsAscii")
             }
-            service.uiState.value = service.uiState.value.copy(isAsciiMode = capturedIsAscii)
+            service.updateUiState { it.copy(isAsciiMode = capturedIsAscii) }
             if (pendingEnglish.isNotEmpty() && !secret && service.supportsEnglishCandidateReplace()) {
                 service.serviceScope.launch {
                     val candidates = service.predictionManager.getEnglishAssociations(pendingEnglish, PredictionManager.MAX_ASSOCIATION_COUNT)
@@ -943,7 +944,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     // 清空 partial 累积，避免残留词被 buildT9DisplayState 拼进下一轮 preedit。
                     service.t9PartialSegments.clear()
                     service.rimeEngine.clearComposition()
-                    service.candidateState.value = service.candidateState.value.copy(
+                    service.updateCandidateState { it.copy(
                         candidates = emptyList(),
                         candidateComments = emptyList(),
                         associationCandidates = emptyList(),
@@ -952,7 +953,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         isComposing = false,
                         isShowingRecentClipboard = false,
                         candidateActions = emptyList()
-                    )
+                    ) }
                     withContext(Dispatchers.Main) {
                         service.currentInputConnection?.let {
                             service.endComposingInputBox()

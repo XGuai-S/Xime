@@ -262,6 +262,38 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *  松手在 onFloatingKeyboardDragEnd 消费；底部光效（FloatingExitGlow）按它显隐 */
     internal val floatingExitHintState = mutableStateOf(false)
     internal val candidateState = mutableStateOf(CandidateState())
+
+    /**
+     * 线程安全地读改写 [candidateState]。
+     *
+     * Compose 的 [mutableStateOf] **不是线程安全的**：`state.value = state.value.copy(...)`
+     * 在工作线程上执行时，与主线程的写入/快照应用存在竞态——可能丢掉一次更新
+     * （表现为候选栏内容卡在上一轮、联想词回填丢失），严重时触发快照冲突异常。
+     *
+     * 按键处理跑在 [keyProcessingDispatcher] 单线程上，而 UI 观察在主线程：
+     * 绝大多数写入点已显式 `withContext(Dispatchers.Main)`，但热路径上再切一次
+     * 协程会多一次调度开销。这里统一收口：
+     *   - 已在主线程 → 直接改，零开销；
+     *   - 不在主线程 → post 到主线程再改（保持写入顺序）。
+     *
+     * 注意：非主线程调用时本次修改**异步生效**，调用方不要立刻依赖读回结果。
+     */
+    internal inline fun updateCandidateState(crossinline transform: (CandidateState) -> CandidateState) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            candidateState.value = transform(candidateState.value)
+        } else {
+            mainHandler.post { candidateState.value = transform(candidateState.value) }
+        }
+    }
+
+    /** 线程安全地读改写 [uiState]；语义与注意事项同 [updateCandidateState]。 */
+    internal inline fun updateUiState(crossinline transform: (InputUIState) -> InputUIState) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            uiState.value = transform(uiState.value)
+        } else {
+            mainHandler.post { uiState.value = transform(uiState.value) }
+        }
+    }
     /**
      * 用户手动排序的候选词频表（编码 → 词 → 权重）。
      *
