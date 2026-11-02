@@ -162,12 +162,14 @@ object RimeConfigHelper {
                 if (!prismArtifactOk(buildDir, mainDict)) return false
                 if (!tableArtifactOk(buildDir, mainDict)) return false
             }
-            // 反查词典决定 reverse.bin。仅在对应词典文件真实存在时才要求——
-            // 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
-            // stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过不产出。
-            if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
-                if (!reverseArtifactOk(buildDir, reverseDict)) return false
-            }
+            // 注：reverse_lookup 词典的 reverse.bin 不作为部署完成判据。原因：
+            //  1) 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
+            //     stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过；
+            //  2) 方案可能未把反查词典写进 dependencies（如 XGuai_flypy 用 Flypy_char
+            //     反查但未声明依赖），librime 不编译它、不产出 reverse.bin。
+            // 两种情况都只影响反查功能，不影响主输入；据此判定失败会误报「尚未部署」。
+            // 反查词典存在仍保留变量引用，避免未用变量告警。
+            reverseDict?.let { /* 反查功能可用性由运行时自检，不参与部署判定 */ }
         }
         return true
     }
@@ -272,12 +274,14 @@ object RimeConfigHelper {
                 if (!prismArtifactOk(buildDir, mainDict)) return false
                 if (!tableArtifactOk(buildDir, mainDict)) return false
             }
-            // 反查词典决定 reverse.bin。仅在对应词典文件真实存在时才要求——
-            // 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
-            // stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过不产出。
-            if (reverseDict != null && schemaHasDictFile(context, reverseDict)) {
-                if (!reverseArtifactOk(buildDir, reverseDict)) return false
-            }
+            // 注：reverse_lookup 词典的 reverse.bin 不作为部署完成判据。原因：
+            //  1) 内置方案可能引用未随包分发的词典（rime-wubi 的 pinyin_simp 声明
+            //     stroke 反查但不提供 stroke.dict.yaml），librime 静默跳过；
+            //  2) 方案可能未把反查词典写进 dependencies（如 XGuai_flypy 用 Flypy_char
+            //     反查但未声明依赖），librime 不编译它、不产出 reverse.bin。
+            // 两种情况都只影响反查功能，不影响主输入；据此判定失败会误报「尚未部署」。
+            // 反查词典存在仍保留变量引用，避免未用变量告警。
+            reverseDict?.let { /* 反查功能可用性由运行时自检，不参与部署判定 */ }
         }
 
         val currentHash = computeDeploymentHash(context)
