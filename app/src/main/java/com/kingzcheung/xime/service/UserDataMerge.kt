@@ -61,8 +61,8 @@ internal object UserDataMerge {
         parse: (String) -> Map<String, Map<String, V>>,
     ): Map<String, Map<String, V>> {
         if (!externalChanged(baselineText, currentText)) return memory
-        val base = runCatching { parse(baselineText!!) }.getOrElse { emptyMap() }
-        val theirs = runCatching { parse(currentText!!) }.getOrElse { emptyMap() }
+        val base = runCatching { parse(baselineText ?: return memory) }.getOrElse { emptyMap() }
+        val theirs = runCatching { parse(currentText ?: return memory) }.getOrElse { emptyMap() }
         return mergeTable(base, memory, theirs)
     }
 
@@ -74,8 +74,8 @@ internal object UserDataMerge {
         parse: (String) -> Set<String>,
     ): Set<String> {
         if (!externalChanged(baselineText, currentText)) return memory
-        val base = runCatching { parse(baselineText!!) }.getOrElse { emptySet() }
-        val theirs = runCatching { parse(currentText!!) }.getOrElse { emptySet() }
+        val base = runCatching { parse(baselineText ?: return memory) }.getOrElse { emptySet() }
+        val theirs = runCatching { parse(currentText ?: return memory) }.getOrElse { emptySet() }
         return mergeSet(base, memory, theirs)
     }
 

@@ -309,7 +309,7 @@ object SchemaManifestManager {
                 } else {
                     // 还有其他包声明该文件：仅移除当前包，保留文件
                     val updated = claimants.filter { it != schemeId }
-                    claimEntry!!.put("claimedBy", JSONArray(updated))
+                    claimEntry?.put("claimedBy", JSONArray(updated))
                 }
             }
 

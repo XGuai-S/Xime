@@ -69,19 +69,20 @@ object FileLogger {
 
     /** 当前线程的毫秒级时间戳（线程安全）。 */
     private fun timestampOf(millis: Long = System.currentTimeMillis()): String =
-        dateFormat.get()!!.format(Date(millis))
+        (dateFormat.get() ?: SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())).format(Date(millis))
 
     /** 当前线程的 yyyyMMdd 日期串（线程安全）。 */
     private fun fileDayOf(millis: Long = System.currentTimeMillis()): String =
-        fileDateFormat.get()!!.format(Date(millis))
+        (fileDateFormat.get() ?: SimpleDateFormat("yyyyMMdd", Locale.getDefault())).format(Date(millis))
 
     
     fun init(context: Context) {
         if (isInitialized) return
         try {
-            logsDir = File(context.filesDir, "logs")
-            if (!logsDir!!.exists()) {
-                logsDir!!.mkdirs()
+            val dir = File(context.filesDir, "logs")
+            logsDir = dir
+            if (!dir.exists()) {
+                dir.mkdirs()
             }
             
             // 级别来源：设置页写入的偏好优先，其次 xime.yaml 的 logging.level，
@@ -97,25 +98,26 @@ object FileLogger {
             Thread({ flusherLoop() }, "log-flusher").also { it.isDaemon = true }.start()
             
             isInitialized = true
-            i(TAG, "FileLogger initialized, log file: ${logFile!!.absolutePath}")
+            i(TAG, "FileLogger initialized, log file: ${logFile?.absolutePath ?: "<none>"}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize FileLogger", e)
         }
     }
     
     private fun openLogFile() {
+        val dir = logsDir ?: return
         val today = fileDayOf()
-        logFile = File(logsDir!!, "kime_$today.log")
-        
-        if (logFile!!.exists() && logFile!!.length() > MAX_LOG_SIZE) {
+        var file = File(dir, "kime_$today.log")
+
+        if (file.exists() && file.length() > MAX_LOG_SIZE) {
             val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            val newLogFile = File(logsDir!!, "kime_$ts.log")
-            logFile!!.renameTo(newLogFile)
-            logFile = File(logsDir!!, "kime_$today.log")
+            file.renameTo(File(dir, "kime_$ts.log"))
+            file = File(dir, "kime_$today.log")
         }
-        
-        writer?.close()
-        writer = BufferedWriter(FileWriter(logFile, true))
+
+        logFile = file
+        runCatching { writer?.close() }
+        writer = BufferedWriter(FileWriter(file, true))
     }
     
     private fun flusherLoop() {
@@ -316,13 +318,14 @@ object FileLogger {
     }
     
     fun clearAllLogs() {
+        val dir = logsDir ?: return
         try {
-            logsDir?.listFiles()
+            dir.listFiles()
                 ?.filter { it.name.startsWith("kime_") }
                 ?.forEach { it.delete() }
             
             val today = fileDayOf()
-            logFile = File(logsDir!!, "kime_$today.log")
+            logFile = File(dir, "kime_$today.log")
             openLogFile()
             
             i(TAG, "All logs cleared")

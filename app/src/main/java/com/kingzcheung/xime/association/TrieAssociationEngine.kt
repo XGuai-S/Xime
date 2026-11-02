@@ -25,10 +25,7 @@ class TrieAssociationEngine {
         private var instance: TrieAssociationEngine? = null
         
         fun getInstance(): TrieAssociationEngine {
-            if (instance == null) {
-                instance = TrieAssociationEngine()
-            }
-            return instance!!
+            return instance ?: TrieAssociationEngine().also { instance = it }
         }
     }
     
@@ -100,7 +97,7 @@ class TrieAssociationEngine {
                 freq = buffer.getInt()
             }
             
-            nodes!![i] = TrieNodeData(children, childIndices, word, freq)
+            nodes?.set(i, TrieNodeData(children, childIndices, word, freq))
         }
     }
     
@@ -182,9 +179,10 @@ class TrieAssociationEngine {
     }
     
     private fun findNode(prefix: String): Int {
+        val table = nodes ?: return -1
         var current = 0
         for (char in prefix) {
-            val node = nodes!![current]
+            val node = table[current]
             val charByte = char.code.toByte()
             var found = -1
             for (i in node.children.indices) {
@@ -200,7 +198,7 @@ class TrieAssociationEngine {
     }
     
     private fun collectWords(nodeIdx: Int, candidates: MutableList<AssociationCandidate>) {
-        val node = nodes!![nodeIdx]
+        val node = nodes?.getOrNull(nodeIdx) ?: return
         
         if (node.word != null) {
             candidates.add(AssociationCandidate(node.word, node.frequency.toFloat()))

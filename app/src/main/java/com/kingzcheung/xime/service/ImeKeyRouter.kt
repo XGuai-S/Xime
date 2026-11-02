@@ -660,7 +660,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         ToolPanelEditTextHolder.editText?.let { et ->
                             val start = et.selectionStart.coerceAtLeast(0)
                             et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), input)
-                            try { et.setSelection(start + input.length) } catch (_: Exception) {}
+                            try { et.setSelection(start + input.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(after-replace) ignored: ${e.message}") }
                         }
                         service.rimeEngine.clearComposition()
                         service.candidateState.value = service.candidateState.value.copy(
@@ -693,10 +693,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         val end = et.selectionEnd.coerceAtLeast(start)
                         if (start == end && start > 0) {
                             et.text?.delete(start - 1, start)
-                            try { et.setSelection(start - 1) } catch (_: Exception) {}
+                            try { et.setSelection(start - 1) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start-1) ignored: ${e.message}") }
                         } else if (end > start) {
                             et.text?.delete(start, end)
-                            try { et.setSelection(start) } catch (_: Exception) {}
+                            try { et.setSelection(start) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start) ignored: ${e.message}") }
                         }
                     }
                 }
@@ -710,7 +710,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     ToolPanelEditTextHolder.editText?.let { et ->
                         val start = et.selectionStart.coerceAtLeast(0)
                         et.text?.insert(start, " ")
-                        try { et.setSelection(start + 1) } catch (_: Exception) {}
+                        try { et.setSelection(start + 1) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start+1) ignored: ${e.message}") }
                     }
                 }
                 return true
@@ -732,7 +732,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     ToolPanelEditTextHolder.editText?.let { et ->
                         val start = et.selectionStart.coerceAtLeast(0)
                         et.text?.insert(start, char)
-                        try { et.setSelection(start + char.length) } catch (_: Exception) {}
+                        try { et.setSelection(start + char.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start+len) ignored: ${e.message}") }
                     }
                     return true
                 }
@@ -1453,7 +1453,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         } else if (committedText.isNotEmpty()) {
             committedText
         } else {
-            selectedCandidate!!
+            // 无候选也没有 RIME 提交文本：无事可做，不能强解（否则空候选栏点选即崩）
+            selectedCandidate ?: return
         }
         // T9 full commit：partial commit 累积文本（未单独上屏，只存在于
         // service.t9PartialSegments 的 composing 区）与本次上屏文本是独立词，必须拼接，

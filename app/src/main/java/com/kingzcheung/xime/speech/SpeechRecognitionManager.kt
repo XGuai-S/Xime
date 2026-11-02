@@ -162,8 +162,9 @@ class SpeechRecognitionManager(private val context: Context) {
         }
         mainHandler.removeCallbacks(preStartTimeoutRunnable)
 
-        recordingThread = RecordingThread(currentBackend, preStarted)
-        recordingThread!!.start()
+        val thread = RecordingThread(currentBackend, preStarted)
+        recordingThread = thread
+        thread.start()
     }
 
     /**

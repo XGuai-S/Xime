@@ -253,18 +253,20 @@ fun RimeFileBrowserContent(
         entries
     }
 
-    if (editingUserConfig != null) {
+    val editingConfig = editingUserConfig
+    if (editingConfig != null) {
         YamlEditor(
-            source = userConfigEditorSource(context, editingUserConfig!!),
+            source = userConfigEditorSource(context, editingConfig),
             onDeleted = { editingUserConfig = null },
             onBack = { editingUserConfig = null }
         )
         return
     }
 
-    if (viewingFile != null) {
+    val viewing = viewingFile
+    if (viewing != null) {
         YamlEditor(
-            source = fileEditorSource(viewingFile!!),
+            source = fileEditorSource(viewing),
             onDeleted = { viewingFile = null },
             onBack = { viewingFile = null }
         )

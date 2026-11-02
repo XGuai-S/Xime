@@ -56,7 +56,7 @@ object ImportManager {
             }
         } else {
             val stream = when (uri.scheme) {
-                "file" -> java.io.FileInputStream(uri.path!!)
+                "file" -> uri.path?.let { java.io.FileInputStream(it) }
                 else -> context.contentResolver.openInputStream(uri)
             }
             if (stream == null) {

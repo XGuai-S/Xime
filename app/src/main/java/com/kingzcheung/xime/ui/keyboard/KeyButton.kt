@@ -978,8 +978,9 @@ fun SwipeableKeyButton(
             // 键矮场景（LocalSwipeHintCorner，手机横屏）：提示画角标（上=右上角、下=底部），
             // 与 SwipeableKeyButtonLandscape 同款，避免 offset 提示被键盘顶部裁掉。
             val swipeHintCorner = LocalSwipeHintCorner.current
-            if (!(swipeUpKeyLabel ?: swipeText).isNullOrEmpty() && (swipeUpKeyLabel ?: swipeText) != badgeText) {
-                val keyLabel = (swipeUpKeyLabel ?: swipeText)!!
+            val rawHint = swipeUpKeyLabel ?: swipeText
+            if (!rawHint.isNullOrEmpty() && rawHint != badgeText) {
+                val keyLabel = rawHint
                 // 含换行的多行键面提示（如双拼韵母助记 "ue\nve"）：完整按行渲染；
                 // 单行沿用 ≤4 字符截断，行为不变。角标模式的 1.sp 行高会把多行叠死，仅单行适用。
                 val hintLineCount = keyLabel.count { it == '\n' } + 1

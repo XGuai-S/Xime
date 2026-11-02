@@ -223,7 +223,8 @@ object XimeIndexSource {
                 }
                 if (md != null) {
                     val actual = md.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                    if (!actual.equals(dl.sha256!!.trim(), ignoreCase = true)) {
+                    // 远端未提供 sha256 视为校验失败（安全默认：宁可拒绝也不放行未校验文件）
+                    if (!actual.equals(dl.sha256?.trim(), ignoreCase = true)) {
                         tmpFile.delete()
                         return@withContext InstallResult(false, failureReason = "文件校验失败（sha256 不匹配）")
                     }

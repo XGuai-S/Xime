@@ -2265,7 +2265,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     height = ((displayHeight + state.keyboardBottomPaddingDp + activeBottomDp) * density).toInt()
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 首帧几何预设失败会让窗口按错高度布局（输入框被顶到屏顶），必须可追溯
+            FileLogger.w(TAG, "applyInitialGeometry failed", e)
+        }
     }
     
     // ── ActionExecutor 实现 ──
@@ -3219,10 +3222,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             val end = box.selectionEnd.coerceAtLeast(start)
             if (end > start) {
                 box.text?.delete(start, end)
-                try { box.setSelection(start) } catch (_: Exception) {}
+                try { box.setSelection(start) } catch (e: Exception) { FileLogger.d(TAG, "box.setSelection(start) ignored: ${e.message}") }
             } else if (start > 0) {
                 box.text?.delete(start - 1, start)
-                try { box.setSelection(start - 1) } catch (_: Exception) {}
+                try { box.setSelection(start - 1) } catch (e: Exception) { FileLogger.d(TAG, "box.setSelection(start-1) ignored: ${e.message}") }
             }
         }
         return true
@@ -3248,7 +3251,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     val start = box.selectionStart.coerceAtLeast(0)
                     val textLen = text.length
                     box.text?.replace(start, box.selectionEnd.coerceAtLeast(start), text)
-                    try { box.setSelection(start + textLen) } catch (_: Exception) {}
+                    try { box.setSelection(start + textLen) } catch (e: Exception) { FileLogger.d(TAG, "box.setSelection(start + textLen) ignored: ${e.message}") }
                 }
             }
             return
@@ -3259,7 +3262,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     val start = et.selectionStart.coerceAtLeast(0)
                     val textLen = text.length
                     et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), text)
-                    try { et.setSelection(start + textLen) } catch (_: Exception) {}
+                    try { et.setSelection(start + textLen) } catch (e: Exception) { FileLogger.d(TAG, "et.setSelection(start + textLen) ignored: ${e.message}") }
                 }
             }
             return
@@ -4067,7 +4070,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             val before = et.text?.substring(start, selStart)
             if (before != expected) return false
             et.text?.replace(start, selStart, replacement)
-            try { et.setSelection(start + replacement.length) } catch (_: Exception) {}
+            try { et.setSelection(start + replacement.length) } catch (e: Exception) { FileLogger.d(TAG, "et.setSelection(after-replace) ignored: ${e.message}") }
             return true
         }
         val ic = currentInputConnection ?: return false

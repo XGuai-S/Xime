@@ -350,7 +350,7 @@ object CorrectionPriors {
         if (letters.size < code.length) {
             CorrectionNative.clearTaps()
             lastPush = "按键数(${letters.size})<编码(${code.length}) → 清空"
-            FileLogger.d(TAG, lastPush!!)
+            FileLogger.d(TAG, lastPush)
             return
         }
         val n = code.length
@@ -360,7 +360,7 @@ object CorrectionPriors {
             if (arr[off + i] != code[i]) {
                 CorrectionNative.clearTaps()
                 lastPush = "按键序列与编码不一致(${String(arr)} vs $code) → 清空"
-                FileLogger.d(TAG, lastPush!!)
+                FileLogger.d(TAG, lastPush)
                 return
             }
         }
@@ -378,6 +378,6 @@ object CorrectionPriors {
         }
         CorrectionNative.setTaps(l, ox, oy)
         lastPush = "已推送 code=$code off=[$sb]"
-        FileLogger.d(TAG, lastPush!!)
+        FileLogger.d(TAG, lastPush)
     }
 }

@@ -103,7 +103,10 @@ class AsrInferenceClient(private val context: Context) {
     fun unbind() {
         try {
             context.unbindService(connection)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 重复解绑或未绑定成功时系统抛 IllegalArgumentException，属正常收尾路径
+            FileLogger.d(TAG, "unbind ignored: ${e.message}")
+        }
         bound = false
         service = null
     }
@@ -126,13 +129,17 @@ class AsrInferenceClient(private val context: Context) {
     fun pushAsrAudio(audioData: ByteArray) {
         try {
             requireService().pushAsrAudio(audioData)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 音频帧每 ~20ms 一帧，服务断开时会连续失败；只记 debug，避免日志被刷爆
+            FileLogger.d(TAG, "pushAsrAudio dropped: ${e.message}")
+        }
     }
 
     suspend fun stopAsr(): String = withContext(Dispatchers.IO) {
         try {
             requireService().stopAsr()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            FileLogger.w(TAG, "stopAsr failed: ${e.message}")
             ""
         } finally {
             asrCallbackStub.detach()
@@ -142,20 +149,26 @@ class AsrInferenceClient(private val context: Context) {
     fun cancelAsr() {
         try {
             requireService().cancelAsr()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            FileLogger.d(TAG, "cancelAsr ignored: ${e.message}")
+        }
         asrCallbackStub.detach()
     }
 
     suspend fun releaseAsr() {
         try {
             requireService().releaseAsr()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            FileLogger.d(TAG, "releaseAsr ignored: ${e.message}")
+        }
     }
 
     /** 同步"保持引擎常驻"设置到 :asr 进程（服务端据此决定是否空闲自动释放模型）。 */
     suspend fun setKeepModelAlive(keepAlive: Boolean) {
         try {
             requireService().setKeepModelAlive(keepAlive)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            FileLogger.d(TAG, "setKeepModelAlive ignored: ${e.message}")
+        }
     }
 }

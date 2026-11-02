@@ -109,8 +109,7 @@ class T9InputController(
     val bufferString: String get() {
         val input = cachedInput
         return when {
-            input.isEmpty() && _committedText != null -> _committedText!!
-            input.isEmpty() -> ""
+            input.isEmpty() -> _committedText ?: ""
             else -> input
         }
     }

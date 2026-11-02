@@ -1868,10 +1868,11 @@ fun KeyboardRowWithConfig(
             val onSwipeLeft: (() -> Unit)? = swipeLeftConfig
                 ?.takeIf { it.action != null }?.let { a ->
                     {
-                        if (a.action == GestureAction.COMMIT) {
+                        val act = a.action
+                        if (act == GestureAction.COMMIT) {
                             (onCommitText ?: onKeyPress)(a.value.ifEmpty { a.label })
-                        } else {
-                            onGestureAction?.invoke(a.action!!, a.value.ifEmpty { a.label })
+                        } else if (act != null) {
+                            onGestureAction?.invoke(act, a.value.ifEmpty { a.label })
                         }
                     }
                 }
@@ -1881,10 +1882,11 @@ fun KeyboardRowWithConfig(
             val onSwipeRight: (() -> Unit)? = KeysConfigHelper.getKeyGesture(key, isAsciiMode)?.swipeRight
                 ?.takeIf { it.action != null }?.let { a ->
                     {
-                        if (a.action == GestureAction.COMMIT) {
+                        val act = a.action
+                        if (act == GestureAction.COMMIT) {
                             (onCommitText ?: onKeyPress)(a.value.ifEmpty { a.label })
-                        } else {
-                            onGestureAction?.invoke(a.action!!, a.value.ifEmpty { a.label })
+                        } else if (act != null) {
+                            onGestureAction?.invoke(act, a.value.ifEmpty { a.label })
                         }
                     }
                 }
@@ -2754,20 +2756,22 @@ fun CompactKeyboardRowWithConfig(
             val compactOnSwipeLeft: (() -> Unit)? = compactSwipeLeftConfig
                 ?.takeIf { it.action != null }?.let { a ->
                     {
-                        if (a.action == GestureAction.COMMIT) {
+                        val act = a.action
+                        if (act == GestureAction.COMMIT) {
                             (onCommitText ?: onKeyPress)(a.value.ifEmpty { a.label })
-                        } else {
-                            onGestureAction?.invoke(a.action!!, a.value.ifEmpty { a.label })
+                        } else if (act != null) {
+                            onGestureAction?.invoke(act, a.value.ifEmpty { a.label })
                         }
                     }
                 }
             val compactOnSwipeRight: (() -> Unit)? = KeysConfigHelper.getKeyGesture(key, isAsciiMode)?.swipeRight
                 ?.takeIf { it.action != null }?.let { a ->
                     {
-                        if (a.action == GestureAction.COMMIT) {
+                        val act = a.action
+                        if (act == GestureAction.COMMIT) {
                             (onCommitText ?: onKeyPress)(a.value.ifEmpty { a.label })
-                        } else {
-                            onGestureAction?.invoke(a.action!!, a.value.ifEmpty { a.label })
+                        } else if (act != null) {
+                            onGestureAction?.invoke(act, a.value.ifEmpty { a.label })
                         }
                     }
                 }

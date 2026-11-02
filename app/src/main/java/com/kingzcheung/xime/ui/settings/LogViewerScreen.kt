@@ -167,7 +167,7 @@ fun LogViewerScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = uiState.errorMsg!!,
+                        text = uiState.errorMsg.orEmpty(),
                         color = MaterialTheme.colorScheme.error
                     )
                     Button(onClick = { viewModel.loadLogFiles() }) {
@@ -175,15 +175,18 @@ fun LogViewerScreen(
                     }
                 }
             }
-        } else if (uiState.selectedLogFile != null && uiState.selectedLogFile!!.exists()) {
-            LogContentSection(
-                selectedLogFile = uiState.selectedLogFile!!,
-                logContent = uiState.logContent,
-                onBackToList = { viewModel.goBackToList() },
-                onDelete = { viewModel.deleteLogFile(uiState.selectedLogFile!!) },
-                onShare = { viewModel.shareLogFile(uiState.selectedLogFile!!) },
-                onSave = { viewModel.saveToDownloads(uiState.selectedLogFile!!) }
-            )
+        } else if (uiState.selectedLogFile?.exists() == true) {
+            // 取一次局部值：原写法每次重组都重新解包，且 lambda 里再取可能拿到变化后的新状态
+            uiState.selectedLogFile?.let { selectedFile ->
+                LogContentSection(
+                    selectedLogFile = selectedFile,
+                    logContent = uiState.logContent,
+                    onBackToList = { viewModel.goBackToList() },
+                    onDelete = { viewModel.deleteLogFile(selectedFile) },
+                    onShare = { viewModel.shareLogFile(selectedFile) },
+                    onSave = { viewModel.saveToDownloads(selectedFile) }
+                )
+            }
         } else {
             // 插件错误来自 PluginErrorLog 持久化快照（getAllErrors 已含启动恢复的历史），
             // 随刷新联动重取（logFiles 为 key）

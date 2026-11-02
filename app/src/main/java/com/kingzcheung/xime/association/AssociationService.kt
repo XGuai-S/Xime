@@ -17,8 +17,9 @@ object AssociationService {
         }
         
         try {
-            trieEngine = TrieAssociationEngine.getInstance()
-            val trieInit = trieEngine!!.initialize(context)
+            val engine = TrieAssociationEngine.getInstance()
+            trieEngine = engine
+            val trieInit = engine.initialize(context)
             
             isInitialized = trieInit
             Log.i(TAG, "Association service initialized: trie=$trieInit")
@@ -55,12 +56,13 @@ object AssociationService {
     }
     
     private suspend fun getEnglishAssociations(prefix: String, topK: Int): List<AssociationCandidate> {
-        if (trieEngine == null || !trieEngine!!.isInitialized()) {
+        val engine = trieEngine
+        if (engine == null || !engine.isInitialized()) {
             Log.w(TAG, "Trie engine not initialized for English associations")
             return emptyList()
         }
-        
-        val candidates = trieEngine!!.predict(prefix, topK)
+
+        val candidates = engine.predict(prefix, topK)
         
         return candidates
     }

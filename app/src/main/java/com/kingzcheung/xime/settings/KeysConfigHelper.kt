@@ -1855,8 +1855,8 @@ object KeysConfigHelper {
 
     private fun loadMergedConfig(context: Context): XimeConfig {
         val currentVersion = _configVersion.value
-        if (mergedConfigCache != null && mergedConfigVersion == currentVersion) {
-            return mergedConfigCache!!
+        mergedConfigCache?.let { cached ->
+            if (mergedConfigVersion == currentVersion) return cached
         }
         val default = parseConfig(readAssetText(context, XIME_CONFIG_FILE))
         val custom = readUserDataText(context, XIME_CUSTOM_CONFIG_FILE)

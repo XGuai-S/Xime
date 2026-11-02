@@ -111,17 +111,20 @@ fun WirelessImportSheet(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            if (error != null) {
+            val errorText = error
+            val url = serverUrl
+            if (errorText != null) {
                 Text(
-                    text = error!!,
+                    text = errorText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center
                 )
-            } else if (serverUrl != null) {
-                if (qrBitmap != null) {
+            } else if (url != null) {
+                val qr = qrBitmap
+                if (qr != null) {
                     Image(
-                        bitmap = qrBitmap!!.asImageBitmap(),
+                        bitmap = qr.asImageBitmap(),
                         contentDescription = "二维码",
                         modifier = Modifier
                             .size(200.dp)
@@ -132,7 +135,7 @@ fun WirelessImportSheet(
                 }
 
                 Text(
-                    text = serverUrl!!,
+                    text = url,
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp

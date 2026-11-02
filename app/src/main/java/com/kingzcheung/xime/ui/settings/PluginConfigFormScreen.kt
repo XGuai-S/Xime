@@ -87,12 +87,12 @@ fun PluginConfigFormScreen(
     val dynamicOptions = remember(plugin) { mutableStateMapOf<String, List<String>>() }
     LaunchedEffect(plugin, fields) {
         fields.filter { it.type == UiNodeType.SELECT || it.type == UiNodeType.MULTI_SELECT }
-            .filter { it.key != null }
             .forEach { field ->
+                val key = field.key ?: return@forEach
                 val opts = withContext(Dispatchers.IO) {
-                    runCatching { plugin.getOptions(field.key!!) }.getOrNull()
+                    runCatching { plugin.getOptions(key) }.getOrNull()
                 }
-                if (opts != null) dynamicOptions[field.key!!] = opts
+                if (opts != null) dynamicOptions[key] = opts
             }
     }
 
@@ -142,8 +142,9 @@ fun PluginConfigFormScreen(
             onClick = {
                 var allValid = true
                 fields.forEach { field ->
-                    if (field.type == UiNodeType.SECRET && field.required && field.key != null) {
-                        val current = configStore.get(field.key!!)
+                    val key = field.key
+                    if (field.type == UiNodeType.SECRET && field.required && key != null) {
+                        val current = configStore.get(key)
                         if (current.isNullOrBlank()) allValid = false
                     }
                 }

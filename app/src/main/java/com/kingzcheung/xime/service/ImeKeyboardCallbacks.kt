@@ -247,7 +247,11 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
                             ic.setSelection(newPos, newPos)
                             movedBySelection = true
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        // setSelection 不被对端支持（如部分 WebView/原生 EditText）时抛出，
+                        // 下面会回退为 DPAD 按键事件，属设计内分支
+                        FileLogger.d(XimeInputMethodService.TAG, "selection move ignored, fallback to DPAD: ${e.message}")
+                    }
                     if (!movedBySelection) {
                         val keyCode = if (direction < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
                         repeat(abs(direction)) {

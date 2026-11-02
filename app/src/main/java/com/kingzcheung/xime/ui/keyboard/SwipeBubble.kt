@@ -200,7 +200,8 @@ fun rememberSwipeBubbleDrawData(
             maxOf(swipeState.longPressItems.size, 3)
         cellMin * keyWidthPx
     } else {
-        maxOf(textPaint.measureText(displayText!!) + with(density) { 20.dp.toPx() } * bubbleScale, minBodyWidthPx)
+        val measured = displayText?.let { textPaint.measureText(it) } ?: 0f
+        maxOf(measured + with(density) { 20.dp.toPx() } * bubbleScale, minBodyWidthPx)
     }
 
     val textSizePx = with(density) { 16.sp.toPx() } * bubbleScale

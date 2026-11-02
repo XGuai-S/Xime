@@ -80,7 +80,10 @@ class InferenceClient(private val context: Context) {
     fun unbind() {
         try {
             context.unbindService(connection)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 重复解绑或未绑定成功时系统抛 IllegalArgumentException，属正常收尾路径
+            FileLogger.d(TAG, "unbind ignored: ${e.message}")
+        }
         bound = false
         service = null
     }
@@ -111,7 +114,10 @@ class InferenceClient(private val context: Context) {
     suspend fun unloadModel(modelId: String) = withContext(Dispatchers.IO) {
         try {
             requireService().unloadModel(modelId)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            // 卸载失败意味着模型继续常驻（内存不释放），需要能查到
+            FileLogger.w(TAG, "unloadModel($modelId) failed: ${e.message}")
+        }
     }
 
     suspend fun isModelLoaded(modelId: String): Boolean = withContext(Dispatchers.IO) {

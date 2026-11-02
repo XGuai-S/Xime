@@ -628,7 +628,7 @@ object SchemaManager {
                 description = entry.description ?: ""
             )
         } catch (e: Exception) {
-            try { Log.w(TAG, "Failed to parse schema file: ${file.name}, error=${e.message}, skip", e) } catch (_: Exception) {}
+            FileLogger.w(TAG, "Failed to parse schema file: ${file.name}, skip", e)
             null
         }
     }
@@ -687,7 +687,7 @@ object SchemaManager {
             val entry = yaml.decodeFromString(SchemaYaml.serializer(), file.readText().trimStart('\uFEFF')).schema
             entry.name.ifEmpty { null }
         } catch (e: Exception) {
-            try { Log.e(TAG, "Failed to parse schema name for $schemaId", e) } catch (_: Exception) {}
+            FileLogger.e(TAG, "Failed to parse schema name for $schemaId", e)
             null
         }
     }
@@ -712,7 +712,7 @@ object SchemaManager {
                 parseSwitchEntry(item as? YamlMap ?: return@mapNotNull null)
             }
         } catch (e: Exception) {
-            try { Log.w(TAG, "Failed to parse switches for ${file.name}: ${e.message}", e) } catch (_: Exception) {}
+            FileLogger.w(TAG, "Failed to parse switches for ${file.name}: ${e.message}", e)
             emptyList()
         }
     }
@@ -1039,7 +1039,8 @@ object SchemaManager {
                 ImportResult(true)
             } catch (e: Exception) {
                 FileLogger.e(TAG, "Failed to import archive $name", e)
-                try { if (pkgDir.exists()) pkgDir.deleteRecursively() } catch (_: Exception) {}
+                runCatching { if (pkgDir.exists()) pkgDir.deleteRecursively() }
+                    .onFailure { FileLogger.w(TAG, "cleanup pkgDir failed: ${it.message}") }
                 ImportResult(false)
             }
         } else {
@@ -1137,7 +1138,7 @@ object SchemaManager {
             val displayName = getFileName(context, uri) ?: return@withContext ImportResult(false)
 
             val inputStream = when (uri.scheme) {
-                "file" -> java.io.FileInputStream(uri.path!!)
+                "file" -> uri.path?.let { java.io.FileInputStream(it) }
                 else -> context.contentResolver.openInputStream(uri)
             } ?: return@withContext ImportResult(false)
 
