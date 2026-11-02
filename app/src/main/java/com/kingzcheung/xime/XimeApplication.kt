@@ -147,6 +147,19 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 低版本 getThemeById 自动回退到内置配色）
         SettingsPreferences.defaultKeyboardTheme = KeysConfigHelper.loadDefaultThemeId(this)
         SettingsPreferences.defaultDarkMode = KeysConfigHelper.loadDefaultDarkMode(this)
+        // 键盘配置预热：loadConfig 要跑十几次 YAML 解析（xime.yaml 80KB），真机实测冷启动
+        // 阻塞主线程约 1.7s。输入法服务与 Application 同进程，这里先异步解析一次，
+        // 服务 onCreate 里那次同步调用就能命中 mtime 缓存（只剩一次 config.copy，微秒级）。
+        // 两者并发时由 KeysConfigHelper.loadConfig 内部锁串行化，不会出现字段混合态。
+        applicationScope.launch {
+            try {
+                val t0 = System.nanoTime()
+                KeysConfigHelper.loadConfig(this@XimeApplication)
+                Log.i(TAG, "键盘配置预热完成 ${(System.nanoTime() - t0) / 1_000_000}ms")
+            } catch (t: Throwable) {
+                Log.w(TAG, "键盘配置预热失败", t)
+            }
+        }
 
         // 初始化模型运行时（内存管理 + 生命周期）
         ModelRuntime.attach(this)

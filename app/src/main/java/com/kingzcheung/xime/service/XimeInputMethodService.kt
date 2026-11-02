@@ -821,7 +821,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 否则 KeyboardLayout 组合时 swipeUp/swipeDown 配置可能尚未就绪，
         // 导致按键上的符号不显示、上滑/下滑手势不触发。
         runBlocking(Dispatchers.IO) {
+            val t0 = System.nanoTime()
             KeysConfigHelper.loadConfig(this@XimeInputMethodService)
+            // onCreate 在主线程，这段同步等待直接等于键盘弹出前的阻塞时长。
+            // 保持 WARN 级别：默认日志等级（error）下也能看到，便于长期观察是否劣化。
+            FileLogger.w(
+                TAG,
+                "initRimeEngine: loadConfig 耗时 ${(System.nanoTime() - t0) / 1_000_000}ms",
+            )
         }
 
         // 引擎异步就绪前先以持久化方案填充 UI 状态：键盘首帧事件链（InputSessionStarted/

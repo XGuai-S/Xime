@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.rime
 
+import com.kingzcheung.xime.BuildConfig
 import com.kingzcheung.xime.util.FileLogger
 import android.os.Handler
 import android.os.Looper
@@ -102,6 +103,14 @@ class T9InputController(
      * 阻塞的是该后台线程而非 UI；队列空闲时立即返回。
      */
     private fun awaitT9Queue() {
+        // 这条约束原本只写在注释里（"必须且只会被非主线程调用"），靠人工保证不可靠：
+        // 一旦将来有人从 Compose/主线程调到 onRightCandidateSelected，runBlocking 会
+        // 直接卡死 UI 且极难定位。这里在 debug 构建下把约束变成可执行的断言。
+        if (BuildConfig.DEBUG && Looper.myLooper() == Looper.getMainLooper()) {
+            throw IllegalStateException(
+                "awaitT9Queue() 被主线程调用：runBlocking 会阻塞 UI 并可能与 Main 派发死锁",
+            )
+        }
         lastT9Job?.let { runBlocking { it.join() } }
     }
 

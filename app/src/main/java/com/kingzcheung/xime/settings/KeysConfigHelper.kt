@@ -354,7 +354,7 @@ object KeysConfigHelper {
 
     /** 判断 YAML 文本是否定义了 `keyboard.<section>` 段。 */
     private fun hasKeyboardSection(yamlText: String, section: String): Boolean = try {
-        val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return false
+        val root = parseRootCached(yamlText) ?: return false
         val keyboardNode = root.opt<YamlMap>("keyboard") ?: return false
         keyboardNode.opt<YamlMap>(section) != null
     } catch (_: Exception) {
@@ -383,6 +383,25 @@ object KeysConfigHelper {
     val DEFAULT_STROKE_SIDE_SYMBOLS: List<String> = listOf("。", "？", "！", "~")
     
     private val yaml = Yaml(configuration = YamlConfiguration(strictMode = false))
+
+    /**
+     * YAML 解析树缓存：同一份文本在**一次 loadConfig 内**会被解析十几到二十次
+     * （每个 parseXxxYamlText 都自己 parseToYamlNode 一遍）。xime.yaml 80KB，
+     * 真机实测整段 loadConfig 是 0.8~1.7s，绝大部分是这种重复解析。
+     *
+     * 解析结果是只读的 YamlMap 树，同一文本复用同一棵树语义完全等价；
+     * 用弱键（WeakHashMap）而不是永久缓存，树用完可被 GC 回收，不会长期占内存。
+     * 键用文本对象本身（字符串内容相同即相等），因此键控自然按内容命中。
+     */
+    private val yamlNodeCache = java.util.WeakHashMap<String, YamlMap?>()
+
+    /** 带缓存的 YAML 根节点解析：等价于 yaml.parseToYamlNode(text) as? YamlMap。 */
+    private fun parseRootCached(text: String): YamlMap? {
+        yamlNodeCache[text]?.let { return it }
+        val root = yaml.parseToYamlNode(text) as? YamlMap
+        yamlNodeCache[text] = root
+        return root
+    }
     
     private var config: KeysConfig = KeysConfig(
         swipeUp = getDefaultSwipeUp(),
@@ -629,13 +648,21 @@ object KeysConfigHelper {
     private var mergedConfigCache: XimeConfig? = null
     private var mergedConfigVersion = 0
     
-    fun loadConfig(context: Context): KeysConfig {
+    /**
+     * 解析锁：全量 YAML 解析会写十几个可变字段（行布局/手势/颜色/字体…），
+     * 而 Application 预热与输入法服务 onCreate 可能并发调用（同进程、不同线程）。
+     * 没有锁时两份解析交错写字段，可能得到「中文行布局 + 英文手势」这类混合态。
+     * 用单锁串行化，配合 mtime 戳命中缓存后第二次调用几乎零成本。
+     */
+    private val loadLock = Any()
+
+    fun loadConfig(context: Context): KeysConfig = synchronized(loadLock) {
         loadXimeConfig(context)
         config = config.copy(
             swipeUp = getDefaultSwipeUp(),
             swipeDownEnglish = getDefaultSwipeDownEnglish()
         )
-        return config
+        config
     }
     
     // 进程内配置缓存戳（xime.custom.yaml 的 mtime+size）：全量 YAML 解析真机实测可阻塞
@@ -672,7 +699,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本提取顶层 `<section>.schemas` 列表（如 correction.schemas）。 */
     internal fun parseTopLevelSchemasYamlText(yamlText: String, section: String): Set<String> {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return emptySet()
+            val root = parseRootCached(yamlText) ?: return emptySet()
             val sectionNode = root.opt<YamlMap>(section) ?: return emptySet()
             val schemas = sectionNode.opt<YamlList>("schemas") ?: return emptySet()
             schemas.items.mapNotNull { (it as? YamlScalar)?.content?.trim()?.takeIf(String::isNotEmpty) }.toSet()
@@ -921,7 +948,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.colors 段（仅显式字段非 null）。 */
     internal fun parseKeyboardColorsYamlText(yamlText: String): KeyboardColorsPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val colorsNode = keyboardNode.opt<YamlMap>("colors") ?: return null
             var kBg: Long? = null
@@ -982,7 +1009,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.shadow 段（仅显式字段非 null）。 */
     internal fun parseKeyboardShadowYamlText(yamlText: String): KeyboardShadowPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val shadowNode = keyboardNode.opt<YamlMap>("shadow") ?: return null
             var enabled: Boolean? = null
@@ -1105,7 +1132,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.candidates 段（仅显式字段非 null）。 */
     private fun parseKeyboardCandidatesYamlPartial(yamlText: String): KeyboardCandidatesPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val candidatesNode = keyboardNode.opt<YamlMap>("candidates") ?: return null
             var showClearButton: Boolean? = null
@@ -1166,7 +1193,7 @@ object KeysConfigHelper {
      */
     internal fun parseKeyboardCombosYamlText(yamlText: String): List<KeyboardCombo>? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val combosNode = keyboardNode.opt<YamlMap>("combos") ?: return null
             val result = mutableListOf<KeyboardCombo>()
@@ -1246,7 +1273,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.gestures 段（仅显式字段非 null）。 */
     private fun parseKeyboardGesturesYamlPartial(yamlText: String): KeyboardGesturesPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val gesturesNode = keyboardNode.opt<YamlMap>("gestures") ?: return null
             var longPressMs: Int? = null
@@ -1296,7 +1323,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.key 段（仅显式字段非 null）。 */
     private fun parseKeyboardKeyYamlPartial(yamlText: String): KeyboardKeyPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             var cornerRadius: Int? = null
             var spacingX: Float? = null
@@ -1391,7 +1418,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.<section> 九键段（仅显式字段非 null；缺省内置保留名 t9）。 */
     internal fun parseKeyboardT9YamlPartial(yamlText: String, section: String = SECTION_TYPE_T9): KeyboardT9Partial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val t9Node = keyboardNode.opt<YamlMap>(section) ?: return null
             val sideSymbols = t9Node.opt<YamlList>("side_symbols")
@@ -1440,7 +1467,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.<section> 笔画段（仅显式字段非 null；缺省内置保留名 stroke）。 */
     internal fun parseKeyboardStrokeYamlPartial(yamlText: String, section: String = SECTION_TYPE_STROKE): KeyboardStrokePartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val strokeNode = keyboardNode.opt<YamlMap>(section) ?: return null
             val sideSymbols = strokeNode.opt<YamlList>("side_symbols")
@@ -1472,7 +1499,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.fonts 字体配置段（仅显式字段非 null）。 */
     internal fun parseKeyboardFontsYamlText(yamlText: String): KeyboardFontPartial? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val fontsNode = keyboardNode.opt<YamlMap>("fonts") ?: return null
             var keyFont: String? = null
@@ -1587,7 +1614,7 @@ object KeysConfigHelper {
      */
     internal fun parseSchemaBindingsYamlText(yamlText: String): Map<String, String> {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return emptyMap()
+            val root = parseRootCached(yamlText) ?: return emptyMap()
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return emptyMap()
             val bindings = mutableMapOf<String, String>()
             for ((kNode, vNode) in keyboardNode.entries) {
@@ -1611,7 +1638,7 @@ object KeysConfigHelper {
      */
     internal fun parseSectionTypesYamlText(yamlText: String): Map<String, String> {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return emptyMap()
+            val root = parseRootCached(yamlText) ?: return emptyMap()
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return emptyMap()
             val types = mutableMapOf<String, String>()
             for ((kNode, vNode) in keyboardNode.entries) {
@@ -1637,7 +1664,7 @@ object KeysConfigHelper {
      */
     internal fun parsePanelLayoutYamlText(yamlText: String, section: String): PanelLayoutConfig? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val sectionNode = keyboardNode.opt<YamlMap>(section) ?: return null
             val layoutNode = sectionNode.opt<YamlMap>("layout") ?: return null
@@ -1716,7 +1743,7 @@ object KeysConfigHelper {
      */
     internal fun parseKeyboardLayoutYamlText(yamlText: String, section: String): List<List<String>>? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val sectionNode = keyboardNode.opt<YamlMap>(section) ?: return null
             val layoutNode = sectionNode.opt<YamlMap>("layout") ?: return null
@@ -1800,7 +1827,7 @@ object KeysConfigHelper {
     /** 从 YAML 文本中提取 keyboard.<section>.button_layout（section 名任意，含合并键段）。 */
     internal fun parseButtonLayoutYamlText(yamlText: String, section: String): ButtonLayout? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val sectionNode = keyboardNode.opt<YamlMap>(section) ?: return null
             val layoutNode = sectionNode.opt<YamlScalar>("button_layout") ?: return null
@@ -1814,7 +1841,7 @@ object KeysConfigHelper {
     /** 解析 `keyboard.actions` 可复用动作预设。 */
     internal fun parseKeyboardActionsYamlText(yamlText: String): Map<String, KeyAction> {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return emptyMap()
+            val root = parseRootCached(yamlText) ?: return emptyMap()
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return emptyMap()
             val actionsNode = keyboardNode.opt<YamlMap>("actions") ?: return emptyMap()
             val result = mutableMapOf<String, KeyAction>()
@@ -1836,7 +1863,7 @@ object KeysConfigHelper {
         presets: Map<String, KeyAction> = emptyMap(),
     ): Map<String, KeyBinding>? {
         return try {
-            val root = yaml.parseToYamlNode(yamlText) as? YamlMap ?: return null
+            val root = parseRootCached(yamlText) ?: return null
             val keyboardNode = root.opt<YamlMap>("keyboard") ?: return null
             val sectionNode = keyboardNode.opt<YamlMap>(section) ?: return null
             val keysNode = sectionNode.opt<YamlMap>("keys") ?: return null
@@ -1975,17 +2002,28 @@ object KeysConfigHelper {
         return result
     }
 
+    /**
+     * asset 文本缓存：内容随 APK 固定，进程生命周期内不变。
+     *
+     * 原实现每次调用都重新 open + 解压 asset。单次 loadConfig 里各解析函数一共要读
+     * 同一份 xime.yaml（80KB）8 次以上，等于重复解压 8 遍——这是输入法冷启动时主线程
+     * 被拖住的主要来源（详见 loadXimeConfig 上方关于全量 YAML 解析阻塞 1.8s 的说明）。
+     * 缓存纯文本即可安全消除重复 IO；解析结果仍按 mtime 戳重建，不受影响。
+     */
+    private val assetTextCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private fun readAssetText(context: Context, fileName: String): String? {
-        return try {
-            val inputStream = context.assets.open(fileName)
-            val reader = BufferedReader(InputStreamReader(inputStream))
-            val content = reader.readText()
-            reader.close()
-            inputStream.close()
-            content
+        assetTextCache[fileName]?.let { return it }
+        val content = try {
+            context.assets.open(fileName).use { inputStream ->
+                BufferedReader(InputStreamReader(inputStream)).use { it.readText() }
+            }
         } catch (e: Exception) {
             null
         }
+        // 只缓存成功结果：读取失败下次仍重试，避免把瞬时失败固化。
+        if (content != null) assetTextCache[fileName] = content
+        return content
     }
 
     /**
