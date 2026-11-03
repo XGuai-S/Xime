@@ -339,7 +339,16 @@ fun CandidateBar(
         else -> true
     }
 
-    LaunchedEffect(displayCandidates) {
+    // 仅在候选**内容**变化时回到列表头部。
+    //
+    // displayCandidates 是 `s.candidates.take(pageSize)` 的派生，每次按键刷新都会新建
+    // 列表对象，即使用户已经翻页/横向滑动、而候选内容并没有变（例如上屏后重新出同一批
+    // 候选、或纯联想回落）。旧写法直接用列表引用作 key，于是每次都会 scrollToItem(0)，
+    // 表现为候选栏「自己跳回最左边」。这里以内容签名作 key，内容不变则不打扰用户的滚动位置。
+    val displayCandidatesSignature = remember(displayCandidates) {
+        displayCandidates.hashCode()
+    }
+    LaunchedEffect(displayCandidatesSignature) {
         candidateListState.scrollToItem(0)
     }
 

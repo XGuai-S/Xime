@@ -102,6 +102,11 @@ object SettingsPreferences {
     
     private const val KEY_KEYBOARD_HEIGHT_DP = "keyboard_height_dp"
     private const val KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE = "keyboard_height_dp_landscape"
+    // 悬浮形态的独立高度键：悬浮卡片（尤其横屏，约屏宽 38%）的可见高度与
+    // 非悬浮全宽键盘完全不是一回事，四套完全独立互不干扰：
+    //   竖屏非悬浮 / 横屏非悬浮 / 竖屏悬浮 / 横屏悬浮
+    private const val KEY_KEYBOARD_HEIGHT_DP_FLOATING = "keyboard_height_dp_floating"
+    private const val KEY_KEYBOARD_HEIGHT_DP_FLOATING_LANDSCAPE = "keyboard_height_dp_floating_landscape"
     const val DEFAULT_KEYBOARD_HEIGHT_PERCENT = 35
     /** 横屏默认高度 = 竖屏高度（长边）× 此百分比。约等于旧值（横屏短边 × 49%），但基数稳定、与竖屏语义统一 */
     const val DEFAULT_KEYBOARD_HEIGHT_PERCENT_LANDSCAPE = 25
@@ -748,64 +753,170 @@ object SettingsPreferences {
         getPrefs(context).edit().putString("$KEY_LAYOUT_PREFIX$schemaId", layout).apply()
     }
     
+    /**
+     * 键盘高度存取应使用的「方向口径」（true = 横屏键 `keyboard_height_dp_landscape`）。
+     *
+     * 原则上只按屏幕方向取键，**不区分悬浮/非悬浮**：横屏悬浮是独立的卡片形态，
+     * 需要与竖屏各自一套高度（复用竖屏高度会让横屏卡片过高/重置落点错误）。
+     * 渲染侧（见 KeyboardContent 的 orientationHeight）与调节读写侧一律走本方法，
+     * 两侧口径必须一致，否则会出现「调了没反应」。
+     */
+    fun isLandscapeKeyboardHeightKey(context: Context): Boolean {
+        val config = context.resources.configuration
+        return config.screenWidthDp > config.screenHeightDp
+    }
+
     fun getKeyboardHeightDp(context: Context): Int {
         return getKeyboardHeightDp(context, false)
     }
-
     fun getKeyboardHeightDp(context: Context, isLandscape: Boolean): Int {
-        val key = if (isLandscape) KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE else KEY_KEYBOARD_HEIGHT_DP
+        return getKeyboardHeightDp(context, isLandscape, false)
+    }
+    /**
+     * 读取键盘高度（dp）。键按 **方向 × 悬浮** 四套完全独立：
+     *  - 竖屏非悬浮 / 横屏非悬浮 / 竖屏悬浮 / 横屏悬浮
+     * 横屏悬浮是卡片形态（约屏宽 38%），与非悬浮全宽键盘的可用高度完全不同，
+     * 共用一套数值必然互相干扰（表现为「调横屏悬浮，竖屏的调节器被唤醒」）。
+     *
+     * 悬浮键没有历史值时回退到同方向的非悬浮值（首版悬浮默认和非悬浮一致），
+     * 之后两者各自独立演进，不再互相覆盖。
+     */
+    fun getKeyboardHeightDp(context: Context, isLandscape: Boolean, isFloating: Boolean): Int {
+        val key = when {
+            isFloating && isLandscape -> KEY_KEYBOARD_HEIGHT_DP_FLOATING_LANDSCAPE
+            isFloating -> KEY_KEYBOARD_HEIGHT_DP_FLOATING
+            isLandscape -> KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE
+            else -> KEY_KEYBOARD_HEIGHT_DP
+        }
         val stored = getPrefs(context).getInt(key, -1)
         if (stored > 0) return stored
-        // 不做跨方向回退：竖屏高度（可达屏高 60%）放到横屏短边上必然超出屏幕
-        // （曾表现为"横屏键盘高得离谱"），横竖屏各自用自己的键 + 自己的默认值
+        if (isFloating) {
+            // 悬浮键首次使用：继承同方向非悬浮值作为起点（不做跨方向回退，
+            // 竖屏高度放到横屏必然超出屏幕），此后两者独立
+            val baseKey = if (isLandscape) KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE else KEY_KEYBOARD_HEIGHT_DP
+            val base = getPrefs(context).getInt(baseKey, -1)
+            if (base > 0) return base
+        }
         return getDefaultKeyboardHeightDp(context, isLandscape)
     }
-
     fun setKeyboardHeightDp(context: Context, heightDp: Int, isLandscape: Boolean = false) {
-        val key = if (isLandscape) KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE else KEY_KEYBOARD_HEIGHT_DP
+        setKeyboardHeightDp(context, heightDp, isLandscape, false)
+    }
+    /** 写入键盘高度（dp）：键选择规则与 getKeyboardHeightDp 完全一致 */
+    fun setKeyboardHeightDp(
+        context: Context,
+        heightDp: Int,
+        isLandscape: Boolean,
+        isFloating: Boolean,
+    ) {
+        val key = when {
+            isFloating && isLandscape -> KEY_KEYBOARD_HEIGHT_DP_FLOATING_LANDSCAPE
+            isFloating -> KEY_KEYBOARD_HEIGHT_DP_FLOATING
+            isLandscape -> KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE
+            else -> KEY_KEYBOARD_HEIGHT_DP
+        }
         getPrefs(context).edit().putInt(key, heightDp).apply()
     }
 
     fun getDefaultKeyboardHeightDp(context: Context, isLandscape: Boolean = false): Int {
         val config = context.resources.configuration
-        if (!isLandscape) return config.screenHeightDp * DEFAULT_KEYBOARD_HEIGHT_PERCENT / 100
-        // 横屏以竖屏高度（长边）为基数：横屏短边随宽高比/系统栏波动大，
-        // 长边是设备稳定值，且与悬浮模式 fallback（portraitScreenHeightDp × 百分比）语义一致
+        // 竖屏 / 横屏默认值都以「竖屏长边（maxOf 宽高）」为基数，与当前实际方向无关。
+        // 此前竖屏分支用 config.screenHeightDp——横屏时该值是短边（如 412），
+        // 竖屏默认 = 412×35% = 144，远小于竖屏应有的 915×35%=320，表现为
+        // 「竖屏恢复默认数值被横屏影响」。改为固定长边后，竖屏永远基于长边计算，
+        // 横屏也用长边（横屏短边随宽高比/系统栏波动大，长边是设备稳定值，
+        // 且与悬浮模式 fallback（portraitScreenHeightDp × 百分比）语义一致），
+        // 两方向互不干扰。
         val portraitHeightDp = maxOf(config.screenWidthDp, config.screenHeightDp)
-        return portraitHeightDp * DEFAULT_KEYBOARD_HEIGHT_PERCENT_LANDSCAPE / 100
+        val percent = if (isLandscape) DEFAULT_KEYBOARD_HEIGHT_PERCENT_LANDSCAPE
+            else DEFAULT_KEYBOARD_HEIGHT_PERCENT
+        return portraitHeightDp * percent / 100
+    }
+
+    /**
+     * 「方向 × 悬浮」四套口径各自的默认高度（重置按钮落点）。
+     * 横屏悬浮的卡片是竖屏形态、高度基准是竖屏长边（与横屏非悬浮同一百分比），
+     * 渲染时再乘 CARD_SCALE 缩放，实际可见高度更小；此处默认即用同方向口径的默认值。
+     */
+    fun getKeyboardHeightDefaultsFor(
+        context: Context,
+        isLandscape: Boolean,
+        isFloating: Boolean,
+    ): Int = getDefaultKeyboardHeightDp(context, isLandscape)
+
+
+    // ── 键盘尺寸三件套（高度 / 底部留白 / 左右边距）一律按「方向 × 悬浮」四套独立保存 ──
+    // 用户要求：键盘的大小完全分开保存，互不影响。此前只有高度分了四套，
+    // bottomPadding / marginStart / marginEnd 是全局单键 —— 横屏悬浮调一次就把
+    // 竖屏非悬浮的值一起改掉（表现为「竖屏的默认值被横屏影响」）。
+    // 键名后缀规则与高度键完全一致："" / "_landscape" / "_floating" / "_floating_landscape"。
+    private fun sizeKeySuffix(isLandscape: Boolean, isFloating: Boolean): String = when {
+        isFloating && isLandscape -> "_floating_landscape"
+        isFloating -> "_floating"
+        isLandscape -> "_landscape"
+        else -> ""
     }
 
     private const val KEY_KEYBOARD_BOTTOM_PADDING_DP = "keyboard_bottom_padding_dp"
     private const val DEFAULT_KEYBOARD_BOTTOM_PADDING_DP = 0
 
-    fun getKeyboardBottomPaddingDp(context: Context): Int {
-        return getPrefs(context).getInt(KEY_KEYBOARD_BOTTOM_PADDING_DP, DEFAULT_KEYBOARD_BOTTOM_PADDING_DP)
-    }
+    fun getKeyboardBottomPaddingDp(
+        context: Context,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ): Int = getPrefs(context).getInt(
+        KEY_KEYBOARD_BOTTOM_PADDING_DP + sizeKeySuffix(isLandscape, isFloating),
+        DEFAULT_KEYBOARD_BOTTOM_PADDING_DP,
+    )
 
-    fun setKeyboardBottomPaddingDp(context: Context, paddingDp: Int) {
-        getPrefs(context).edit().putInt(KEY_KEYBOARD_BOTTOM_PADDING_DP, paddingDp).apply()
+    fun setKeyboardBottomPaddingDp(
+        context: Context,
+        paddingDp: Int,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ) {
+        getPrefs(context).edit()
+            .putInt(KEY_KEYBOARD_BOTTOM_PADDING_DP + sizeKeySuffix(isLandscape, isFloating), paddingDp)
+            .apply()
     }
-
     /** 键盘左边距（dp）：>0 时键盘左缘内收（宽度调节；左右独立，可整体偏移）。 */
     private const val KEY_KEYBOARD_MARGIN_START_DP = "keyboard_margin_start_dp"
-
     /** 键盘右边距（dp）。 */
     private const val KEY_KEYBOARD_MARGIN_END_DP = "keyboard_margin_end_dp"
 
-    fun getKeyboardMarginStartDp(context: Context): Int {
-        return getPrefs(context).getInt(KEY_KEYBOARD_MARGIN_START_DP, 0)
+    fun getKeyboardMarginStartDp(
+        context: Context,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ): Int = getPrefs(context).getInt(
+        KEY_KEYBOARD_MARGIN_START_DP + sizeKeySuffix(isLandscape, isFloating), 0,
+    )
+    fun setKeyboardMarginStartDp(
+        context: Context,
+        marginDp: Int,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ) {
+        getPrefs(context).edit()
+            .putInt(KEY_KEYBOARD_MARGIN_START_DP + sizeKeySuffix(isLandscape, isFloating), marginDp)
+            .apply()
     }
-
-    fun setKeyboardMarginStartDp(context: Context, marginDp: Int) {
-        getPrefs(context).edit().putInt(KEY_KEYBOARD_MARGIN_START_DP, marginDp).apply()
-    }
-
-    fun getKeyboardMarginEndDp(context: Context): Int {
-        return getPrefs(context).getInt(KEY_KEYBOARD_MARGIN_END_DP, 0)
-    }
-
-    fun setKeyboardMarginEndDp(context: Context, marginDp: Int) {
-        getPrefs(context).edit().putInt(KEY_KEYBOARD_MARGIN_END_DP, marginDp).apply()
+    fun getKeyboardMarginEndDp(
+        context: Context,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ): Int = getPrefs(context).getInt(
+        KEY_KEYBOARD_MARGIN_END_DP + sizeKeySuffix(isLandscape, isFloating), 0,
+    )
+    fun setKeyboardMarginEndDp(
+        context: Context,
+        marginDp: Int,
+        isLandscape: Boolean = false,
+        isFloating: Boolean = false,
+    ) {
+        getPrefs(context).edit()
+            .putInt(KEY_KEYBOARD_MARGIN_END_DP + sizeKeySuffix(isLandscape, isFloating), marginDp)
+            .apply()
     }
 
     fun isSchemaImportWarningDismissed(context: Context): Boolean {

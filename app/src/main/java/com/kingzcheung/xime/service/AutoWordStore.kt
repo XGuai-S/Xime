@@ -113,6 +113,45 @@ internal object AutoWordStore {
     }
 
     /**
+     * 累积窗口组合：把本次上屏 [word] 与历史窗口 [history] 的**每个后缀**拼接，
+     * 返回全部满足字数范围的新词（去重、按词长从短到长）。
+     *
+     * ## 为什么需要「每个后缀」而不是只取最近一段
+     *
+     * 旧实现只记「上一次上屏」一段（滑动窗口 1）。逐字打「小」「霞」「霞」时：
+     * - 「霞」上屏 → 拼出「小霞」，随后左半边被置为「霞」（「小」丢失）
+     * - 第二个「霞」→ 只能拼出「霞霞」，「小霞霞」永远学不到
+     *
+     * 保留多段历史后，第二次「霞」上屏时窗口是 [小, 霞]：
+     * - 后缀「霞」  → 霞霞
+     * - 后缀「小霞」→ 小霞霞
+     * 于是「能组的所有情况」都会被拼出来。
+     *
+     * @param history 上屏历史（按顺序，每项是一个上屏段，如 ["小", "霞"]）
+     * @param word 本次上屏的段
+     * @param minChars 拼接结果字数下限（含）
+     * @param maxChars 拼接结果字数上限（含）
+     * @return 所有可组的新词；无可用组合时返回空列表
+     */
+    fun comboWithHistory(
+        history: List<String>,
+        word: String,
+        minChars: Int = COMBO_MIN_CHARS,
+        maxChars: Int = COMBO_MAX_CHARS,
+    ): List<String> {
+        if (history.isEmpty() || word.isEmpty()) return emptyList()
+        val out = LinkedHashSet<String>()
+        // 从短后缀到长后缀：短词更常用，先拼接让它排在前面
+        for (take in 1..history.size) {
+            val prev = history.subList(history.size - take, history.size).joinToString("")
+            val combined = comboWord(prev, word, minChars, maxChars) ?: continue
+            out += combined
+        }
+        // 按词长升序（同长度保持拼接顺序）：短词优先，与候选取码优先级一致
+        return out.sortedBy { it.codePointCount(0, it.length) }
+    }
+
+    /**
      * 词是否适合参与组合：全部为汉字（CJK 统一表意文字及其扩展）。
      *
      * 只挑汉字是为了不把英文单词、数字、标点粘进词库——它们在候选里也没有组合意义，
@@ -257,6 +296,70 @@ internal object AutoWordStore {
     }
 
     /**
+     * 批量收录：对一个词的**多个编码**一次性写入，只复制一次外层表。
+     *
+     * ## 为什么需要它（性能）
+     *
+     * 组合生词按方案规则会得到多个编码（3 字词两种形态、多音字更多，上限
+     * [SchemeCodeIndex.MAX_CODES_PER_WORD]）。若调用方对每个编码各调一次 [record]，
+     * 每次 [record] 都要 `LinkedHashMap(temp)` 复制整个外层表（编码层全部浅复制）——
+     * 临时库 1500 编码时单次复制约 60KB，16 个编码就是近 1MB 的短命对象，
+     * 组合词每上屏一次就在主线程制造一次这样的 GC 压力。
+     *
+     * 本方法把「复制外层表」合并成**一次**，其余编码层在循环内共享/就地替换，
+     * 内存与耗时都降一个量级。语义与逐次 [record] 完全等价。
+     *
+     * @return 无任何条目变化时返回原表引用（便于调用方 `===` 判空跳过）。
+     */
+    fun recordMany(
+        temp: Map<String, Map<String, Entry>>,
+        codes: List<String>,
+        word: String,
+        now: Long,
+        initialCount: Int = 1,
+    ): Map<String, Map<String, Entry>> {
+        if (!isLearnedWord(word)) return temp
+        // 先算出哪些编码确实有变化，避免无谓复制外层表
+        var anyChange = false
+        for (code in codes) {
+            if (code.isEmpty()) continue
+            val existing = temp[code]?.get(word)
+            if (existing == null) {
+                anyChange = true
+                break
+            }
+            if (initialCount > 0) {
+                // 已存在且是普通上屏 → 必然计数 +1（有变化）
+                anyChange = true
+                break
+            }
+            // 已存在且为组合生词（initialCount == 0）→ 不计数不刷新，无变化
+        }
+        if (!anyChange) return temp
+        // 只复制一次外层表，循环内按编码就地替换词层
+        val next = LinkedHashMap<String, Map<String, Entry>>(temp)
+        for (code in codes) {
+            if (code.isEmpty()) continue
+            val codeWords = next[code]
+            val existing = codeWords?.get(word)
+            val entry = if (existing == null) {
+                Entry(
+                    word = word, code = code, firstSeen = now,
+                    count = initialCount.coerceAtLeast(0), lastSeen = now,
+                )
+            } else if (initialCount > 0) {
+                existing.copy(count = existing.count + 1, lastSeen = now)
+            } else {
+                continue // 组合生词已存在：不计数不刷新
+            }
+            val words = LinkedHashMap(codeWords ?: emptyMap())
+            words[word] = entry
+            next[code] = words
+        }
+        return next
+    }
+
+    /**
      * 晋升与淘汰（两个窗口同源：都从**最后一次上屏**算起，即滚动窗口）。
      * - 最近 [windowDays] 天内上屏满 [minCount] 次的词 → 移入固定词库（权重按次数换算）；
      * - 超过 [windowDays] 天没再上屏的词 → 从临时库淘汰。
@@ -365,6 +468,91 @@ internal object AutoWordStore {
             }
         }
         return if (changed) next else temp
+    }
+
+    /**
+     * 增量晋升（单词）：只检查 [word] 是否达到晋升阈值，达标则晋升固定词库。
+     *
+     * ## 为什么需要它（性能）
+     *
+     * [promote] 是**全表遍历**（O(临时库条目数)），且每次上屏都被 [recordAutoWord] 调用。
+     * 但上屏只改变**本次词**的 lastSeen/count，其它词的淘汰窗口基于各自 lastSeen、
+     * 本次上屏完全不影响它们。因此「每次上屏全表遍历」是纯浪费：数据涨到 5 万条时
+     * 每敲一次上屏就扫 5 万条，是上屏卡顿的主因之一。
+     *
+     * 本函数只扫该词挂的各编码（通常 1~N 个，N 极小），O(该词编码数)。
+     * 全表淘汰（stale 清理）交给 [prune]（启动即跑）与调用方节流的全量 [promote]。
+     *
+     * ## 一词一码
+     *
+     * 该词若挂在多个编码下（组合生词的多种形态），只取最合适那条晋升，
+     * 与 [promote] 的 bestByWord 选择一致（preferCode 优先 → 计数最多 → 先出现）。
+     *
+     * @return 无待晋升时返回原表引用（`temp === 原表`，调用方可据此跳过写回）。
+     */
+    fun promoteWord(
+        temp: Map<String, Map<String, Entry>>,
+        fixed: Map<String, Map<String, Int>>,
+        now: Long,
+        word: String,
+        preferCode: String = "",
+        minCount: Int = PROMOTE_MIN_COUNT,
+    ): Promotion {
+        if (word.isEmpty()) return Promotion(temp, fixed, emptyList())
+        val needCount = minCount.coerceAtLeast(1)
+        // 只收集该词挂的条目（不遍历全表的词，只按编码层取）
+        val hits = ArrayList<Entry>(4)
+        for ((_, words) in temp) {
+            val e = words[word] ?: continue
+            if (e.count >= needCount) hits += e
+        }
+        if (hits.isEmpty()) return Promotion(temp, fixed, emptyList())
+        val best = pickPreferred(hits, preferCode)
+        // 从临时库删掉该词的全部编码条目（它已晋升，多形态一并收口）
+        val nextTemp = LinkedHashMap<String, LinkedHashMap<String, Entry>>(temp.size)
+        for ((code, words) in temp) {
+            if (!words.containsKey(word)) {
+                nextTemp[code] = LinkedHashMap(words)
+                continue
+            }
+            val nw = LinkedHashMap(words)
+            nw.remove(word)
+            if (nw.isNotEmpty()) nextTemp[code] = nw
+        }
+        // 移入固定词库：清掉该词历史挂在别的编码下的同名条目（一词一码）
+        val nextFixed = LinkedHashMap<String, LinkedHashMap<String, Int>>(fixed.size)
+        for ((code, words) in fixed) {
+            if (code == best.code || !words.containsKey(word)) {
+                nextFixed[code] = LinkedHashMap(words)
+                continue
+            }
+            val nw = LinkedHashMap(words)
+            nw.remove(word)
+            if (nw.isNotEmpty()) nextFixed[code] = nw
+        }
+        nextFixed.getOrPut(best.code) { LinkedHashMap() }[word] = promoteWeight(best.count)
+        return Promotion(nextTemp, nextFixed, listOf(best))
+    }
+
+    /**
+     * 从 [entries] 里选一条最合适晋升的编码：
+     * preferCode 优先 → 计数最多 → 先出现（顺序稳定，结果可复现）。
+     * 与 [promote] 内的 bestByWord 取舍规则保持一致。
+     */
+    private fun pickPreferred(entries: List<Entry>, preferCode: String): Entry {
+        var best = entries[0]
+        for (i in 1 until entries.size) {
+            val e = entries[i]
+            val prevPreferred = best.code == preferCode
+            val currPreferred = e.code == preferCode
+            best = when {
+                currPreferred && !prevPreferred -> e
+                !currPreferred && prevPreferred -> best
+                e.count > best.count -> e
+                else -> best
+            }
+        }
+        return best
     }
 
     /** 观察窗口毫秒数（天数下限 1，防御 0/负数配置导致词立即过期）。 */

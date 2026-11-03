@@ -443,14 +443,23 @@ data class AutoWordConfig(
     @SerialName("avoid_auto_select")
     val avoidAutoSelect: Boolean = true,
     /**
-     * ⚠️ 已停用（保留字段仅兼容解析旧配置）：候选排序不再按词频重排。
+     * 候选排序是否按上屏词频实时重排。
      *
-     * 自 3.2.13 起候选顺序完全由「手动排序表（[sortByManual]）+ rime 引擎原生权重」
-     * 控制；本表（word_freq.txt）仅作上屏记录，并双写一份 `word_freq.yaml` 到 rime
-     * 根目录供外部读取，不参与候选显示。配置里写 `sort_by_freq: false` 没有任何效果。
+     * 词频重排在 Kotlin 层完成（候选取出后按 word_freq 表的频数降序），上屏即可影响
+     * 下一轮候选顺序、**无需任何部署/编译**。优先级低于手动排序表 [sortByManual]：
+     * 某个编码被用户手动拖过时以手动顺序为准，没拖过的编码才按词频排。
+     *
+     * - false（**默认**）：不按词频重排，候选维持方案词库的原生顺序（受词典
+     *   `sort: original` 控制，即用户码表里的行序，如 XGuai_flypy → Flypy 的排布）。
+     *   这是「候选严格按我自己的码表出现」的诉求，词频只作为上屏记录保留。
+     * - true：按上屏频数降序把常用的顶到前面（会偏离码表顺序，见下方说明）。
+     *
+     * 为什么默认 false：词频重排会把「上屏次数多的词」提到码表靠前的位置，
+     * 表现为「候选没有按 XGuai_flypy.dict.yaml 的顺序出现」。码表顺序是用户精心
+     * 编排的（同码多词谁先谁后是有意为之），默认尊重它；想要动态调频再显式开启。
      */
     @SerialName("sort_by_freq")
-    val sortByFreq: Boolean = true,
+    val sortByFreq: Boolean = false,
     /**
      * 候选排序是否应用手动排序表（candidate_order.txt 用户拖拽排定的全序）。
      *
@@ -474,7 +483,7 @@ data class AutoWordConfig(
     /**
      * 不参与上屏词频统计的词典名列表（词典文件名去掉 `.dict.yaml` 后缀，如 `XGuai_user`）。
      *
-     * 这些词典的词条上屏时**不进 word_freq.txt / word_freq.yaml**（词频表不收录），
+     * 这些词典的词条上屏时**不进 word_freq.txt**（词频表不收录），
      * 但仍是方案词典的正常候选，且**不受 [noAutoWordDicts] 影响**（仍可自动造词）。
      *
      * 等效于在词典表头声明 `# nofreq: true`（本配置为全局统一开关，优先级更高）。

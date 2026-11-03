@@ -353,8 +353,10 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
     }
     
     internal fun setKeyboardHeight(heightDp: Int) {
-        val isLandscape = service.resources.configuration.screenWidthDp > service.resources.configuration.screenHeightDp
-        SettingsPreferences.setKeyboardHeightDp(service, heightDp, isLandscape)
+        // 写入口径按方向 × 悬浮四套独立，与渲染侧读键一致（横屏悬浮独立高度）
+        val isLandscape = SettingsPreferences.isLandscapeKeyboardHeightKey(service)
+        val isFloating = SettingsPreferences.isFloatingMode(service, isLandscape)
+        SettingsPreferences.setKeyboardHeightDp(service, heightDp, isLandscape, isFloating)
         service.uiState.value = service.uiState.value.copy(keyboardHeightDp = heightDp)
         // 不弹 Toast：调节界面本身就是实时预览，确定时键盘已经变成目标高度，
         // 再提示"键盘高度已调整"是多余噪音
@@ -371,11 +373,25 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             service.resources.configuration.screenHeightDp,
         )
         val clampedX = loadedX.coerceIn(-halfMargin, halfMargin)
+        // 悬浮切换后立即按「方向 × 悬浮」口径重载尺寸三件套：此前 uiState 里
+        // 还留着另一套口径的值（如从非悬浮切悬浮时保留非悬浮的 padding/margin），
+        // 切换瞬间渲染侧会用旧口径，表现为「悬浮键盘带着非悬浮的留白/边距」。
+        val refreshHeight = SettingsPreferences.getKeyboardHeightDp(service, isLandscape, enabled)
+        val refreshBottom = SettingsPreferences.getKeyboardBottomPaddingDp(service, isLandscape, enabled)
+        val refreshMarginStart = SettingsPreferences.getKeyboardMarginStartDp(service, isLandscape, enabled)
+        val refreshMarginEnd = SettingsPreferences.getKeyboardMarginEndDp(service, isLandscape, enabled)
         service.uiState.value = service.uiState.value.copy(
             isFloatingMode = enabled,
+            keyboardHeightDp = refreshHeight,
+            keyboardBottomPaddingDp = refreshBottom,
+        )
+        service.geometryState.value = service.geometryState.value.copy(
+            keyboardMarginStartDp = refreshMarginStart,
+            keyboardMarginEndDp = refreshMarginEnd,
+            resizePreviewMarginStartDp = refreshMarginStart,
+            resizePreviewMarginEndDp = refreshMarginEnd,
             floatingOffsetX = clampedX,
-            // 开启悬浮归位到"拖动可达的最低点"：拖动钳制下界是 floatingMinY（导航栏高），
-            // 归位到 0 会停在拖动到不了的位置（表现为比可达范围偏下一截）
+            // 开启悬浮归位到"拖动可达的最低点"：拖动钳制下界是 floatingMinY（导航栏高）
             floatingOffsetY = if (enabled) floatingMinY else 0,
         )
         if (enabled) {

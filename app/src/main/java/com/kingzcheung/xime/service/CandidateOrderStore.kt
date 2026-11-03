@@ -238,12 +238,20 @@ object CandidateOrderStore {
      * （新增/修改/删除都尊重，见 [UserDataMerge]）——不采纳的话下次保存又会冲掉。
      * 表为空且没被外部改过时删除文件，不留表头空壳。
      */
+    /**
+     * 候选排序表对应的 rime 可编译词典文件名。
+     *
+     * XGuai_flypy 等方案的 `import_tables` 引用了 `candidate_order`，librime 部署时
+     * 必须能读到该词典文件，否则方案词库编译失败、build 无 .bin、候选打不出字。
+     */
+    internal const val RIME_DICT_FILE_NAME = "candidate_order.dict.yaml"
+
     @Synchronized
     fun save(
         context: android.content.Context,
         table: Map<String, Map<String, Int>>,
-    ): Map<String, Map<String, Int>> =
-        UserDataMerge.saveUserTable(
+    ): Map<String, Map<String, Int>> {
+        val saved = UserDataMerge.saveUserTable(
             context = context,
             name = FILE_NAME,
             privateFile = privateFile(context),
@@ -253,6 +261,85 @@ object CandidateOrderStore {
             serialize = ::serialize,
             onBaseline = { baselineText = it },
         )
+        // 主文件落盘后同步派生词典：`candidate_order.txt`（人读/备份）与
+        // `candidate_order.dict.yaml`（librime 编译用）内容始终保持一致。
+        ensureRimeDict(context, saved)
+        return saved
+    }
+
+    /**
+     * 生成/同步 rime 可编译词典 `candidate_order.dict.yaml`。
+     *
+     * 同时写两处（与 [WordFreqStore.ensureRimeDict] 完全一致的策略）：
+     * - 私有 rime 工作目录 `files/rime/`（librime 部署时实际读取的位置）
+     * - 可见 rime 目录根 `/storage/emulated/0/rime/`（与 word_freq.dict.yaml、
+     *   Flypy.dict.yaml 同级，用户可直接查看/编辑/备份）
+     *
+     * 旧位置 `rime/xime/` 下的历史同名文件一并清理，避免同一词典出现两份互相遮蔽。
+     *
+     * 内容与磁盘一致时不落盘（避免无意义 IO）；表空时删除文件，不留只有表头的空壳，
+     * 否则 librime 会把空词典编进 table.bin。失败静默降级（排序表是辅助功能，
+     * 不能因它影响主流程）。
+     */
+    @Synchronized
+    fun ensureRimeDict(
+        context: android.content.Context,
+        table: Map<String, Map<String, Int>>,
+    ) {
+        runCatching {
+            val dictFile = File(
+                com.kingzcheung.xime.settings.SchemaManager.getRimeDir(context),
+                RIME_DICT_FILE_NAME,
+            )
+            val visible = File(
+                com.kingzcheung.xime.settings.RimeUserFileSync.mirrorDir(context),
+                RIME_DICT_FILE_NAME,
+            )
+            val legacy = File(
+                com.kingzcheung.xime.settings.UserConfigDir.absoluteDir,
+                RIME_DICT_FILE_NAME,
+            )
+
+            if (table.isEmpty()) {
+                if (dictFile.exists()) dictFile.delete()
+                if (visible.exists()) visible.delete()
+                if (legacy.exists()) legacy.delete()
+                return@runCatching
+            }
+
+            // 词典正文必须带 rime 词典头（name/version/sort），否则 librime 无法识别，
+            // import_tables 引用它时整份词典会被当成空内容。
+            // sort: by_weight → rime 原生按权重降序，与手排序意图一致。
+            val text = buildString {
+                append("# Rime dictionary\n")
+                append("# encoding: utf-8\n")
+                append("# 候选排序字典：由 Xime 自动生成，权重越大候选越靠前（rime 原生 by_weight 排序）\n")
+                append("---\n")
+                append("name: candidate_order\n")
+                append("version: \"1\"\n")
+                append("sort: by_weight\n")
+                append("use_preset_vocabulary: false\n")
+                append("...\n")
+                for ((code, words) in table.toSortedMap()) {
+                    for ((word, weight) in words.entries.sortedByDescending { it.value }) {
+                        append(word).append('\t').append(code).append('\t').append(weight).append('\n')
+                    }
+                }
+            }
+
+            val changed = !dictFile.exists() || dictFile.readText() != text
+            if (changed) {
+                dictFile.parentFile?.mkdirs()
+                dictFile.writeText(text)
+                runCatching {
+                    visible.parentFile?.mkdirs()
+                    visible.writeText(text)
+                }
+            }
+            // 旧位置残留无论如何都清掉（迁移遗留，不影响内容判定）
+            if (legacy.exists()) runCatching { legacy.delete() }
+        }
+    }
 
     /**
      * 合并外部手改（不写盘）：返回合并后的表，调用方必须采纳。

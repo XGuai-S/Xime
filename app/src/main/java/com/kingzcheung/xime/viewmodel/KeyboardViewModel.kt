@@ -103,6 +103,11 @@ data class KeyboardUiState(
     val isFloatingMode: Boolean get() = source.isFloatingMode
     val floatingOffsetX: Int get() = source.floatingOffsetX
     val floatingOffsetY: Int get() = source.floatingOffsetY
+    val showKeyboardResize: Boolean get() = source.showKeyboardResize
+    val keyboardMarginStartDp: Int get() = source.keyboardMarginStartDp
+    val keyboardMarginEndDp: Int get() = source.keyboardMarginEndDp
+    val resizePreviewMarginStartDp: Int get() = source.resizePreviewMarginStartDp
+    val resizePreviewMarginEndDp: Int get() = source.resizePreviewMarginEndDp
     val t9ResetSignal: Long get() = source.t9ResetSignal
     val capitalAmountExitSignal: Long get() = source.capitalAmountExitSignal
     val swipeCancelEpoch: Long get() = source.swipeCancelEpoch

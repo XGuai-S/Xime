@@ -47,25 +47,11 @@ import kotlin.math.roundToInt
 /**
  * 键盘调节层（微信输入法式交互）。
  *
- * **渲染在键盘内容 Box 内部**（调用方传 `Modifier.matchParentSize()`）：
- * 遮罩、四条边手柄、三个按钮与键盘共享同一个矩形——遮罩就是键盘矩形本身，
- * 手柄锁遮罩四边、按钮在遮罩内均分，**结构上像素级对齐，不存在坐标复制误差**。
- *
- * 进入调节后：整个键盘块蒙 55% 黑半透明遮罩（按键隐约可见），控件浮在遮罩上：
- *  - 顶部 ≡ 手柄：上下拖 = 键盘高度（底边锚定，上拖变高、下拖变矮，顶边跟手）；
- *  - 底部 ≡ 手柄：**底边跟手**（顶边锚定）——上拖底边上移（变矮+抬离）、下拖贴回
- *    （贴底即止）；高度与底部留白耦合增减（[KeyboardResizeBounds.bottomEdgeDragDelta]），
- *    总高恒定 ⇒ 顶边不动、键盘不整体位移；
- *  - 左 / 右 ||| 手柄：各自独立调所在侧边距（边跟手，往内拖变窄、往外拖变宽，
- *    两侧不等宽时键盘整体偏移）；
- *  - 「重置 / 取消 / 确定」：在遮罩宽度内均分（SpaceEvenly），遮罩变窄时间距自动压缩。
- *
- * 可操作性约束：
- *  - 手柄触控区**整体位于遮罩内侧**（键盘上边缘之外是宿主应用，IME 窗口收不到触摸）；
- *  - 拖动回调上报**原始位移 (dx, dy)**（手指向下/向右为正），方向语义由各手柄调用处
- *    决定，中转层不做取反（双重取反曾导致底部方向相反）；
- *  - 组件不持有尺寸状态：入参即预览值，拖动每帧回调新的绝对值，调用方更新状态后
- *    回流入参实现实时预览；边界收敛见 [KeyboardResizeBounds]。
+ * 跟手性（重要）：所有手柄都用「拖动开始采集基准 + 协程内浮点累加 + 最后取整一次」。
+ * 早期写法是「增量 + 状态回流绝对值」(latestHeight - dy).roundToInt()：回流有一帧
+ * 延迟、每帧 roundToInt 抹掉不足 1dp 的位移，两者叠加导致累积位移被反复吞掉，
+ * 手感表现为「发涩、拖了不动、跟不上手」。
+ * 现在基准与累积都在 pointerInput 协程局部（不受重组影响），位移不丢，只取整一次。
  */
 @Composable
 fun KeyboardResizeOverlay(
@@ -81,20 +67,38 @@ fun KeyboardResizeOverlay(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    heightBaseDp: Int = 0,
+    widthBaseDp: Int = 0,
+    heightScaleFactor: Float = 1f,
 ) {
     val configuration = LocalConfiguration.current
     val screenWidthDp = configuration.screenWidthDp
     val screenHeightDp = configuration.screenHeightDp
     val isLandscape = screenWidthDp > screenHeightDp
 
-    val heightBounds = remember(screenHeightDp, isLandscape) {
-        KeyboardResizeBounds.heightBoundsDp(screenHeightDp, isLandscape)
+    val heightBounds = remember(screenHeightDp, isLandscape, heightBaseDp) {
+        KeyboardResizeBounds.heightBoundsDp(screenHeightDp, isLandscape, heightBaseDp)
     }
-    val maxMargin = remember(screenWidthDp) {
-        KeyboardResizeBounds.maxHorizontalMarginDp(screenWidthDp)
+    val effectiveWidthBaseDp = if (widthBaseDp > 0) widthBaseDp else screenWidthDp
+    val maxMargin = remember(effectiveWidthBaseDp) {
+        KeyboardResizeBounds.maxHorizontalMarginDp(screenWidthDp, effectiveWidthBaseDp)
+    }
+    val minMargin = remember(effectiveWidthBaseDp) {
+        KeyboardResizeBounds.minHorizontalMarginDp(screenWidthDp, effectiveWidthBaseDp)
+    }
+    val maxBottomPadding = remember(widthBaseDp, screenHeightDp, heightDp, heightScaleFactor) {
+        if (widthBaseDp > 0) {
+            val visibleCardHeight = (heightDp * heightScaleFactor).roundToInt() + FloatingCardGeometry.DRAG_BAR_HEIGHT_DP
+            (screenHeightDp - visibleCardHeight).coerceAtLeast(KeyboardResizeBounds.MAX_BOTTOM_PADDING_DP)
+        } else KeyboardResizeBounds.MAX_BOTTOM_PADDING_DP
     }
 
-    // 拖动手势回调里读到的一定是最新值（状态回流入参晚于下一帧手势时防串值）
+    androidx.compose.runtime.LaunchedEffect(heightBounds.first, heightBounds.last) {
+        if (heightBounds.last >= heightBounds.first) {
+            val clamped = heightDp.coerceIn(heightBounds.first, heightBounds.last)
+            if (clamped != heightDp) onHeightChange(clamped)
+        }
+    }
     val latestHeight by rememberUpdatedState(heightDp)
     val latestBottomPadding by rememberUpdatedState(bottomPaddingDp)
     val latestMarginStart by rememberUpdatedState(marginStartDp)
@@ -103,9 +107,14 @@ fun KeyboardResizeOverlay(
     val latestOnBottomPaddingChange by rememberUpdatedState(onBottomPaddingChange)
     val latestOnMarginStartChange by rememberUpdatedState(onMarginStartChange)
     val latestOnMarginEndChange by rememberUpdatedState(onMarginEndChange)
+    val latestHeightBounds by rememberUpdatedState(heightBounds)
+    val latestMaxMargin by rememberUpdatedState(maxMargin)
+    val latestMinMargin by rememberUpdatedState(minMargin)
+    val latestMaxBottomPadding by rememberUpdatedState(maxBottomPadding)
 
-    // 遮罩 = 调节区域本身：蒙住键盘、吞掉全部点击（调节期间按键不响应），
-    // 四条手柄与按钮都是它的子级，随遮罩伸缩
+    // 底部手柄双基准（高度 + 留白）：拖动手势开始采集一次，之后协程内复用
+    val bottomBase = remember { floatArrayOf(0f, 0f) }
+
     Box(
         modifier = modifier
             .background(Color.Black.copy(alpha = 0.55f))
@@ -115,15 +124,16 @@ fun KeyboardResizeOverlay(
                 onClick = {}
             )
     ) {
-        // 顶部手柄：调高度（上拖变高、下拖变矮，顶边跟手）。
-        // 触控区整体在遮罩内侧：上边缘之外是宿主应用，IME 摸不到
+        // 顶部手柄：调高度（上拖变高、下拖变矮，顶边跟手）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(HANDLE_TOUCH_DP)
-                .dragging { _, dy ->
-                    val newHeight = (latestHeight - dy).roundToInt()
-                        .coerceIn(heightBounds.first, heightBounds.last)
+                .dragging(base = { latestHeight.toFloat() }) { base, _, dyAccum ->
+                    val hb = latestHeightBounds
+                    val newHeight = if (hb.last >= hb.first)
+                        (base - dyAccum).coerceIn(hb.first.toFloat(), hb.last.toFloat()).roundToInt()
+                    else latestHeight
                     latestOnHeightChange(newHeight)
                 },
             contentAlignment = Alignment.TopCenter,
@@ -134,24 +144,30 @@ fun KeyboardResizeOverlay(
             )
         }
 
-        // 底部手柄：底边跟手（顶边锚定）——上拖底边上移（变矮+抬离）、下拖底边下移
-        // （变高+贴回，贴底后到底为止）。高度与留白耦合增减，总高恒定 ⇒ 顶边不动。
-        // 区块锚定"按键区底边"（区域底边 - 留白），拖动时随底边一起移动
+        // 底部手柄：高度 ⇄ 底部留白耦合（总和恒定 ⇒ 顶边不动）
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .offset(y = -bottomPaddingDp.dp)
+                .offset(y = (-bottomPaddingDp * heightScaleFactor).dp)
                 .height(HANDLE_TOUCH_DP)
-                .dragging { _, dy ->
+                .dragging(
+                    base = { latestHeight.toFloat() },
+                    onDragStart = {
+                        bottomBase[0] = latestHeight.toFloat()
+                        bottomBase[1] = latestBottomPadding.toFloat()
+                    },
+                ) { base, _, dyAccum ->
+                    val hb = latestHeightBounds
                     val delta = KeyboardResizeBounds.bottomEdgeDragDelta(
-                        dyDp = dy,
-                        heightDp = latestHeight,
-                        heightBounds = heightBounds,
-                        bottomPaddingDp = latestBottomPadding,
+                        dyDp = dyAccum,
+                        heightDp = bottomBase[0].roundToInt(),
+                        heightBounds = hb,
+                        bottomPaddingDp = bottomBase[1].roundToInt(),
+                        maxBottomPaddingDp = latestMaxBottomPadding,
                     )
-                    latestOnHeightChange((latestHeight + delta).roundToInt())
-                    latestOnBottomPaddingChange((latestBottomPadding - delta).roundToInt())
+                    latestOnHeightChange((bottomBase[0] + delta).roundToInt())
+                    latestOnBottomPaddingChange((bottomBase[1] - delta).roundToInt())
                 },
             contentAlignment = Alignment.BottomCenter,
         ) {
@@ -161,16 +177,16 @@ fun KeyboardResizeOverlay(
             )
         }
 
-        // 左侧手柄：只调左边距（边跟手：往内/右拖变窄，往外/左拖变宽）。
-        // 触控带全高便于抓取；握条点在遮罩垂直居中
+        // 左侧手柄：只调左边距
         Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .fillMaxHeight()
                 .width(HANDLE_TOUCH_DP)
-                .dragging { dx, _ ->
-                    val newStart = (latestMarginStart + dx).roundToInt()
-                        .coerceIn(0, maxMargin)
+                .dragging(base = { latestMarginStart.toFloat() }) { base, dxAccum, _ ->
+                    val minM = latestMinMargin.toFloat()
+                    val maxM = latestMaxMargin.toFloat()
+                    val newStart = (base + dxAccum).coerceIn(minM, maxM).roundToInt()
                     latestOnMarginStartChange(newStart)
                 },
             contentAlignment = Alignment.CenterStart,
@@ -181,15 +197,16 @@ fun KeyboardResizeOverlay(
             )
         }
 
-        // 右侧手柄：只调右边距（边跟手：往内/左拖变窄，往外/右拖变宽）
+        // 右侧手柄：只调右边距
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .fillMaxHeight()
                 .width(HANDLE_TOUCH_DP)
-                .dragging { dx, _ ->
-                    val newEnd = (latestMarginEnd - dx).roundToInt()
-                        .coerceIn(0, maxMargin)
+                .dragging(base = { latestMarginEnd.toFloat() }) { base, dxAccum, _ ->
+                    val minM = latestMinMargin.toFloat()
+                    val maxM = latestMaxMargin.toFloat()
+                    val newEnd = (base - dxAccum).coerceIn(minM, maxM).roundToInt()
                     latestOnMarginEndChange(newEnd)
                 },
             contentAlignment = Alignment.CenterEnd,
@@ -200,13 +217,11 @@ fun KeyboardResizeOverlay(
             )
         }
 
-        // 操作按钮：在遮罩内均分（SpaceEvenly），遮罩变窄时间距自动压缩，
-        // 始终完整落在遮罩内部；垂直锚定**按键区**中心（遮罩顶部往下 heightDp/2，
-        // 而非含底部留白的整个遮罩中心）——拖底部手柄、按键区缩小时按钮跟着自适应
+        // 操作按钮：遮罩内均分，垂直锚定按键区中心
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = (heightDp / 2 - ACTION_BLOCK_HALF_HEIGHT).dp)
+                .offset(y = (heightDp * heightScaleFactor / 2 - ACTION_BLOCK_HALF_HEIGHT).dp)
                 .fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
@@ -229,37 +244,54 @@ fun KeyboardResizeOverlay(
     }
 }
 
-/** 手柄触控区边长（dp）：整条边在遮罩内侧的热区，握点图标贴边居中。 */
+/** 手柄触控区边长（dp） */
 private val HANDLE_TOUCH_DP = 48.dp
 
-/** 按钮组总高的一半（56dp 圆 + 6dp 间距 + ~16dp 标签 ≈ 78dp），用于垂直居中。 */
+/** 按钮组总高的一半，用于垂直居中 */
 private const val ACTION_BLOCK_HALF_HEIGHT = 39
 
 /**
- * 拖拽手势修饰符：把**未经变换的**位移 (dx, dy)（dp）交给 onDrag。
- * 手指向下/向右为正；方向语义（高度"上拖为增"等）由调用处决定，这里不做任何取反，
- * 避免出现双重取反导致的"反向"。
+ * 拖拽手势修饰符（本地累积）：
+ * - [base]：拖动开始采集的基准值（用 rememberUpdatedState 保证最新）；
+ * - [onDragStart]：拖动真正开始时回调一次，供调用处补充采集基准；
+ * - [onValue]：每帧回调 (base, dxAccum, dyAccum)，其中 base/累积都在 pointerInput
+ *   协程局部（不受重组影响），位移不丢失、取整只在调用处做一次。
+ *
+ * 解决早期写法「增量 + 状态回流绝对值」：回流一帧延迟 + 每帧 roundToInt 抹掉
+ * 不足 1dp 位移，累积被反复吞掉 → 手柄发涩、拖了不动、跟不上手。
  */
 @Composable
-private fun Modifier.dragging(onDrag: (dx: Float, dy: Float) -> Unit): Modifier {
+private fun Modifier.dragging(
+    base: () -> Float = { 0f },
+    onDragStart: () -> Unit = {},
+    onValue: (base: Float, dxAccum: Float, dyAccum: Float) -> Unit,
+): Modifier {
     val density = LocalDensity.current
+    val latestBase by rememberUpdatedState(base)
+    val latestStart by rememberUpdatedState(onDragStart)
+    val latestOnValue by rememberUpdatedState(onValue)
     return pointerInput(density) {
+        var base0 = 0f
+        var accX = 0f
+        var accY = 0f
         detectDragGestures(
+            onDragStart = {
+                base0 = latestBase()
+                accX = 0f
+                accY = 0f
+                latestStart()
+            },
             onDrag = { change, dragAmount ->
                 change.consume()
-                onDrag(
-                    with(density) { dragAmount.x.toDp().value },
-                    with(density) { dragAmount.y.toDp().value },
-                )
+                accX += with(density) { dragAmount.x.toDp().value }
+                accY += with(density) { dragAmount.y.toDp().value }
+                latestOnValue(base0, accX, accY)
             },
         )
     }
 }
 
-/**
- * 三道握条（≡ / |||），背后垫深色胶囊。在 55% 遮罩上以白色握条保证可见性。
- * [verticalBars] = true 为左右边缘的竖向握条。
- */
+/** 三道握条（≡ / |||） */
 @Composable
 private fun GripPill(verticalBars: Boolean, modifier: Modifier = Modifier) {
     val barColor = Color.White.copy(alpha = 0.95f)
@@ -285,7 +317,7 @@ private fun GripPill(verticalBars: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
-/** 调节操作按钮：深色圆形衬底 + 白色图标 + 下方带阴影的文字标签。 */
+/** 调节操作按钮：深色圆形衬底 + 白色图标 + 下方带阴影的文字标签 */
 @Composable
 private fun ResizeActionButton(
     icon: ImageVector,

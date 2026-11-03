@@ -275,7 +275,8 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
         val halfMargin = FloatingCardGeometry.halfMarginDpForConfig(config.screenWidthDp, config.screenHeightDp)
         // dx/dy 为原始屏幕位移（+x 右、+y 下）：x 直接累加，y 与 offsetY
         // 方向相反（offsetY = 卡片离底边的距离，上拖 dy<0 → 卡片上移）
-        val newX = (s.floatingOffsetX + dx).roundToInt().coerceIn(-halfMargin, halfMargin)
+        val geo = service.geometryState.value
+        val newX = (geo.floatingOffsetX + dx).roundToInt().coerceIn(-halfMargin, halfMargin)
         // 卡高以实测（onCardPositioned）为唯一真源，首帧实测前走几何兜底
         val cardHeightDp = if (service.currentFloatingCardHeightDp > 0) {
             service.currentFloatingCardHeightDp
@@ -294,7 +295,7 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
         } else {
             config.screenHeightDp
         }
-        val rawY = (s.floatingOffsetY - dy).roundToInt()
+        val rawY = (geo.floatingOffsetY - dy).roundToInt()
         val newY = FloatingCardGeometry.clampOffsetY(
             rawY,
             minY = floatingMinY,
@@ -310,7 +311,7 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
                 service.feedbackManager.performVibration()
             }
         }
-        service.uiState.value = s.copy(
+        service.geometryState.value = geo.copy(
             floatingOffsetX = newX,
             floatingOffsetY = newY,
         )
@@ -570,13 +571,20 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
      * 正文自原回调逐字搬出，仅整体缩进减 8 空格。
      */
     private fun handleKeyboardResize(service: XimeInputMethodService) {
-        val config = service.resources.configuration
-        val isLandscape = config.screenWidthDp > config.screenHeightDp
+        // 高度口径按方向 × 悬浮四套独立（横屏悬浮卡片与全宽键盘互不干扰），
+        // 必须与渲染侧 orientationHeight 的取键方式完全一致
+        val isLandscape = SettingsPreferences.isLandscapeKeyboardHeightKey(service)
+        val isFloating = SettingsPreferences.isFloatingMode(service, isLandscape)
         service.uiState.value = service.uiState.value.copy(
             showKeyboardResize = true,
-            resizePreviewHeightDp = SettingsPreferences.getKeyboardHeightDp(service, isLandscape),
-            resizePreviewMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(service),
-            resizePreviewMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(service),
+            resizePreviewHeightDp = SettingsPreferences.getKeyboardHeightDp(service, isLandscape, isFloating),
+            keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(service, isLandscape, isFloating),
+        )
+        service.geometryState.value = service.geometryState.value.copy(
+            resizePreviewMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(service, isLandscape, isFloating),
+            resizePreviewMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(service, isLandscape, isFloating),
+            keyboardMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(service, isLandscape, isFloating),
+            keyboardMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(service, isLandscape, isFloating),
         )
     }
 
@@ -653,16 +661,14 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
      * 正文自原回调逐字搬出，仅整体缩进减 8 空格。
      */
     private fun handleFloatingKeyboardDragEnd(service: XimeInputMethodService) {
-        if (service.floatingExitHintState.value) {
-            // 底部松手：切换为非悬浮（停靠），位置语义与菜单开关同一条出口
-            service.floatingExitHintState.value = false
-            service.schemaController.toggleFloatingMode(false)
-        } else {
-            val s = service.uiState.value
-            val isLandscape = service.resources.configuration.screenWidthDp > service.resources.configuration.screenHeightDp
-            SettingsPreferences.setFloatingOffsetX(service, s.floatingOffsetX, isLandscape)
-            SettingsPreferences.setFloatingOffsetY(service, s.floatingOffsetY, isLandscape)
-        }
+        // 用户要求：悬浮键盘拖到底部**不再自动切换成普通（非悬浮）键盘**。
+        // 原逻辑在贴底松手时调用 toggleFloatingMode(false) 停靠，现改为仅落盘
+        // 当前偏移位置，悬浮/非悬浮只能由菜单开关显式切换。
+        // 同时清掉贴底提示态，避免底部光效残留。
+        service.floatingExitHintState.value = false
+        val isLandscape = service.resources.configuration.screenWidthDp > service.resources.configuration.screenHeightDp
+        SettingsPreferences.setFloatingOffsetX(service, service.geometryState.value.floatingOffsetX, isLandscape)
+        SettingsPreferences.setFloatingOffsetY(service, service.geometryState.value.floatingOffsetY, isLandscape)
     }
 
     /**

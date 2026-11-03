@@ -681,8 +681,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             "delete" -> {
                 if (hasComposing) {
                     // 组合态：退格走 Rime，更新候选栏
-                    service.rimeEngine.processKey(RimeKeyCodes.BACKSPACE, 0)
-                    val result = service.rimeEngine.getProcessResult(true)
+                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
                     if (result.inputText.isEmpty()) {
                         service.rimeEngine.clearComposition()
                     }
@@ -786,8 +785,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 val isComposing = candState.isComposing || candState.inputText.isNotEmpty()
                 if (isComposing) {
                     // Rime 有组合态 → 转发退格到 Rime 清空候选字母/联想词
-                    service.rimeEngine.processKey(RimeKeyCodes.BACKSPACE, 0)
-                    val result = service.rimeEngine.getProcessResult(true)
+                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
                     if (result.inputText.isEmpty()) {
                         service.rimeEngine.clearComposition()
                     }
@@ -1231,16 +1229,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             val newInput = editingInput.removeRange(editingCaret - 1, editingCaret)
             service.editingCaretPos = if (newInput.isEmpty()) -1 else editingCaret - 1
             service.editingCaretInput = newInput
-            service.rimeEngine.setInput(newInput)
-            val result = service.rimeEngine.getProcessResult(true)
+            val result = service.rimeEngine.setInputAndGetResult(newInput)
             if (result.inputText.isEmpty()) {
                 service.rimeEngine.clearComposition()
                 service.editingCaretPos = -1
             }
             sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
         } else {
-            service.rimeEngine.processKey(RimeKeyCodes.BACKSPACE, 0)
-            val result = service.rimeEngine.getProcessResult(true)
+            val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
             if (result.inputText.isEmpty()) {
                 service.rimeEngine.clearComposition()
                 // T9 部分提交：剩余编码删完后，已上屏/ composing 的部分候选词无法用

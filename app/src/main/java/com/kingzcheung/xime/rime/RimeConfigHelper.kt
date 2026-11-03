@@ -310,6 +310,9 @@ object RimeConfigHelper {
         }
     }
 
+    /** 词频编译词典名：不参与部署 hash（详见 computeDeploymentHash 里的说明）。 */
+    private const val WORD_FREQ_DICT_FILE = "word_freq.dict.yaml"
+
     private fun computeDeploymentHash(context: Context): String {
         val rimeDir = File(context.filesDir, "rime")
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -336,8 +339,15 @@ object RimeConfigHelper {
         // 所有词典文件（内置词典与个人词库）纳入 hash：
         // 否则词典新增/变更（如 pinyin_simp.dict.yaml）不会改变 hash，
         // build 目录不重建、不重新部署，导致 table.bin 缺失（运行时反复报错）。
+        //
+        // ⚠️ word_freq.dict.yaml 明确排除：词频是每分钟都在变的高频文件，若计入 hash，
+        // 每次上屏都让 hash 失配 → 下次启动/重载必触发增量部署（独占 rimeLock 3s+），
+        // 表现就是「打完字打不了字要等一会」。自 v3.2.57 起词频对候选顺序的影响
+        // 改由 Kotlin 层实时重排（见 ImeSessionController / CandidateOrderStore），
+        // 不依赖编译产物，因此它的内容变化不需要、也不应该触发部署。
         rimeDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(".dict.yaml") }
+            ?.filter { it.name != WORD_FREQ_DICT_FILE }
             ?.sortedBy { it.name }
             ?.forEach { dictFile ->
                 digest.update(dictFile.name.toByteArray())

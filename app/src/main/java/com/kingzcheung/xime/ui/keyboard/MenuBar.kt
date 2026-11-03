@@ -141,8 +141,8 @@ fun MenuBar(
             MenuItem(emojiIcon, "表情", callbacks.onEmoji),
         ) + switchItems + listOf(
             MenuItem(customizeIcon, "定制工具栏", callbacks.onToolbarCustomize),
-            // 悬浮模式下键盘内容为缩放的浮动卡片，高度不可调节，隐藏该入口
-            if (!state.isFloatingMode) MenuItem(keyboardResizeIcon, "键盘调节", callbacks.onKeyboardResize) else null,
+            // 悬浮模式卡片高度也可调节（横屏悬浮同样需要），不再隐藏入口
+            MenuItem(keyboardResizeIcon, "键盘调节", callbacks.onKeyboardResize),
             MenuItem(darkModeIcon, darkModeLabel, callbacks.onToggleDarkMode),
             MenuItem(floatingIcon, floatingLabel, floatingAction),
             MenuItem(deployIcon, "部署方案", callbacks.onReloadConfig),
@@ -224,32 +224,56 @@ fun MenuBar(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    // 悬浮（横屏/竖屏）卡片是窄高形态：内容不得 weight(1f) 撑满，
+                    // 否则 pager 高度被强制，方块 aspectRatio(1f) 遇强制高度被拉长，
+                    // 表现为「菜单项纵向拉伸、图标文字被截断」。
+                    // 悬浮时改为 wrap content + 顶部对齐，方块保持正方形。
+                    .then(if (state.isFloatingMode) Modifier else Modifier.weight(1f)),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.SpaceAround
+                verticalArrangement = if (state.isFloatingMode) Arrangement.Top else Arrangement.SpaceAround
             ) {
                 HorizontalPager(
                     state = pagerState,
-                    modifier = Modifier.fillMaxWidth()
+                    // 悬浮卡片是窄高形态，两页内容高度一致但 Pager 仍按当前页测量，
+                    // 翻页瞬间重测会让整块内容上下跳一下。这里直接固定为
+                    // 2 行 × 64dp + 行间距 12dp = 140dp，高度恒定、翻页零抖动。
+                    modifier = Modifier.fillMaxWidth().then(
+                        if (state.isFloatingMode) Modifier.height(140.dp) else Modifier
+                    )
                 ) { page ->
-                    FlowRow(
+                    // 2 行 × 4 列：不用 FlowRow + weight。FlowRowScope 不支持 weight，
+                    // 子项会按父约束测量，窄容器（横屏悬浮卡片约 38% 屏宽）下
+                    // FlowRow.createConstraints 给 fitPrioritizingWidth 传入非法约束
+                    // （maxWidth < minWidth），抛 "maxWidth must be >= than minWidth"。
+                    // 改 Column + Row 后 weight 是 RowScope 合法用法，任何宽度都安全。
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        maxItemsInEachRow = 4
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        pages[page].forEach { item ->
-                            if (item != null) {
-                                MenuItemButton(
-                                    item = item,
-                                    bgColor = itemBgColor,
-                                    textColor = textColor,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            } else {
-                                Box(modifier = Modifier.weight(1f).aspectRatio(1f))
+                        pages[page].chunked(4).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                rowItems.forEach { item ->
+                                    if (item != null) {
+                                        MenuItemButton(
+                                            item = item,
+                                            bgColor = itemBgColor,
+                                            textColor = textColor,
+                                            modifier = Modifier.weight(1f), isFloating = state.isFloatingMode
+                                        )
+                                    } else {
+                                        // 占位必须与真实项同高，否则 pager 高度随页变化，
+                                        // 左右翻页时整块内容上下抖动。
+                                        Box(modifier = Modifier.weight(1f).then(
+                                            if (state.isFloatingMode) Modifier.height(64.dp)
+                                            else Modifier.aspectRatio(1f)
+                                        ))
+                                    }
+                                }
                             }
                         }
                     }
@@ -287,11 +311,22 @@ fun MenuItemButton(
     bgColor: Color,
     textColor: Color,
     modifier: Modifier = Modifier,
-    isLandscape: Boolean = false
+    isLandscape: Boolean = false,
+    isFloating: Boolean = false
 ) {
     Column(
         modifier = modifier
-            .then(if (isLandscape) Modifier.height(72.dp) else Modifier.aspectRatio(1f))
+            // 悬浮卡片：方块固定高，避免 aspectRatio 与 weight/容器高度协商被拉长。
+            // 此前横屏悬浮方块被纵向拉伸（300宽×500高长条、内容截断），
+            // 根源是 aspectRatio(1f) 遇到容器强制高度约束无法保持正方形。
+            // 固定高 64dp 后高度由自身决定，与列宽解耦，任何容器都不再拉伸。
+            .then(
+                when {
+                    isFloating -> Modifier.height(64.dp)
+                    isLandscape -> Modifier.height(72.dp)
+                    else -> Modifier.aspectRatio(1f)
+                }
+            )
             .clip(RoundedCornerShape(12.dp))
             .background(bgColor)
             .clickable { item.action() }

@@ -63,6 +63,7 @@ import com.kingzcheung.xime.service.CandidateState
 import com.kingzcheung.xime.service.ExpandedCandidatePager
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.service.KeyboardGeometry
 import com.kingzcheung.xime.ui.menubar.CandidateReorderView
 import com.kingzcheung.xime.ui.isTablet
 import com.kingzcheung.xime.ui.menubar.ClipboardView
@@ -106,6 +107,14 @@ fun KeyboardView(
      * 此处只覆盖没有经过按键回调链路的点击交互，宿主按按键振动同款语义实现。
      */
     onHapticFeedback: (() -> Unit)? = null,
+    /**
+     * 悬浮卡片几何镜像 State（边距 / 偏移量）。
+     *
+     * 本函数只把它**引用**往下传，自己不解引用：几何每帧变化时不会重启本作用域，
+     * 只有 [FloatingKeyboardContainer] 内部读  才会重组，
+     * 键盘按键区保持不动 —— 这是拖动不卡的关键。
+     */
+    geometryState: State<KeyboardGeometry> = remember { mutableStateOf(KeyboardGeometry()) },
 ) {
     val isShifted by viewModel.isShifted.collectAsStateWithLifecycle()
     val keyboardState by viewModel.keyboardState.collectAsStateWithLifecycle()
@@ -271,8 +280,10 @@ fun KeyboardView(
         isFloatingMode = state.isFloatingMode,
         scaleFactor = floatScaleFactor,
         fontScaleFactor = floatFontScale,
-        offsetX = state.floatingOffsetX,
-        offsetY = state.floatingOffsetY,
+        // 几何（偏移量 / 边距）走独立 State，不在本作用域解引用：
+        // 否则几何每帧变化会重启整个 KeyboardView（含全部按键）→ 拖动卡顿。
+        geometryState = geometryState,
+        showResize = state.showKeyboardResize,
         backgroundColor = keyboardBgColor,
         onDrag = { dx, dy -> callbacks.onFloatingKeyboardDrag?.invoke(dx, dy) },
         onDragEnd = { callbacks.onFloatingKeyboardDragEnd?.invoke() },
@@ -295,6 +306,11 @@ fun KeyboardView(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // 必须填满卡片高度：键盘主体用 weight(1f) 分配剩余空间，父 Column
+                // 若 wrap 内容，weight 拿不到剩余高度 → 键盘主体停在内容自然高，
+                // 按键高度不随卡片（floatingCardContentHeight）缩小，而字号随
+                // fontScale 缩小，表现为「字母/角标没有跟随按键缩放」。
+                .fillMaxHeight()
         ) {
             var handwritingCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
             var handwritingComments by remember { mutableStateOf<List<String>>(emptyList()) }

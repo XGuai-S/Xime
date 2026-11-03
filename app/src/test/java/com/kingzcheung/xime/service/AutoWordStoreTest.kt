@@ -348,6 +348,32 @@ class AutoWordStoreTest {
     }
 
     @Test
+    fun `累积窗口拼接出所有后缀组合`() {
+        // 逐字打「小」「霞」「霞」：历史窗口 [小, 霞]，本次上屏「霞」
+        // 应与每个后缀拼接：后缀「霞」→ 霞霞；后缀「小霞」→ 小霞霞
+        assertEquals(
+            listOf("霞霞", "小霞霞"),
+            AutoWordStore.comboWithHistory(listOf("小", "霞"), "霞"),
+        )
+    }
+
+    @Test
+    fun `累积窗口超上限的词被过滤`() {
+        // 历史 [现在, 目录]，本次「高」：
+        // · 后缀「目录」  → 目录高（3 字，收录）
+        // · 后缀「现在目录」→ 现在目录高（5 字，超上限 4 被拒）
+        assertEquals(
+            listOf("目录高"),
+            AutoWordStore.comboWithHistory(listOf("现在", "目录"), "高"),
+        )
+        // 上限放到 5 时两种都收录，且按词长升序（3 字在前、5 字在后）
+        assertEquals(
+            listOf("目录高", "现在目录高"),
+            AutoWordStore.comboWithHistory(listOf("现在", "目录"), "高", maxChars = 5),
+        )
+    }
+
+    @Test
     fun `空词不组合`() {
         assertNull(AutoWordStore.comboWord("", "目录"))
         assertNull(AutoWordStore.comboWord("现在", ""))

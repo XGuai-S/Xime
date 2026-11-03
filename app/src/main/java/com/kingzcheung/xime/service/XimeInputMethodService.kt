@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 
@@ -258,6 +259,23 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal val mainHandler = Handler(Looper.getMainLooper())
     
     internal val uiState = mutableStateOf(InputUIState())
+    /**
+     * 悬浮卡片几何镜像（高频变化字段，与 [uiState] 分离）。
+     *
+     * 拖动调节/悬浮卡片时这些值每帧都在变。若写进 [uiState]，`uiState.value`
+     * 每帧换新实例 → 服务层 `kbState = remember(state, ...)` 每次重建 → 整个
+     * KeyboardView（全部按键、候选栏）重组 → 拖动明显卡顿。
+     *
+     * 这里用独立 `mutableStateOf` 承接高频几何变化：KeyboardView 只把它的
+     * 引用传给悬浮卡片容器，自己不解引用，几何变化不会让它重组；只有真正读
+     * `geometryState.value` 的悬浮卡片容器（外框）重绘，键盘按键区保持不动。
+     *
+     * 注意：`resizePreviewHeightDp`（影响按键区高度，重组必要）与
+     * `showKeyboardResize`（低频开关）继续留在 [uiState]，不走这里。
+     */
+    internal val geometryState = mutableStateOf(
+        com.kingzcheung.xime.service.KeyboardGeometry()
+    )
     /** 悬浮键盘拖到底部"松手切换非悬浮"的提示态：拖动回调边沿写入（进入时震动一次），
      *  松手在 onFloatingKeyboardDragEnd 消费；底部光效（FloatingExitGlow）按它显隐 */
     internal val floatingExitHintState = mutableStateOf(false)
@@ -341,6 +359,41 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     @Volatile
     private var wordTablesLoaded = false
+
+    /**
+     * 词库表互斥锁：保护 [candidateOrderTable] / [wordFreqTable] / [autoWordTemp] /
+     * [autoWordFixed] / [wordBlacklist] 的**读-改-写**。
+     *
+     * 为什么必须加锁：这些表是「内存唯一真源」，但写入发生在两个线程上——
+     * - 主线程：上屏统计（[recordWordFrequency]）、手改合并（[reconcileUserDataFiles]）；
+     * - IO 线程：防抖落盘（[saveWordData]，见 wordFreqSaveRunnable）。
+     *
+     * @Volatile 只保证可见性，**不保证读-改-写原子**：
+     * `table = store.save(context, table)` 是「读字段 → 写盘/合并 → 回写字段」三步，
+     * 若期间主线程刚 `table = store.withCommit(table, ...)` 记了一次上屏，IO 线程
+     * 回写的旧快照就会把这笔计数覆盖掉——表现为「刚打的词频偶尔丢一次」。
+     * 加锁后两个方向的写入严格互斥，不再有丢失更新。
+     *
+     * 用 [java.util.concurrent.locks.ReentrantLock]（可重入）：[recordWordFrequency]
+     * 持锁期间会调 [recordComboWord] / [recordAutoWord]，闭包内若再取锁不会自锁。
+     * 无竞争时开销约 20ns，对按键热路径可忽略。
+     */
+    private val wordTablesLock = java.util.concurrent.locks.ReentrantLock()
+
+    /**
+     * 全量 [AutoWordStore.promote] 的最小间隔（毫秒）。
+     *
+     * 上屏只改变本次词的 lastSeen/count，其它词的淘汰窗口基于各自 lastSeen、本次上屏
+     * 不影响它们。因此每次上屏都全表 promote 是纯浪费（O(条目数)），改为节流：
+     * - 日常每次上屏用 [AutoWordStore.promoteWord]（只查本次词，O(该词编码数)）；
+     * - 每过 [FULL_PROMOTE_INTERVAL_MS] 做一次全量 promote，顺带把超窗口的陈旧词淘汰掉。
+     *
+     * 淘汰窗口（7 天）远大于该间隔，60 秒粒度足以及时清掉「久未上屏」的词。
+     */
+    private val fullPromoteIntervalMs = 60_000L
+
+    /** 上次全量 [AutoWordStore.promote] 的时间戳；0 = 尚未做过（首次上屏即全量）。 */
+    private var lastFullPromoteTime = 0L
     private val clipboardItemsState = mutableStateOf<List<com.kingzcheung.xime.clipboard.ClipboardItem>>(emptyList())
     private val voiceAmplitudeState = mutableFloatStateOf(0f)
     private val voiceSpectrumState = mutableStateOf(FloatArray(16))
@@ -577,11 +630,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             resources.configuration.screenWidthDp,
             screenH,
         )
-        val kbH = SettingsPreferences.getKeyboardHeightDp(this, isLandscape)
+        val kbH = SettingsPreferences.getKeyboardHeightDp(this, isLandscape, isFloatingMode)
         val cappedKbH = kbH.coerceAtMost((screenH * 8) / 10)
         val cardH = FloatingCardGeometry.fallbackCardHeightDp(
             cappedKbH,
-            SettingsPreferences.getKeyboardBottomPaddingDp(this),
+            SettingsPreferences.getKeyboardBottomPaddingDp(this, isLandscape, isFloatingMode),
         )
         val navBarDp = tryGetNavBarHeightDp(this, window.window)
         val minY = if (isFloatingMode) navBarDp else 0
@@ -597,12 +650,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             darkMode = SettingsPreferences.getDarkMode(this),
             themeId = SettingsPreferences.getKeyboardTheme(this),
             isSttEnabled = SettingsPreferences.isSttEnabled(this@XimeInputMethodService),
-            keyboardHeightDp = SettingsPreferences.getKeyboardHeightDp(this, isLandscape),
-            keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(this),
-            keyboardMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(this),
-            keyboardMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(this),
+            keyboardHeightDp = SettingsPreferences.getKeyboardHeightDp(this, isLandscape, isFloatingMode),
+            keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(this, isLandscape, isFloatingMode),
+            // 几何三件套写独立 geometryState（高频变化，避免重建 kbState）
             toolbarButtons = SettingsPreferences.getToolbarButtons(this),
             isFloatingMode = isFloatingMode,
+        )
+        geometryState.value = geometryState.value.copy(
+            keyboardMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(this, isLandscape, isFloatingMode),
+            keyboardMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(this, isLandscape, isFloatingMode),
+            resizePreviewMarginStartDp = SettingsPreferences.getKeyboardMarginStartDp(this, isLandscape, isFloatingMode),
+            resizePreviewMarginEndDp = SettingsPreferences.getKeyboardMarginEndDp(this, isLandscape, isFloatingMode),
             floatingOffsetX = clampedX,
             floatingOffsetY = clampedY,
         )
@@ -728,6 +786,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val orderTable = CandidateOrderStore.load(this@XimeInputMethodService)
+                // 启动即把 candidate_order.txt 同步成 rime 可编译词典
+                // candidate_order.dict.yaml（私有 rime 目录 + 可见 rime 根各一份）：
+                // XGuai_flypy 的 import_tables 引用了 candidate_order，缺这份词典
+                // 会让方案词库编译失败、候选打不出字；同时保证「txt 有内容就有 dict」
+                // 「两边内容始终一致」，不依赖用户拖动候选才生成。
+                runCatching {
+                    CandidateOrderStore.ensureRimeDict(this@XimeInputMethodService, orderTable)
+                }
                 val freqTable = WordFreqStore.load(this@XimeInputMethodService)
                 val tempTable = AutoWordStore.loadTemp(this@XimeInputMethodService)
                 // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
@@ -1902,19 +1968,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val screenIsLandscape = screenWidthDp > screenHeightDp
         val portraitScreenHeightDp = if (screenIsLandscape) screenWidthDp else screenHeightDp
         val isLandscape = !state.isFloatingMode && screenIsLandscape
-        val orientationHeight = if (state.isFloatingMode) {
-            val prefs = SettingsPreferences.getPrefsPublic(this@XimeInputMethodService)
-            val storedPortrait = prefs.getInt("keyboard_height_dp", -1)
-            if (storedPortrait > 0) storedPortrait else {
-                val storedLandscape = prefs.getInt("keyboard_height_dp_landscape", -1)
-                if (storedLandscape > 0) storedLandscape else portraitScreenHeightDp * SettingsPreferences.DEFAULT_KEYBOARD_HEIGHT_PERCENT / 100
-            }
-        } else {
-            SettingsPreferences.getKeyboardHeightDp(this@XimeInputMethodService, screenIsLandscape)
-        }
+        // 高度一律按屏幕方向取键（悬浮 / 非悬浮同口径）。
+        // 悬浮模式不再回退到竖屏键：横屏悬浮的卡片是独立形态，需要自己的高度，
+        // 复用竖屏高度会让横屏卡片高得超出屏幕（且与调节、重置的键不一致）。
+        val orientationHeight = SettingsPreferences.getKeyboardHeightDp(
+            this@XimeInputMethodService, screenIsLandscape, state.isFloatingMode
+        )
         val displayHeight = orientationHeight.coerceAtMost((if (state.isFloatingMode) portraitScreenHeightDp else screenHeightDp) * KeyboardWindowMetrics.DISPLAY_HEIGHT_MAX_PERCENT / 100)
+        // 调节进行中：预览高度是唯一真源（横竖屏 / 悬浮统一）。
+        // 此前横屏硬编码屏高 70%、竖屏走 displayHeight，与 resizePreviewHeightDp 脱节：
+        // 悬浮模式卡片实际高 = 高度 × CARD_SCALE + 拖条，若调节时强行用未缩放预览值，
+        // 点「确定」后卡片会突降 15%+18dp。统一走 floatingCardContentHeight 公式后，
+        // 非悬浮（floatScale=1 / dragBar=0）结果恒等于预览值，行为完全不变。
         val keyboardHeight = if (state.showKeyboardResize) {
-            if (screenIsLandscape) (screenHeightDp * KeyboardWindowMetrics.LANDSCAPE_DISPLAY_HEIGHT_PERCENT) / 100 else displayHeight.coerceAtLeast(screenHeightDp / 2)
+            state.resizePreviewHeightDp
         } else if (isHandwritingMode) {
             screenHeightDp / 2
         } else {
@@ -1977,7 +2044,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         XimeTheme(darkTheme = isDarkTheme, themeId = state.themeId) {
             Box(modifier = Modifier.fillMaxSize()) {
                 // Sync FrameLayout height with Compose content height
-                val contentHeight = if (state.showKeyboardResize) state.resizePreviewHeightDp else floatingCardContentHeight + overlayPanelExtra
+                // 调节中 floatingCardContentHeight 已由 keyboardHeight=预览值 推导，
+                // 与非调节同一公式 → 确定前后无跳变
+                val contentHeight = floatingCardContentHeight + overlayPanelExtra
                 val totalDp = if (state.isCompact || state.isFloatingMode) effectiveScreenH
                     else contentHeight + state.keyboardBottomPaddingDp + activeBottomDp
                 SideEffect {
@@ -2036,23 +2105,53 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 浮动模式：卡片由 KeyboardView 内部 FloatingKeyboardContainer 自绘背景与定位，此处不做背景/偏移。
                 // 键盘宽度调节：左右边距各自独立内收（可整体偏移），背景随内容同宽
                 // （调节进行中用预览值，拖动实时跟随；非调节用已保存值）
-                val keyboardMarginStartDp = if (state.showKeyboardResize) state.resizePreviewMarginStartDp else state.keyboardMarginStartDp
-                val keyboardMarginEndDp = if (state.showKeyboardResize) state.resizePreviewMarginEndDp else state.keyboardMarginEndDp
+                val bgGeo = if (state.isFloatingMode) null else geometryState.value
+                val keyboardMarginStartDp = bgGeo?.effectiveMarginStart(state.showKeyboardResize) ?: 0
+                val keyboardMarginEndDp = bgGeo?.effectiveMarginEnd(state.showKeyboardResize) ?: 0
                 if (!state.isFloatingMode) {
+                            // 非悬浮：负边距无意义（键盘不能超出屏幕），钳到 0 防崩溃。
+                            val bgMarginStart = keyboardMarginStartDp.coerceAtLeast(0)
+                            val bgMarginEnd = keyboardMarginEndDp.coerceAtLeast(0)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (state.showKeyboardResize) (state.resizePreviewHeightDp + state.keyboardBottomPaddingDp + activeBottomDp).dp else (floatingCardContentHeight + state.keyboardBottomPaddingDp + overlayPanelExtra + activeBottomDp).dp)
-                            .padding(start = keyboardMarginStartDp.dp, end = keyboardMarginEndDp.dp)
+                            .height((floatingCardContentHeight + state.keyboardBottomPaddingDp + overlayPanelExtra + activeBottomDp).dp)
                             .align(androidx.compose.ui.Alignment.BottomCenter)
-                            .keyboardBackground(rootTheme.keyboardBackground, isDark, keyboardBgColor)
-                    )
+                    ) {
+                        // 背景必须画在「padding 内缩后的内层」，两侧才会透出宿主应用。
+                        // 旧写法 fillMaxWidth().padding().keyboardBackground() 的 padding
+                        // 在 align 之前被 align 的测量抵消（align 重测 fillMaxWidth 全宽），
+                        // 背景仍铺满全宽 —— 表现为「左右缩小后两侧仍是键盘背景色」。
+                        // 嵌套后：内层 Box 尺寸 = 全宽 - 左右边距，背景随之内缩。
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height((floatingCardContentHeight + state.keyboardBottomPaddingDp + overlayPanelExtra + activeBottomDp).dp)
+                            .align(androidx.compose.ui.Alignment.BottomCenter)
+                    ) {
+                        // 背景必须与**内容层完全同口径**内缩，否则两侧边界对不上：
+                        // 内容层是 horizontalInset + margin（手机避让挖孔/横屏导航栏），
+                        // 背景若只减 margin，横屏左右边衬区不对称时会出现「一侧空隙大、
+                        // 一侧空隙小」（实测左边明显更宽）。平板与内容层一致只用 margin。
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(
+                                    start = if (isTabletDevice) bgMarginStart.dp
+                                    else (horizontalInsetDp.first + bgMarginStart.dp),
+                                    end = if (isTabletDevice) bgMarginEnd.dp
+                                    else (horizontalInsetDp.second + bgMarginEnd.dp),
+                                )
+                                .keyboardBackground(rootTheme.keyboardBackground, isDark, keyboardBgColor)
+                        )
+                    }
+                    }
                 }
                 Box(
                     modifier = Modifier
 
                         .fillMaxWidth()
-                        .height(if (state.showKeyboardResize) (state.resizePreviewHeightDp + state.keyboardBottomPaddingDp).dp else (floatingCardContentHeight + state.keyboardBottomPaddingDp + overlayPanelExtra).dp)
+                        .height((floatingCardContentHeight + state.keyboardBottomPaddingDp + overlayPanelExtra).dp)
                         .align(androidx.compose.ui.Alignment.BottomCenter)
                         .then(if (state.isFloatingMode) Modifier else Modifier.offset(y = (-activeBottomDp).dp))
                         .then(
@@ -2060,12 +2159,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                             // 宽度调节的左右边距两种设备都生效（边距为 0 时与原行为一致）
                             if (state.isFloatingMode) Modifier
                             else if (isTabletDevice) Modifier.padding(
-                                start = keyboardMarginStartDp.dp,
-                                end = keyboardMarginEndDp.dp,
+                                start = keyboardMarginStartDp.coerceAtLeast(0).dp,
+                                end = keyboardMarginEndDp.coerceAtLeast(0).dp,
                             )
                             else Modifier.padding(
-                                start = horizontalInsetDp.first + keyboardMarginStartDp.dp,
-                                end = horizontalInsetDp.second + keyboardMarginEndDp.dp,
+                                start = horizontalInsetDp.first + keyboardMarginStartDp.coerceAtLeast(0).dp,
+                                end = horizontalInsetDp.second + keyboardMarginEndDp.coerceAtLeast(0).dp,
                             )
                         )
                 ) {
@@ -2120,6 +2219,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     KeyboardView(
                         viewModel = keyboardViewModel,
                         state = kbState,
+                        geometryState = geometryState,
                         candidateState = candidateState,
                         voiceAmplitudeState = this@XimeInputMethodService.voiceAmplitudeState,
                         voiceSpectrumState = this@XimeInputMethodService.voiceSpectrumState,
@@ -2144,27 +2244,126 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                       // 坐标复制误差。拖动中实时预览，「确定」才落盘；「取消」全部
                       // 还原；「重置」回默认（预览态，仍需确定）。边界收敛在
                       // KeyboardResizeBounds，覆盖层只上报合法绝对值。
+                      // 悬浮卡片宽度只有窗口的 scaleFactor（横屏时约 38%），若调节层铺满
+                      // 整个窗口，SpaceEvenly 排布的重置/确定按钮会落在卡片之外——那些位置
+                      // 不在 IME 触摸区内，点击直接穿透给宿主应用（表现为按钮按不了）。
+                      // 这里按卡片实际宽度居中约束，保证三个按钮全部落在卡片内部。
+                      // 仅「横屏 + 悬浮」时调节层才贴合卡片；竖屏与其他情况保持最初默认
+                      // （占满整个内容 Box、无偏移），两者互不干扰。
+                      //
+                      // 横屏悬浮卡片宽度 = 窗口宽 × widthFraction（按短边折算，约 38%），
+                      // 位置 = 底部对齐 + offsetX / offsetY，与 FloatingKeyboardContainer 完全一致。
+                      // 调节层必须严格复刻这个矩形：否则 SpaceEvenly 排布的重置/确定按钮会
+                      // 落到卡片之外（卡片外不在 IME 触摸区内，点击直接穿透给宿主应用），
+                      // 且卡片上移后遮罩会错位（表现为调节层贴底、没跟随键盘）。
+                      // 任何悬浮（竖屏 / 横屏）都要贴合卡片矩形，否则调节层铺满窗口、
+                      // 手柄与卡片错位（竖屏悬浮此前就是这个问题）。
+                      val isFloatingResize = state.isFloatingMode
+                      // 仅横屏悬浮需要「长边口径」的高度基准（卡片为竖屏形态缩放）。
+                      val isLandscapeFloatingResize = state.isFloatingMode && screenIsLandscape
+                      val resizeCardWidthFraction = if (isFloatingResize)
+                          FloatingCardGeometry.widthFraction(
+                              FloatingCardGeometry.portraitScreenWidthDp(screenWidthDp, screenHeightDp),
+                              screenWidthDp,
+                          ) else 1f
+                      // 调节层必须与 FloatingKeyboardContainer 的卡片矩形完全一致：
+                      // 卡片宽 = 标准宽 - marginStart - marginEnd（负边距会变宽），
+                      // 卡片水平位移 = (marginStart - marginEnd)/2（边跟手）。
+                      // 此前只按标准宽 + offsetX 铺遮罩，用户拖边距后遮罩不跟随卡片，
+                      // 表现为「遮罩不跟随键盘」（手柄与卡片错位、按钮跑出卡片）。
+                      val resizeStandardWidthDp = (screenWidthDp * resizeCardWidthFraction)
+                      GeometryObserver(geometryState) { resizeGeo ->
+                      val resizeMarginStart = if (isFloatingResize) resizeGeo.resizePreviewMarginStartDp else 0
+                      val resizeMarginEnd = if (isFloatingResize) resizeGeo.resizePreviewMarginEndDp else 0
+                      val resizeActualWidthDp = (resizeStandardWidthDp - resizeMarginStart - resizeMarginEnd)
+                          .coerceAtLeast(120f)
+                      val resizeMarginShiftDp = (resizeMarginStart - resizeMarginEnd) / 2f
+                      // 遮罩高度贴合卡片总高（内容 + 底部留白），不是整个窗口高。
+                      // 竖屏悬浮卡片较矮，若用 fillMaxHeight 遮罩会铺到窗口底，
+                      // 下手柄落在窗口底而非卡片底（表现为手柄与卡片错位、拖不准）。
+                      val resizeCardTotalHeightDp =
+                          (floatingCardContentHeight + state.keyboardBottomPaddingDp).dp
+                      Box(
+                          modifier = Modifier
+                              .fillMaxSize(),
+                          contentAlignment = if (isFloatingResize)
+                              androidx.compose.ui.Alignment.BottomCenter
+                          else androidx.compose.ui.Alignment.Center,
+                      ) {
+                      // 调节层遮罩跟随卡片实际矩形（宽 = 标准宽 - 左右边距，可随负边距变宽；
+                      // 水平位移 = 边距差/2）。遮罩与卡片始终同矩形，手柄/按钮与卡片像素对齐。
+                      // （此前遮罩固定按标准宽铺，用户拖边距后遮罩不跟随卡片，表现为遮罩错位。）
+                      // 调节开始时的边距预置为当前值，用户从现状继续拖，不会跳变。
+                      Box(
+                          modifier = Modifier
+                              .then(
+                                  if (isFloatingResize)
+                                      Modifier.width(resizeActualWidthDp.dp)
+                                  else Modifier.fillMaxWidth()
+                              )
+                              .height(resizeCardTotalHeightDp)
+                              .offset(
+                                  x = if (isFloatingResize)
+                                      (resizeGeo.floatingOffsetX + resizeMarginShiftDp).dp else 0.dp,
+                                  y = if (isFloatingResize) (-resizeGeo.floatingOffsetY).dp else 0.dp,
+                              )
+                              .align(androidx.compose.ui.Alignment.BottomCenter)
+                      ) {
                       KeyboardResizeOverlay(
-                          heightDp = state.resizePreviewHeightDp,
+                          // 传**逻辑（未缩放）**高度：边界、拖动回调、重置/确定的落盘值
+                          // 全是这个口径，与 resizePreviewHeightDp 同源同单位。
+                          // 悬浮时的显示高度由 heightScaleFactor 换算，不再预算成
+                          // effectiveKeyboardHeight 传进来——那样 heightDp（已缩放）与
+                          // heightBounds（未缩放）单位错配，底部手柄 coerceIn 区间反转
+                          // 崩溃（日志两次 "Cannot coerce value to an empty range"）。
+                          heightDp = keyboardHeight,
+                          heightScaleFactor = floatScale,
+                          // 横屏悬浮的高度基准 = 竖屏长边（卡片高度基准），否则拖动边界
+                          // 按横屏短边收敛，卡片可用范围被压小、拖动几乎无反应。
+                          heightBaseDp = if (isLandscapeFloatingResize)
+                              maxOf(screenWidthDp, screenHeightDp) else 0,
+                          // 宽度基准用卡片实际渲染宽度（任何悬浮都要传）：
+                          // 传 0 会退回「按整屏宽算边距上限+下限锁 0」，只允许向内收窄、
+                          // 不允许负边距外扩，竖屏悬浮卡片边缘永远拖不到屏幕边界。
+                          widthBaseDp = if (isFloatingResize)
+                              (screenWidthDp * resizeCardWidthFraction).roundToInt() else 0,
                           bottomPaddingDp = state.keyboardBottomPaddingDp,
-                          marginStartDp = state.resizePreviewMarginStartDp,
-                          marginEndDp = state.resizePreviewMarginEndDp,
+                          marginStartDp = resizeGeo.resizePreviewMarginStartDp,
+                          marginEndDp = resizeGeo.resizePreviewMarginEndDp,
                           onHeightChange = { newHeight ->
                               uiState.value = uiState.value.copy(resizePreviewHeightDp = newHeight)
                           },
                           onBottomPaddingChange = { newPadding ->
+                              // 下手柄「高度 ⇄ 留白」耦合已由 Overlay 保证总高恒定，
+                              // 此处只落盘留白；不补偿 offsetY——补偿会让整个键盘动。
                               uiState.value = uiState.value.copy(keyboardBottomPaddingDp = newPadding)
                           },
                           onMarginStartChange = { newMargin ->
-                              uiState.value = uiState.value.copy(resizePreviewMarginStartDp = newMargin)
+                              geometryState.value = geometryState.value.copy(resizePreviewMarginStartDp = newMargin)
                           },
                           onMarginEndChange = { newMargin ->
-                              uiState.value = uiState.value.copy(resizePreviewMarginEndDp = newMargin)
+                              geometryState.value = geometryState.value.copy(resizePreviewMarginEndDp = newMargin)
                           },
                           onReset = {
+                              // 重置到当前方向的默认高度（横屏悬浮独立口径）
+                              // 重置只回落到当前「方向 × 悬浮」口径的默认值，
+                              // 不影响其他三套独立高度
+                              val resetIsLandscape = SettingsPreferences.isLandscapeKeyboardHeightKey(
+                                  this@XimeInputMethodService
+                              )
+                              val resetIsFloating = SettingsPreferences.isFloatingMode(
+                                  this@XimeInputMethodService, resetIsLandscape
+                              )
                               uiState.value = uiState.value.copy(
-                                  resizePreviewHeightDp = SettingsPreferences.getDefaultKeyboardHeightDp(this@XimeInputMethodService, isLandscape),
+                                  resizePreviewHeightDp = SettingsPreferences.getKeyboardHeightDefaultsFor(
+                                      this@XimeInputMethodService, resetIsLandscape, resetIsFloating
+                                  ),
                                   keyboardBottomPaddingDp = 0,
+                                  resizePreviewMarginStartDp = 0,
+                                  resizePreviewMarginEndDp = 0,
+                              )
+                              // 重置同样要清掉几何镜像里的边距预览（读取侧已切到 geometryState）
+                              geometryState.value = geometryState.value.copy(
                                   resizePreviewMarginStartDp = 0,
                                   resizePreviewMarginEndDp = 0,
                               )
@@ -2172,25 +2371,56 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                           onConfirm = {
                               val snapshot = uiState.value
                               schemaController.setKeyboardHeight(snapshot.resizePreviewHeightDp)
-                              SettingsPreferences.setKeyboardBottomPaddingDp(this@XimeInputMethodService, snapshot.keyboardBottomPaddingDp)
-                              SettingsPreferences.setKeyboardMarginStartDp(this@XimeInputMethodService, snapshot.resizePreviewMarginStartDp)
-                              SettingsPreferences.setKeyboardMarginEndDp(this@XimeInputMethodService, snapshot.resizePreviewMarginEndDp)
+                              // 三件套一律写「方向 × 悬浮」口径的键，与读取侧完全同源，
+                              // 避免横屏悬浮的调节结果污染竖屏非悬浮的保存值。
+                              val confirmIsLandscape = SettingsPreferences.isLandscapeKeyboardHeightKey(
+                                  this@XimeInputMethodService
+                              )
+                              val confirmIsFloating = SettingsPreferences.isFloatingMode(
+                                  this@XimeInputMethodService, confirmIsLandscape
+                              )
+                              SettingsPreferences.setKeyboardBottomPaddingDp(this@XimeInputMethodService, snapshot.keyboardBottomPaddingDp, confirmIsLandscape, confirmIsFloating)
+                              val confirmGeo = geometryState.value
+                              SettingsPreferences.setKeyboardMarginStartDp(this@XimeInputMethodService, confirmGeo.resizePreviewMarginStartDp, confirmIsLandscape, confirmIsFloating)
+                              SettingsPreferences.setKeyboardMarginEndDp(this@XimeInputMethodService, confirmGeo.resizePreviewMarginEndDp, confirmIsLandscape, confirmIsFloating)
+                               // 悬浮键盘当前位置在拖拽结束时已落盘（handleFloatingKeyboardDragEnd），
+                               // 调节过程不再改动 offsetY（下手柄纯高度调节、底边不跟手），
+                               // 此处写回原值无副作用；保留横屏悬浮分支保持兼容。
+                              if (confirmIsLandscape && confirmIsFloating) {
+                                  SettingsPreferences.setFloatingOffsetY(
+                                      this@XimeInputMethodService, confirmGeo.floatingOffsetY, confirmIsLandscape,
+                                  )
+                              }
                               uiState.value = snapshot.copy(
                                   showKeyboardResize = false,
                                   keyboardHeightDp = snapshot.resizePreviewHeightDp,
-                                  keyboardMarginStartDp = snapshot.resizePreviewMarginStartDp,
-                                  keyboardMarginEndDp = snapshot.resizePreviewMarginEndDp,
+                              )
+                              // 确认后把预览几何固化为已保存几何
+                              geometryState.value = confirmGeo.copy(
+                                  keyboardMarginStartDp = confirmGeo.resizePreviewMarginStartDp,
+                                  keyboardMarginEndDp = confirmGeo.resizePreviewMarginEndDp,
                               )
                           },
                           onCancel = {
-                              val restoreHeight = SettingsPreferences.getKeyboardHeightDp(this@XimeInputMethodService, isLandscape)
-                              val restoreStart = SettingsPreferences.getKeyboardMarginStartDp(this@XimeInputMethodService)
-                              val restoreEnd = SettingsPreferences.getKeyboardMarginEndDp(this@XimeInputMethodService)
+                              val cancelIsLandscape = SettingsPreferences.isLandscapeKeyboardHeightKey(
+                                  this@XimeInputMethodService
+                              )
+                              val restoreHeight = SettingsPreferences.getKeyboardHeightDp(
+                                  this@XimeInputMethodService,
+                                  cancelIsLandscape,
+                                  SettingsPreferences.isFloatingMode(this@XimeInputMethodService, cancelIsLandscape),
+                              )
+                              val cancelIsFloating = SettingsPreferences.isFloatingMode(this@XimeInputMethodService, cancelIsLandscape)
+                              val restoreStart = SettingsPreferences.getKeyboardMarginStartDp(this@XimeInputMethodService, cancelIsLandscape, cancelIsFloating)
+                              val restoreEnd = SettingsPreferences.getKeyboardMarginEndDp(this@XimeInputMethodService, cancelIsLandscape, cancelIsFloating)
                               uiState.value = uiState.value.copy(
                                   showKeyboardResize = false,
                                   keyboardHeightDp = restoreHeight,
                                   resizePreviewHeightDp = restoreHeight,
-                                  keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(this@XimeInputMethodService),
+                                  keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(this@XimeInputMethodService, cancelIsLandscape, cancelIsFloating),
+                              )
+                              // 取消：几何镜像恢复为已保存值
+                              geometryState.value = geometryState.value.copy(
                                   keyboardMarginStartDp = restoreStart,
                                   resizePreviewMarginStartDp = restoreStart,
                                   keyboardMarginEndDp = restoreEnd,
@@ -2199,6 +2429,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                           },
                           modifier = Modifier.matchParentSize()
                       )
+                      }
+                      }
+                      }
                   }
                    }
                     if (!state.isFloatingMode && navBarDp > 0.dp) {
@@ -2210,13 +2443,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     // 颜色取主题强调色；x 含 offsetX 与卡片对齐。
                     if (state.isFloatingMode && floatingExitHintState.value) {
                         FloatingExitGlow(
-                            offsetXdp = state.floatingOffsetX,
+                            offsetXdp = geometryState.value.floatingOffsetX,
                             cardWidthDp = FloatingCardGeometry.cardWidthDpForConfig(screenWidthDp, screenHeightDp),
                             bottomGapDp = floatingMinY,
                             glowColor = accentCol,
                             modifier = Modifier
                                 .align(androidx.compose.ui.Alignment.BottomCenter)
-                                .offset(x = state.floatingOffsetX.dp),
+                                .offset(x = geometryState.value.floatingOffsetX.dp),
                         )
                     }
                }
@@ -2260,7 +2493,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 按偏好高度预设首帧真实几何，之后仍由 SideEffect 统一维护。
                 val isLandscape =
                     resources.configuration.screenWidthDp > resources.configuration.screenHeightDp
-                val displayHeight = SettingsPreferences.getKeyboardHeightDp(this, isLandscape)
+                // 高度口径：方向 × 悬浮四套独立（横屏悬浮卡片与全宽键盘互不干扰）
+                val displayHeight = SettingsPreferences.getKeyboardHeightDp(
+                    this, isLandscape, SettingsPreferences.isFloatingMode(this, isLandscape)
+                )
                     .coerceAtMost((resources.configuration.screenHeightDp * KeyboardWindowMetrics.DISPLAY_HEIGHT_MAX_PERCENT) / 100)
                 val density = resources.displayMetrics.density
                 val rawDp = if (bottomInsetPxState.value > 0)
@@ -2706,6 +2942,31 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         hasHardwareKeyboard = SettingsPreferences.isHardwareKeyboardDetectionEnabled(this) &&
             newConfig.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS
         super.onConfigurationChanged(newConfig)
+        // 方向切换必须退出键盘调节态：调节中的预览值属于切换前的方向
+        // （横屏悬浮是独立高度口径），若不退出，竖屏会延续横屏悬浮的调节层
+        // 与预览值——表现为「调横屏悬浮的，竖屏的键盘调节器被唤醒」。
+        // 退出时不动任何落盘值，两个方向的数据保持各自独立。
+        if (uiState.value.showKeyboardResize) {
+            val isLandscape = newConfig.screenWidthDp > newConfig.screenHeightDp
+            val restoreHeight = SettingsPreferences.getKeyboardHeightDp(
+                this, isLandscape, SettingsPreferences.isFloatingMode(this, isLandscape)
+            )
+            val restoreFloating = SettingsPreferences.isFloatingMode(this, isLandscape)
+            val restoreStart = SettingsPreferences.getKeyboardMarginStartDp(this, isLandscape, restoreFloating)
+            val restoreEnd = SettingsPreferences.getKeyboardMarginEndDp(this, isLandscape, restoreFloating)
+            uiState.value = uiState.value.copy(
+                showKeyboardResize = false,
+                keyboardHeightDp = restoreHeight,
+                resizePreviewHeightDp = restoreHeight,
+                keyboardBottomPaddingDp = SettingsPreferences.getKeyboardBottomPaddingDp(this, isLandscape, restoreFloating),
+            )
+            geometryState.value = geometryState.value.copy(
+                keyboardMarginStartDp = restoreStart,
+                resizePreviewMarginStartDp = restoreStart,
+                keyboardMarginEndDp = restoreEnd,
+                resizePreviewMarginEndDp = restoreEnd,
+            )
+        }
         if (newConfig.screenWidthDp > newConfig.screenHeightDp) {
             closeToolPanel()
         }
@@ -3030,10 +3291,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (ordered.isEmpty()) return
         // 词库未装载完时内存表是空表占位，落盘会覆盖掉磁盘上的真实排序表
         if (!wordTablesLoaded) return
-        // 先吃进用户在配置目录里的手改，再叠加本次拖动结果
-        candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
-        candidateOrderTable = CandidateOrderStore.withFullOrder(candidateOrderTable, code, ordered)
-        CandidateOrderStore.save(this, candidateOrderTable)
+        // 先吃进用户在配置目录里的手改，再叠加本次拖动结果。
+        // 全程持锁：与 IO 线程的 saveWordData 互斥，避免旧快照回写覆盖（见 wordTablesLock）。
+        wordTablesLock.lock()
+        try {
+            candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
+            candidateOrderTable = CandidateOrderStore.withFullOrder(candidateOrderTable, code, ordered)
+            CandidateOrderStore.save(this, candidateOrderTable)
+        } finally {
+            wordTablesLock.unlock()
+        }
         updateUI()
     }
 
@@ -3150,12 +3417,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     FloatingCardGeometry.fallbackBounds(
                         windowWidthPx = windowWidthPx,
                         windowHeightPx = windowHeightPx,
-                        offsetXdp = state.floatingOffsetX,
-                        offsetYdp = state.floatingOffsetY,
+                        offsetXdp = geometryState.value.floatingOffsetX,
+                        offsetYdp = geometryState.value.floatingOffsetY,
                         cardWidthDp = FloatingCardGeometry.cardWidthDpForConfig(config.screenWidthDp, config.screenHeightDp),
                         cardHeightDp = FloatingCardGeometry.fallbackCardHeightDp(
-                            SettingsPreferences.getKeyboardHeightDp(this@XimeInputMethodService, false)
-                                .coerceAtMost((config.screenHeightDp * 8) / 10),
+                            SettingsPreferences.getKeyboardHeightDp(
+
+                                this@XimeInputMethodService,
+
+                                config.screenWidthDp > config.screenHeightDp,
+                                state.isFloatingMode,
+
+                            ).coerceAtMost((config.screenHeightDp * 8) / 10),
                             state.keyboardBottomPaddingDp,
                         ),
                         density = density,
@@ -3311,8 +3584,25 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     private var wordFreqSavePending = false
 
-    /** 上次上屏的词（组合生词的左半边）；仅中文引擎真实上屏后更新。 */
-    private var lastCommittedWord: String = ""
+    /**
+     * 组合生词的**累积窗口**：最近若干次上屏的汉字段（按上屏顺序）。
+     *
+     * 为什么不能只存「上一次上屏」（旧实现 `lastCommittedWord`）：
+     * 逐字打「小」「霞」「霞」时，旧逻辑每次组合后只把左半边置为最后一段：
+     *   · 「霞」上屏 → 拼出「小霞」，随后 lastCommittedWord = "霞"（「小」被丢弃）
+     *   · 第二个「霞」→ 只能拼出「霞霞」，「小霞霞」永远拼不出来
+     * 也就是说组合链是「滑动窗口 1」，只能覆盖相邻两段。
+     *
+     * 改为保留最近 [comboWindowMaxChars] 个字的上屏历史后，每次上屏都与历史的
+     * **每个后缀**拼接，于是「小」+「霞」+「霞」能同时得到「霞霞」（后缀"霞"）
+     * 与「小霞霞」（后缀"小霞"），符合「能组的都组出来」的要求。
+     *
+     * 只在本次上屏全为汉字时推进；粘贴/英文/标点/反查等会清空窗口，避免跨界拼接。
+     */
+    private val comboHistory = ArrayList<String>()
+
+    /** 组合窗口保留的最大字数（按码点）：与 combo_max_chars 同量级，多留一点供长词后缀。 */
+    private val comboWindowMaxChars: Int = 8
 
     /**
      * 最近一次**从候选栏选中**的词（点选/数字选/造词候选/空格上屏首候选）。
@@ -3356,7 +3646,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 声明了 `nofreq` 标记的词典词条（表头注释 `# nofreq: true` 或 `#@/nofreq`）。
      *
      * 这些词来自用户声明「不进词频」的词典（如个人词库 XGuai_user.dict.yaml），
-     * 上屏时**跳过词频记录**（word_freq.txt / word_freq.yaml 不收录），
+     * 上屏时**跳过词频记录**（word_freq.txt 不收录），
      * 但仍是方案词典的正常候选（能打出来、能手动排序）。
      *
      * 与 [schemeDictWords] 同批加载（同一份码表），上屏路径只读内存。
@@ -3590,6 +3880,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * （见 [AutoWordStore.record] / [AutoWordStore.promote]）。
      */
     private fun recordWordFrequency(text: String, isPaste: Boolean) {
+        // 与 saveWordData（IO 线程落盘）/ reconcileUserDataFiles 互斥：
+        // 「读内存表 → 累加计数/造词晋升 → 写回」必须原子，否则 IO 线程回写的旧快照
+        // 会把这次上屏统计覆盖掉（丢失更新，见 [wordTablesLock]）。
+        // ReentrantLock 可重入：内部调 recordComboWord / recordAutoWord 再取锁不会自锁。
+        wordTablesLock.lock()
+        try {
+            recordWordFrequencyLocked(text, isPaste)
+        } finally {
+            wordTablesLock.unlock()
+        }
+    }
+
+    /** [recordWordFrequency] 的实际实现；调用方必须已持有 [wordTablesLock]。 */
+    private fun recordWordFrequencyLocked(text: String, isPaste: Boolean) {
         if (isPaste || editorSecret) return
         if (isT9Schema(uiState.value.currentSchemaId)) return
         if (uiState.value.isAsciiMode) return
@@ -3612,12 +3916,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 反查上屏同样要打断组合链：它不是正常输入的字词序列。
             lastSelectedCandidateWord = null
             lastSelectedCandidateCode = null
-            lastCommittedWord = ""
+            comboHistory.clear()
             return
         }
         // 本次上屏的词在启用方案里能打出的**全部**编码（按三个总规则组合）。
         // 造词基底只用该字的**满四码**条目（简码不参与），多音字会得到多个组合码。
-        // 单字返回空（单字本身不用造词），但**不影响组合链**：见下方的 lastCommittedWord。
+        // 单字返回空（单字本身不用造词），但**不影响组合链**：见下方的 advanceComboHistory。
         val schemeCodes = SchemeCodeIndex.composeCodes(text, schemeCharCodes)
         // 用户明确从候选栏选中的词必须进词频表：编码缺失时按方案规则取一个
         // （短码优先，即组合里最实用的那个）。单字无组合码，用其满四码单字码兜底；
@@ -3639,8 +3943,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 单字上屏（composeCodes 返回空）是最常见的组合场景（「一」+「键」→「一键」），
             // 若在这里直接 return，组合逻辑永远走不到，表现为「字词上屏不组词」。
             recordComboWord(text, autoWordConfig)
-            // 「这次上屏了什么」必须记住，下一次才能与它拼接。
-            lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
+            // 把本次上屏推进组合窗口，下一次（及更后面的上屏）才能与它拼接。
+            advanceComboHistory(text)
             return
         }
         // 词频就落在**本次上屏对应的编码**上：输入框/候选快照里的实际编码
@@ -3694,9 +3998,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
         // 组合生词（与编码能否生成无关，两条上屏路径共用 [recordComboWord]）。
         recordComboWord(text, autoWordConfig)
-        // 本次上屏成为下一次组合的「上一次」：仅在满足组合条件（汉字词）时更新，
-        // 否则把组合链打断（粘贴、英文、标点等不应与下一次上屏拼接）。
-        lastCommittedWord = if (AutoWordStore.isComboWord(text)) text else ""
+        // 本次上屏推进组合窗口：汉字词入窗（之后可与后续上屏拼出更长的词），
+        // 非汉字（粘贴、英文、标点）清空窗口，避免跨界拼接。
+        advanceComboHistory(text)
         scheduleWordFreqSave()
     }
 
@@ -3713,21 +4017,52 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     private fun recordComboWord(text: String, cfg: com.kingzcheung.xime.settings.AutoWordConfig) {
         if (!cfg.comboEnabled) return
-        val comboText = AutoWordStore.comboWord(
-            prevWord = lastCommittedWord,
+        if (!AutoWordStore.isComboWord(text)) return
+        // 与累积窗口的**每个后缀**拼接，而不是只与「上一次上屏」拼接。
+        // 逐字打「小」「霞」「霞」时窗口为 [小, 霞]，本次 text = 霞：
+        //   · 后缀 "霞"   → 「霞霞」（2 字）
+        //   · 后缀 "小霞" → 「小霞霞」（3 字）
+        // 旧实现只保留最后一段，只能拼出前者，「小霞霞」永远学不到。
+        val comboWords = AutoWordStore.comboWithHistory(
+            history = comboHistory,
             word = text,
             minChars = cfg.comboMinChars,
             maxChars = cfg.comboMaxChars,
-        ) ?: return
-        // 该词按方案单字规则能打出的**全部**编码，一条不落收录：
-        // 2 字词 = 各字前 2 码（多音字会得到多个组合）；
-        // 3 字词 = 两种形态（各字首码 / 前两字首码 + 第三字前 2 码）。
-        // 不能只取 firstOrNull()：composeCodes 按「短码优先」排序，3 字词的
-        // 4 码形态永远排在后面被丢掉，用户按 4 码打时搜不到该词，
-        // 表现为「3 字两种编码只有一种生效」。
-        val comboCodes = SchemeCodeIndex.composeCodes(comboText, schemeCharCodes)
-        if (comboCodes.isEmpty()) return
-        recordAutoWord(comboText, comboCodes, cfg, initialCount = 0)
+        )
+        for (comboText in comboWords) {
+            // 方案词库里已有的词不再造：造词的意义是补引擎没有的词，
+            // 已收录的词让引擎自己出候选即可，重复造只会把候选栏塞满同名词。
+            if (comboText in schemeDictWords) continue
+            // 该词按方案单字规则能打出的**全部**编码，一条不落收录：
+            // 2 字词 = 各字前 2 码（多音字会得到多个组合）；
+            // 3 字词 = 两种形态（各字首码 / 前两字首码 + 第三字前 2 码）。
+            // 不能只取 firstOrNull()：composeCodes 按「短码优先」排序，3 字词的
+            // 4 码形态永远排在后面被丢掉，用户按 4 码打时搜不到该词，
+            // 表现为「3 字两种编码只有一种生效」。
+            val comboCodes = SchemeCodeIndex.composeCodes(comboText, schemeCharCodes)
+            if (comboCodes.isEmpty()) continue
+            recordAutoWord(comboText, comboCodes, cfg, initialCount = 0)
+        }
+    }
+
+    /**
+     * 推进组合窗口：把本次上屏记入历史，并裁掉超出 [comboWindowMaxChars] 的旧段。
+     *
+     * 非汉字上屏（粘贴、英文、数字、标点）会**清空**窗口——跨过这些内容拼接没有意义，
+     * 还会把噪音粘进词库。反查上屏同理（见调用点）。
+     */
+    private fun advanceComboHistory(text: String) {
+        if (!AutoWordStore.isComboWord(text)) {
+            comboHistory.clear()
+            return
+        }
+        comboHistory.add(text)
+        // 按码点裁剪：从头部丢段，直到总字数不超过窗口上限
+        var total = comboHistory.sumOf { it.codePointCount(0, it.length) }
+        while (comboHistory.size > 1 && total > comboWindowMaxChars) {
+            val removed = comboHistory.removeAt(0)
+            total -= removed.codePointCount(0, removed.length)
+        }
     }
 
     /**
@@ -3754,25 +4089,32 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // （如个人词库 XGuai_user.dict.yaml）：不参与自动造词链——
         // 不进临时/固定词库、不参与组合生词。但仍是方案词典正常候选。
         if (word in noAutoWordWords) return
-        var changed = false
-        for (code in codes) {
-            if (code.isEmpty()) continue
-            val temp = AutoWordStore.record(autoWordTemp, code, word, nowForRecord(), initialCount)
-            if (temp === autoWordTemp) continue
-            autoWordTemp = temp
-            changed = true
-        }
-        // promote 只跑一次（不在每个编码循环里重复）：
-        // 一个词有多个编码（如 3 字词 2-3 个），每次上屏对全部编码 record 后统一晋升一次，
-        // 避免 5 万条词库被重复全表遍历 N 遍。
+        // 批量收录：多个编码只复制一次外层表（见 AutoWordStore.recordMany 注释）。
+        // 旧实现对每个编码各调一次 record，组合词 16 码 = 16 次整表浅复制（~1MB 短命对象）。
+        val next = AutoWordStore.recordMany(autoWordTemp, codes, word, nowForRecord(), initialCount)
+        val changed = next !== autoWordTemp
+        if (changed) autoWordTemp = next
+        // 晋升（节流，避免每次上屏全表遍历，见 [fullPromoteIntervalMs] 注释）：
+        // - 距上次全量超时 → 全量 promote（晋升 + 顺带淘汰超窗口的陈旧词）；
+        // - 未超时 → 只增量晋升本次词（promoteWord，O(该词编码数)）。
         if (changed) {
-            val promotion = AutoWordStore.promote(
-                autoWordTemp, autoWordFixed, System.currentTimeMillis(),
-                windowDays = config.promoteDays,
-                minCount = config.promoteCount,
-                // 一词一码：固定词库只收用户实际按的那个编码，避免多音字一词多音
-                preferCode = preferCode,
-            )
+            val now = System.currentTimeMillis()
+            val promotion = if (now - lastFullPromoteTime >= fullPromoteIntervalMs) {
+                lastFullPromoteTime = now
+                AutoWordStore.promote(
+                    autoWordTemp, autoWordFixed, now,
+                    windowDays = config.promoteDays,
+                    minCount = config.promoteCount,
+                    // 一词一码：固定词库只收用户实际按的那个编码，避免多音字一词多音
+                    preferCode = preferCode,
+                )
+            } else {
+                AutoWordStore.promoteWord(
+                    autoWordTemp, autoWordFixed, now, word,
+                    minCount = config.promoteCount,
+                    preferCode = preferCode,
+                )
+            }
             autoWordTemp = promotion.temp
             autoWordFixed = promotion.fixed
         }
@@ -3861,12 +4203,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (word.isEmpty()) return
         // 词库未装载完时内存表是空表占位，落盘会覆盖掉磁盘上的真实黑名单
         if (!wordTablesLoaded) return
-        // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词
-        wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
-        val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
-        if (next === wordBlacklist) return
-        wordBlacklist = next
-        WordBlacklistStore.save(this, next)
+        // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词。
+        // 全程持锁：与 IO 线程的 saveWordData 互斥，避免旧快照回写覆盖（见 wordTablesLock）。
+        wordTablesLock.lock()
+        try {
+            wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+            val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
+            if (next === wordBlacklist) return
+            wordBlacklist = next
+            WordBlacklistStore.save(this, next)
+        } finally {
+            wordTablesLock.unlock()
+        }
         FileLogger.i(TAG, "WordBlacklist: added '$word' code='$code'")
     }
 
@@ -3932,9 +4280,26 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             FileLogger.w(TAG, "saveWordData skipped: 词库尚未装载完成，避免空表覆盖磁盘")
             return
         }
-        wordFreqTable = WordFreqStore.save(this, wordFreqTable)
-        autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
-        autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
+        // 与主线程的 recordWordFrequency / reconcileUserDataFiles 互斥：
+        // 「读内存表 → 合并手改 → 写盘 → 回写合并结果」必须原子，否则主线程刚记的
+        // 上屏计数会被本方法读到的旧快照回写覆盖（丢失更新，见 wordTablesLock 注释）。
+        wordTablesLock.lock()
+        try {
+            wordFreqTable = WordFreqStore.save(this, wordFreqTable)
+            autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
+            autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
+        } finally {
+            wordTablesLock.unlock()
+        }
+        // 自 v3.2.57 起：词频**不再触发任何部署/编译**。
+        //
+        // 词频对候选顺序的影响已改为 Kotlin 层实时重排（ImeSessionController 里按
+        // wordFreqTable 降序，见 CandidateOrderStore.reorder），上屏即生效、零编译。
+        // 因此 word_freq.dict.yaml 变新不再需要 librime 重编 table.bin——那一步是
+        // 「增量部署后打不了字要等一会」的根源（部署独占 rimeLock 3 秒以上）。
+        //
+        // 这里仍保留 word_freq.dict.yaml 的生成（供用户查看/备份、以及手动重载时的
+        // 兜底排序），只是不再因为它的变化去触发部署。
     }
 
     /**
@@ -3948,11 +4313,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 必须主线程调用：与 [saveWordData] / [recordWordFrequency] 同线程操作内存表。
      */
     internal fun reconcileUserDataFiles() {
-        candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
-        wordFreqTable = WordFreqStore.reconcile(this, wordFreqTable)
-        autoWordTemp = AutoWordStore.reconcileTemp(this, autoWordTemp)
-        autoWordFixed = AutoWordStore.reconcileFixed(this, autoWordFixed)
-        wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+        // 与 saveWordData / recordWordFrequency 互斥，见 wordTablesLock 注释。
+        wordTablesLock.lock()
+        try {
+            candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
+            wordFreqTable = WordFreqStore.reconcile(this, wordFreqTable)
+            autoWordTemp = AutoWordStore.reconcileTemp(this, autoWordTemp)
+            autoWordFixed = AutoWordStore.reconcileFixed(this, autoWordFixed)
+            wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+        } finally {
+            wordTablesLock.unlock()
+        }
     }
 
     /**

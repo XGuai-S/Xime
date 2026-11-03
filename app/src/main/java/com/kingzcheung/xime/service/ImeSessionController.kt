@@ -354,20 +354,38 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             )
             return
         }
-        // 用户手动排序（纯引擎路径）：仅应用手动排序表（candidate_order.txt），
-        // 不再按词频重排——候选顺序完全由「手动排序 + rime 引擎原生权重」控制，
-        // word_freq.txt 只作记录（双写一份 word_freq.yaml），不干预候选显示。
+        // 候选重排（纯引擎路径）：两级优先级，都不涉及 rime 编译。
+        //
+        // 1) 手动排序表（candidate_order.txt）：用户显式拖动过的编码，最高优先级；
+        // 2) 实时词频表（word_freq.txt 内存表）：未手动排过的编码按上屏频数降序。
+        //
+        // 词频走 Kotlin 层重排而不是依赖 librime 把 word_freq 编译进 table.bin，
+        // 好处是上屏即可影响下一轮候选顺序，**无需任何部署/编译**，也就不会出现
+        // 「改完词频要等它重编完才能打字」的问题。未记录的词维持引擎原有相对顺序
+        // 排在后面（reorder 的既有语义）。
+        //
         // 重排产生的 engine actions 让点选仍落在正确的引擎候选上
         // （selectCandidateAsync 走 pendingAction.engineIndex）。
         // 见 CandidateOrderStore.reorder。
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         val reordered = if (shouldApplyCandidateOrder(display.isT9, isAsciiMode, candidateActions)) {
-            if (autoWordConfig.sortByManual) {
+            val byManual = if (autoWordConfig.sortByManual) {
                 CandidateOrderStore.reorder(
                     code = rawInputText,
                     candidates = display.candidates,
                     comments = display.comments,
                     table = service.candidateOrderTable,
+                )
+            } else {
+                null
+            }
+            // 手动排序表没有该编码的记录时，退回实时词频重排
+            byManual ?: if (autoWordConfig.sortByFreq) {
+                CandidateOrderStore.reorder(
+                    code = rawInputText,
+                    candidates = display.candidates,
+                    comments = display.comments,
+                    table = service.wordFreqTable,
                 )
             } else {
                 null

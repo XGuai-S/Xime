@@ -358,18 +358,33 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 按键处理：**阻塞等待锁**（与 [tryLocked] 的查询路径不同）。
+     *
+     * 调用方约定：processKey 只在按键串行队列（ImeKeyRouter.keyProcessingDispatcher /
+     * T9InputController.t9Scope）上执行，均为后台线程——即使部署/同步正持锁，
+     * 在此**排队等待**是安全的（不会 ANR），且保证按键**永不静默丢失**。
+     *
+     * 旧实现用 [tryLocked]：拿不到锁直接返回 false（丢弃按键）。锁被部署等占用时
+     * 用户敲的键就被无声吞掉，表现为「打了字没反应/丢字」。
+     */
     fun processKey(keycode: Int, mask: Int): Boolean {
         if (!isInitialized) return false
-        return tryLocked(false) {
-            if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked false
+        return locked {
+            if (!nativeHasSession() && !nativeCreateSession()) return@locked false
             nativeProcessKey(keycode, mask)
         }
     }
-
+    /**
+     * 按键处理并取结果：**阻塞等待锁**，理由同 [processKey]。
+     *
+     * 返回 [emptyProcessResult] 仅当引擎未初始化（调用方应回退查询）；锁竞争时
+     * 不再返回空结果丢弃按键，而是等待队列处理完成。
+     */
     fun processKeyAndGetResult(keycode: Int, mask: Int): RimeProcessResult {
         if (!isInitialized) return emptyProcessResult()
-        val result = tryLocked(emptyProcessResult()) {
-            if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked emptyProcessResult()
+        val result = locked {
+            if (!nativeHasSession() && !nativeCreateSession()) return@locked emptyProcessResult()
             val r = nativeProcessKeyAndGetResult(keycode, mask)
             // 同步刷新两处缓存：下一键的 avoid_auto_select / 选词索引映射可直接复用，
             // 省掉之后各自的 getInput() / getCandidates() 独立 JNI。
@@ -614,6 +629,38 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 设置输入串并**在同一把锁内**取回处理结果（阻塞等待锁）。
+     *
+     * ## 为什么需要它（正确性）
+     *
+     * [setInput] 与 [getProcessResult] 各自都用 [tryLocked]（非阻塞）。两段式调用
+     * `setInput(x); getProcessResult(true)` 之间会释放锁，第二次取结果若撞上
+     * 部署/维护持锁，会**静默返回空结果（inputText = ""）**。退格/编辑态逻辑正是
+     * 用 `result.inputText.isEmpty()` 判断「编码是否已被删空」，于是锁竞争的一次
+     * 空结果就被误判成「编码删光了」，进而调用 [clearComposition] 把**整个编码清空**——
+     * 表现为「编码态下点一下删除键，整串编码消失」。
+     *
+     * 本方法持锁内完成 setInput → 取结果 → 刷缓存，全程原子，返回的是真实结果，
+     * 不会出现「设置成功但结果为空」的误判。仅在引擎未初始化时返回空结果。
+     *
+     * @param input 拼音或数字字符串
+     * @return 设置后的真实处理结果；未初始化时返回空结果
+     */
+    fun setInputAndGetResult(input: String): RimeProcessResult {
+        if (!isInitialized) return emptyProcessResult()
+        return locked {
+            if (!nativeHasSession() && !nativeCreateSession()) return@locked emptyProcessResult()
+            val ok = nativeSetInput(input)
+            if (!ok) return@locked emptyProcessResult()
+            invalidateSnapshotCaches()
+            val r = nativeGetProcessResult(true)
+            updateCandidatesCache(r.candidates)
+            updateInputTextCache(r.inputText)
+            r
+        }
+    }
+
     fun toggleAsciiMode(): Boolean {
         // 用户显式切换操作：阻塞等待锁（部署/维护持锁时排队，完成后自动切换），
         // 不静默失败；调用方保证不在主线程执行（ImeKeyRouter 的 key-process 线程）。
@@ -706,25 +753,35 @@ class RimeEngine {
      */
     fun deployIncremental(): Boolean {
         if (!isInitialized) return false
-        locked {
+        // 关键：librime 的 StartMaintenance 是**异步**启动（std::async 维护线程，
+        // 立即返回），编译在独立线程跑。因此绝不能像旧实现那样在 locked{} 里
+        // 忙等 nativeIsMaintaining()——那会让 rimeLock 在整个编译期间被独占
+        //（1~3 秒甚至更久），而输入查询走 tryLocked 非阻塞，拿不到锁就返回
+        // 空候选，表现为「部署后打不了字、要等一会」。
+        // 正确做法：锁内只做「启动」，锁外轮询等待；收尾再短暂拿锁。
+        val started = locked {
             ensureT9SchemaPatchesForDeployedSchemas(userDataDir)
-            if (!nativeStartMaintenance(false)) {
-                FileLogger.w(TAG, "deployIncremental: startMaintenance returned false, falling back to full deploy")
-                return false
-            }
-            var waited = 0L
-            while (nativeIsMaintaining() && waited < 180_000L) {
-                Thread.sleep(100)
-                waited += 100
-            }
-            if (nativeIsMaintaining()) {
-                FileLogger.w(TAG, "deployIncremental: maintenance timed out")
-                return false
-            }
-            // 维护完成后更新 last_build_time，避免下次启动增量检测误判需重编译
-            nativeUpdateLastBuildTime()
-            return true
+            nativeStartMaintenance(false)
         }
+        if (!started) {
+            FileLogger.w(TAG, "deployIncremental: startMaintenance returned false (no tasks or already working)")
+            // 没有待编译任务时视为成功（无需重建）；已有维护在跑也让调用方继续等待
+            return !nativeIsMaintaining()
+        }
+        // 锁外等待：期间 rimeLock 空闲，输入查询正常工作，不再「打不了字」。
+        var waited = 0L
+        while (nativeIsMaintaining() && waited < 180_000L) {
+            Thread.sleep(100)
+            waited += 100
+        }
+        if (nativeIsMaintaining()) {
+            FileLogger.w(TAG, "deployIncremental: maintenance timed out")
+            return false
+        }
+        // 维护完成后更新 last_build_time，避免下次启动增量检测误判需重编译。
+        // 短暂持锁即可（只是一次字段写），不阻塞输入。
+        locked { nativeUpdateLastBuildTime() }
+        return true
     }
 
     /**

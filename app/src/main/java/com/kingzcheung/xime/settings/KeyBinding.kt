@@ -33,7 +33,42 @@ class KeyAction(
 class LongPressAction(
     val display: DisplayMode = DisplayMode.KEY,
     val values: List<KeyAction> = emptyList(),
-)
+) {
+    /**
+     * 长按气泡的显示项文本（惰性缓存）。
+     *
+     * 之前由 `KeysConfigHelper.longPressDisplayItems(config)` 在**每个 @Composable 函数体里
+     * 直接调用**计算——键盘重组（候选每键变化就会触发）时逐键重建 List，是打字时
+     * 重组开销的来源之一。`values` 构造后不可变，故结果天然可缓存。
+     *
+     * 语义与原实现完全一致：单项且 `bubble: false` → null（不弹气泡，长按直接执行）；
+     * 其余按 label 回退 value 取显示文本，空项丢弃。
+     */
+    val displayItems: List<String>? by lazy {
+        if (values.size == 1 && !values[0].bubble) return@lazy null
+        values.asSequence()
+            .map { it.label.ifEmpty { it.value } }
+            .filter { it.isNotEmpty() }
+            .toList()
+            .takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 显示项文本 → 动作的映射（惰性缓存），键与 [displayItems] 完全一致。
+     *
+     * 单项 `bubble: false` 返回**空 Map**（与原 `longPressActionMap` 一致：
+     * 该场景无气泡候选，但调用方仍拿到非 null 的空表以区分「无长按配置」）。
+     */
+    val actionMap: Map<String, KeyAction>? by lazy {
+        if (values.size == 1 && !values[0].bubble) return@lazy emptyMap()
+        val out = LinkedHashMap<String, KeyAction>(values.size)
+        for (v in values) {
+            val key = v.label.ifEmpty { v.value }
+            if (key.isNotEmpty()) out[key] = v
+        }
+        out
+    }
+}
 
 /**
  * 一个键的手势绑定表。

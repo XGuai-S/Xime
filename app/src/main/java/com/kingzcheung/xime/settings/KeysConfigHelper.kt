@@ -2147,18 +2147,14 @@ object KeysConfigHelper {
      *
      * 26 键字母区（标准/横屏紧凑）、逗号键、中英键、九键共用，保证各处 label 处理一致。
      */
-    fun longPressDisplayItems(config: LongPressAction?): List<String>? {
-        val values = config?.values ?: return null
-        if (isBubbleOffSingleValue(values)) return null
-        return values.map { longPressItemKey(it) }.filter { it.isNotEmpty() }.takeIf { it.isNotEmpty() }
-    }
+    fun longPressDisplayItems(config: LongPressAction?): List<String>? =
+        // 委托给 LongPressAction 的惰性缓存：键盘重组（候选每键变化触发）时不再逐键重建 List
+        config?.displayItems
 
     /** 长按气泡的「显示项文本 → 动作」映射；键与 [longPressDisplayItems] 完全一致（不可展示的项不进入映射）。 */
-    fun longPressActionMap(config: LongPressAction?): Map<String, KeyAction>? {
-        val values = config?.values ?: return null
-        if (isBubbleOffSingleValue(values)) return emptyMap()
-        return values.filter { longPressItemKey(it).isNotEmpty() }.associateBy { longPressItemKey(it) }
-    }
+    fun longPressActionMap(config: LongPressAction?): Map<String, KeyAction>? =
+        // 委托给 LongPressAction 的惰性缓存（键与 longPressDisplayItems 完全一致）
+        config?.actionMap
 
     /** 单项 long_press 标了 `bubble: false`：不弹气泡，该项作为直接长按动作。 */
     private fun isBubbleOffSingleValue(values: List<KeyAction>): Boolean =

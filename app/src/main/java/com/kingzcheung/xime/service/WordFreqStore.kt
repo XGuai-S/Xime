@@ -158,6 +158,16 @@ internal object WordFreqStore {
      */
     private var baselineText: String? = null
 
+    /**
+     * 最近一次 [save] 中 [ensureRimeDict] 是否实际改动了 `word_freq.dict.yaml` 内容。
+     * 供调用方（saveWordData）判断是否需要触发增量部署：词频表变化 → rime 词典源文件
+     * 变化 → 必须重编受影响方案的 `.table.bin` 才生效（否则用户看到旧排序）。
+     * 注意：仅 [save] 写盘后置位，[load] 等其他入口不清零。
+     */
+    @Volatile
+    var lastRimeDictChanged: Boolean = false
+        private set
+
     /** 回退用的私有目录文件（可见目录不可用/写入失败时）。 */
     private fun privateFile(context: android.content.Context): File =
         File(context.filesDir, FILE_NAME)
@@ -195,8 +205,6 @@ internal object WordFreqStore {
         return runCatching { parse(text) }.getOrElse { emptyMap() }
     }
 
-    /** 双写副本：rime 根目录下的 `word_freq.yaml`（与主文件实时同步）。 */
-    internal const val MIRROR_FILE_NAME = "word_freq.yaml"
 
     /**
      * 写入词频表，返回**实际写入的表**（调用方必须采纳）。
@@ -205,9 +213,10 @@ internal object WordFreqStore {
      * （新增/修改/删除都尊重，见 [UserDataMerge]）——不采纳的话下次保存又会冲掉。
      * 表为空且没被外部改过时删除文件，不留表头空壳。
      *
-     * 写主文件 `word_freq.txt` 后，**同步双写一份** `word_freq.yaml` 到 rime 根目录
-     * （`/storage/emulated/0/rime/`），内容完全一致、实时同步，供外部工具读取；
-     * 副本写入失败不影响主文件（仅记日志，不抛错）。
+     * 写主文件 `word_freq.txt` 后，同步生成两份内容一致的派生文件：
+     * - 私有 rime 编译词典 `files/rime/word_freq.dict.yaml`（librime 部署用）
+     * - 可见目录副本 `rime/xime/word_freq.dict.yaml`（与 word_freq.txt 同级，供查看/编辑/备份）
+     * 不再生成 `word_freq.yaml`（旧镜像已废弃）；派生文件写入失败只记日志，不影响主文件。
      */
     /** rime 可编译词典文件名（私有 rime 工作目录 files/rime/ 下）。 */
     internal const val RIME_DICT_FILE_NAME = "word_freq.dict.yaml"
@@ -223,37 +232,72 @@ internal object WordFreqStore {
      * （只记日志不抛错——词频是辅助表，不能因它影响主流程）。
      */
     @Synchronized
-    fun ensureRimeDict(context: android.content.Context, table: Map<String, Map<String, Int>>) {
-        runCatching {
-            val dictFile = File(
-                com.kingzcheung.xime.settings.SchemaManager.getRimeDir(context),
-                RIME_DICT_FILE_NAME,
-            )
-            if (table.isEmpty()) {
-                if (dictFile.exists()) dictFile.delete()
-                return
-            }
-            val sb = StringBuilder()
-            sb.append("# Rime dictionary\n")
-            sb.append("# encoding: utf-8\n")
-            sb.append("# 上屏词频字典：由 Xime 自动生成，词频越高权重越大（rime 原生 by_weight 排序）\n")
-            sb.append("---\n")
-            sb.append("name: word_freq\n")
-            sb.append("version: \"1\"\n")
-            sb.append("sort: by_weight\n")
-            sb.append("use_preset_vocabulary: false\n")
-            sb.append("...\n")
+    /**
+     * 生成 rime 可编译词典 `word_freq.dict.yaml`。
+     *
+     * 同时写两处：私有 rime 工作目录（librime 编译用）与可见 rime 目录根
+     *（`/storage/emulated/0/rime/`，与 Flypy.dict.yaml 等同级，方便用户查看/编辑/备份）。
+     * 旧位置 `rime/xime/` 下的历史副本一并清理，避免同一词典出现两份。
+     *
+     * @return true 表示词典内容相对磁盘已有版本发生变化，调用方据此决定
+     *         是否触发增量部署（见 [save] 与 saveWordData）；false 表示无需重编译。
+     */
+    fun ensureRimeDict(
+        context: android.content.Context,
+        table: Map<String, Map<String, Int>>,
+    ): Boolean = runCatching {
+        val rimeDir = com.kingzcheung.xime.settings.SchemaManager.getRimeDir(context)
+        val dictFile = File(rimeDir, RIME_DICT_FILE_NAME)
+        val visible = File(
+            com.kingzcheung.xime.settings.RimeUserFileSync.mirrorDir(context),
+            RIME_DICT_FILE_NAME,
+        )
+        val legacy = File(
+            com.kingzcheung.xime.settings.UserConfigDir.absoluteDir,
+            RIME_DICT_FILE_NAME,
+        )
+
+        if (table.isEmpty()) {
+            val existed = dictFile.exists() || visible.exists()
+            if (dictFile.exists()) dictFile.delete()
+            if (visible.exists()) visible.delete()
+            if (legacy.exists()) legacy.delete()
+            return@runCatching existed
+        }
+
+        val text = buildString {
+            append("# Rime dictionary\n")
+            append("# encoding: utf-8\n")
+            append("# 上屏词频字典：由 Xime 自动生成，词频越高权重越大（rime 原生 by_weight 排序）\n")
+            append("---\n")
+            append("name: word_freq\n")
+            append("version: \"1\"\n")
+            append("sort: by_weight\n")
+            append("use_preset_vocabulary: false\n")
+            append("...\n")
             for ((code, words) in table.toSortedMap()) {
                 for ((word, count) in words.entries.sortedByDescending { it.value }) {
-                    sb.append(word).append('\t').append(code).append('\t').append(count).append('\n')
+                    append(word).append('\t').append(code).append('\t').append(count).append('\n')
                 }
             }
-            dictFile.parentFile?.mkdirs()
-            dictFile.writeText(sb.toString())
         }
-    }
 
-    @Synchronized
+        // 内容没变就不落盘、不触发重编译（上屏极频繁，避免无意义 IO 与编译）
+        val changed = !dictFile.exists() || dictFile.readText() != text
+        if (changed) {
+            dictFile.parentFile?.mkdirs()
+            dictFile.writeText(text)
+            runCatching {
+                visible.parentFile?.mkdirs()
+                visible.writeText(text)
+            }
+        }
+        // 旧位置残留无论如何都清掉（迁移遗留，不影响内容判定）
+        if (legacy.exists()) runCatching { legacy.delete() }
+        changed
+    }.getOrDefault(false)
+
+@Synchronized
     fun save(
         context: android.content.Context,
         table: Map<String, Map<String, Int>>,
@@ -268,30 +312,14 @@ internal object WordFreqStore {
             serialize = ::serialize,
             onBaseline = { baselineText = it },
         )
-        // 双写副本：rime 目录（/storage/emulated/0/rime/）下 word_freq.yaml，
-        // 与主文件同内容实时同步。使用纯文本 tab 分隔（与 word_freq.txt 一致），
-        // 仅文件名不同；副本写入失败静默降级（主文件已成功，不因此抛错）。
-        runCatching {
-            val mirror = File(
-                File(
-                    android.os.Environment.getExternalStorageDirectory(),
-                    com.kingzcheung.xime.settings.UserConfigDir.DIR_SUB_PATH.substringBeforeLast('/'),
-                ),
-                MIRROR_FILE_NAME,
-            )
-            val text = serialize(saved)
-            if (saved.isEmpty()) {
-                if (mirror.exists()) mirror.delete()
-            } else {
-                mirror.parentFile?.mkdirs()
-                mirror.writeText(text)
-            }
-        }
         // 生成 rime 可编译词典 word_freq.dict.yaml（私有 rime 工作目录 files/rime/）：
         // XGuai_flypy 等方案的 import_tables 引用了 `word_freq`，librime 部署时
         // 必须能读到该词典文件，否则 XGuai_flypy 编译失败、build 无 .bin、候选打不出。
         // 词条按频数降序 + 权重=频数（sort: by_weight → rime 原生按词频排序候选）。
-        ensureRimeDict(context, saved)
+        //
+        // 返回的 changed 置位到 lastRimeDictChanged：词典内容真变了才需要重编译
+        // .table.bin，调用方（saveWordData）据此决定是否触发增量部署。
+        lastRimeDictChanged = ensureRimeDict(context, saved)
         return saved
     }
 
