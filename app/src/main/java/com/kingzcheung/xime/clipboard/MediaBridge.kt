@@ -64,7 +64,10 @@ internal object MediaBridge {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir())
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            // 用 Images 表而非 Downloads：接收方通常按媒体权限读剪贴板里的 URI，
+            // 该权限只覆盖 Images 表的行，Downloads 表的行会因缺权限读失败。
+            // 物理路径仍在中转目录（Download/Xime），相册不索引，不影响原设计。
+            val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val uri = resolver.insert(collection, values) ?: return null
             try {
                 resolver.openOutputStream(uri)?.use { output ->

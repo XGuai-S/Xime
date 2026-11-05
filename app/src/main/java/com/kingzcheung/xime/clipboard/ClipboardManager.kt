@@ -119,6 +119,18 @@ class ClipboardManager private constructor(private val context: Context) {
     }
 
     /**
+     * 本应用刚写回系统剪贴板的**文本**（用于抑制自我采集）。
+     *
+     * 为什么需要它：点选剪贴板条目上屏时会把该内容写回系统剪贴板（让用户能在别处粘贴），
+     * 这会让 OnPrimaryClipChangedListener 立刻回调、把**刚点过的同一条内容**当成新内容重新
+     * 入库（upsertAndTrim 生成新 id），候选栏于是又把它显示出来——用户看到的「反复出现」。
+     *
+     * 写入前设置此值，readClipboard 读到相同文本就直接丢弃并清空标记。
+     */
+    @Volatile
+    private var selfWrittenText: String? = null
+
+    /**
      * 采集系统剪贴板。
      *
      * 文本分支与旧行为一致（text → uri 字符串 → intent）；图片分支（[ClipData] 声明图片 MIME
@@ -167,6 +179,15 @@ class ClipboardManager private constructor(private val context: Context) {
                     else -> null
                 }
                 if (!text.isNullOrEmpty()) {
+                    // 本应用刚写回的同一条文本：不重复入库（否则会生成新 id 被当成新内容）
+                    val selfText = selfWrittenText
+                    if (selfText != null) {
+                        selfWrittenText = null
+                        if (selfText == text) {
+                            Log.d(TAG, "Self-written text clip, skip capture")
+                            return
+                        }
+                    }
                     addItem(text)
                     return
                 }
@@ -776,6 +797,8 @@ class ClipboardManager private constructor(private val context: Context) {
     }
 
     fun copyToSystemClipboard(text: String) {
+        // 先打标记再写：监听回调是异步的，必须先置位才能拦住自我采集
+        selfWrittenText = text
         val clip = ClipData.newPlainText("kime_clipboard", text)
         androidClipboardManager.setPrimaryClip(clip)
     }
@@ -850,11 +873,15 @@ class ClipboardManager private constructor(private val context: Context) {
      * @param shareCacheCopy true（Emoji 原行为）：先复制到 `cacheDir/emoji_cache` 再共享，
      *   避免把插件资源/临时文件直接暴露；false（剪贴板图片）：直接共享 `files/clipboard_images`
      *   原文件，配合淘汰保护集保证粘贴方读取期间文件不被回收。
+     * @param useMediaStoreUri true 时优先用 MediaStore 中转 URI（[MediaBridge]）而非
+     *   FileProvider URI：MediaStore 的 `content://media/...` 是系统公共媒体库，
+     *   部分应用读第三方 `fileprovider` URI 拿不到权限；此参数作为这类场景的兼容路径。
      */
     fun copyImageToSystemClipboard(
         imagePath: String,
         label: String = "emoji_image",
         shareCacheCopy: Boolean = true,
+        useMediaStoreUri: Boolean = false,
     ): Boolean {
         return try {
             val imageFile = File(imagePath)
@@ -879,14 +906,22 @@ class ClipboardManager private constructor(private val context: Context) {
                 imageFile
             }
 
-            val uri = getContentUriForImage(sharedFile, imageFile) ?: return false
+            val uri = if (useMediaStoreUri) {
+                // MediaStore 公共 URI（接收方按媒体权限即可读，兼容性更好）
+                val mime = ClipboardImageStore.mimeForExtension(imageFile.extension) ?: "image/jpeg"
+                MediaBridge.insert(context, sharedFile, mime)
+                    ?: getContentUriForImage(sharedFile, imageFile)
+            } else {
+                getContentUriForImage(sharedFile, imageFile)
+            } ?: return false
 
             val clip = ClipData.newUri(context.contentResolver, label, uri)
             androidClipboardManager.setPrimaryClip(clip)
 
             // 只有共享原文件（files/clipboard_images）时才需要淘汰保护；
             // cache 副本不受图片配额约束，无需保护
-            selfClipboardImagePath = if (shareCacheCopy) {
+            // MediaStore 中转文件由 MediaBridge 的 TTL 自动清理，不进 files 淘汰保护集
+            selfClipboardImagePath = if (shareCacheCopy || useMediaStoreUri) {
                 null
             } else {
                 ClipboardImageStore.relativePathOf(context.filesDir, sharedFile)

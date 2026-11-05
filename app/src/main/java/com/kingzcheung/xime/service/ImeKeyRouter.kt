@@ -121,6 +121,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 按了别的键 → 上一段删除会话立即结算，避免"删除 → 打字 → 删除"被并成一段。
         // 无活动会话时是一次布尔判断，热路径零开销。
         service.finishDeleteSession()
+        // 用户按键盘产生了输入 → 候选栏里的剪贴板条目到此为止：标记消费，
+        // 之后换应用重进输入框不再显示（用户规则：点键盘才消失）。
+        service.markShowingClipboardConsumed()
         val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
             val state = service.uiState.value
             val candState = service.candidateState.value

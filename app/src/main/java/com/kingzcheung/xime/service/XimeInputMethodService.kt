@@ -1290,49 +1290,92 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     // onStartInput 的剪贴板段：填充最近剪贴板候选并启动其变更监听。
+    /**
+     * 剪贴板是否**允许**占据候选栏。
+     *
+     * 只判两件事：用户正在组字（有编码/组合态）时绝不让路；候选栏不是空闲态（已是
+     * 剪贴板展示）时由 [showClipboardCandidates] 自己判断是否刷新。
+     *
+     * 为什么需要这条闸门：旧实现只要剪贴板一变就无条件覆盖候选栏并把 isComposing 置
+     * false，用户正打字时突然被替换成剪贴板条目，表现为「复制的文字/图片反复出现在
+     * 候选栏」（每复制一次、每进一个输入框都来一次）。
+     */
+    private fun canShowClipboardInCandidateBar(): Boolean {
+        val cs = candidateState.value
+        // 正在组字（有编码或组合态）／有联想候选 → 剪贴板不得抢占
+        if (cs.isComposing) return false
+        if (cs.inputText.isNotEmpty()) return false
+        return true
+    }
+
+    /** 把 [items] 写进候选栏剪贴板展示态（空则退回空闲态）。调用方须已过 [canShowClipboardInCandidateBar]。 */
+    private fun showClipboardCandidates(items: List<com.kingzcheung.xime.clipboard.ClipboardItem>) {
+        recentClipboardItemsState.value = items
+        // 记录当前展示的条目 id，供按键输入后统一标记消费
+        synchronized(showingClipboardIds) {
+            showingClipboardIds.clear()
+            items.forEach { showingClipboardIds.add(it.id) }
+        }
+        if (items.isNotEmpty()) {
+            candidateState.value = candidateState.value.copy(
+                candidates = items.map { it.text },
+                candidateComments = emptyList(),
+                inputText = "",
+                isComposing = false,
+                associationCandidates = emptyList(),
+                isShowingRecentClipboard = true,
+            )
+        } else if (candidateState.value.isShowingRecentClipboard) {
+            candidateState.value = candidateState.value.copy(
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                isShowingRecentClipboard = false,
+                candidateActions = emptyList(),
+            )
+        }
+    }
+
+    /**
+     * 建立剪贴板候选监听。
+     *
+     * 展示规则（用户明确）：
+     * 1. 复制后的条目在**每次进入输入框**都展示（含图片），直到被消费；
+     * 2. 用户**按键盘产生输入**后才消失——由 [markShowingClipboardConsumed] 统一标记；
+     * 3. 只切应用、没敲键盘 → 下次进输入框仍展示。
+     */
     private fun startClipboardCandidatesCollection() {
-    // 获取最近30秒的剪切板内容
     ensureClipboardManagerInitialized()
     try {
-        recentClipboardItemsState.value = clipboardManager.getRecentItems(30)
-        // 将最近剪切板内容显示在候选栏
-        candidateState.value = candidateState.value.copy(
-            candidates = recentClipboardItemsState.value.map { it.text },
-            candidateComments = emptyList(),
-            isShowingRecentClipboard = true
-        )
+        val items = clipboardManager.getRecentItems(30)
+        recentClipboardItemsState.value = items
+        if (canShowClipboardInCandidateBar()) showClipboardCandidates(items)
     } catch (e: Exception) {
         FileLogger.e(TAG, "Failed to get recent clipboard items", e)
     }
 
-    // 监听clipboardItems变化，更新候选栏
     clipboardCollectorJob?.cancel()
     clipboardCollectorJob = serviceScope.launch {
         clipboardManager.clipboardItems.collect { _ ->
             val items = clipboardManager.getRecentItems(30)
             recentClipboardItemsState.value = items
-            if (items.isNotEmpty()) {
-                // 清空Rime联想词等
-                rimeEngine.clearComposition()
-                candidateState.value = candidateState.value.copy(
-                    candidates = items.map { it.text.take(8) + if (it.text.length > 8) "..." else "" },
-                    candidateComments = emptyList(),
-                    inputText = "",
-                    isComposing = false,
-                    associationCandidates = emptyList(),
-                    isShowingRecentClipboard = true
-                )
-            } else if (candidateState.value.isShowingRecentClipboard) {
-                // 如果没有recent items，清空候选栏
-                candidateState.value = candidateState.value.copy(
-                    candidates = emptyList(),
-                    candidateComments = emptyList(),
-                    isShowingRecentClipboard = false,
-                    candidateActions = emptyList()
-                )
-            }
+            // 新复制内容 / 状态刷新：候选栏空闲时展示（正在打字则不抢占）
+            if (!canShowClipboardInCandidateBar()) return@collect
+            showClipboardCandidates(items)
         }
     }
+    }
+
+    /**
+     * 用户按键盘产生了实际输入：把当前正展示的剪贴板条目全部标记消费。
+     *
+     * 调用点在按键主路径（见 ImeKeyRouter）——只在**真正输入字符**时触发，
+     * 切换应用/展开面板不会调到这里，因此不会误清。
+     */
+    internal fun markShowingClipboardConsumed() {
+        val ids = synchronized(showingClipboardIds) { showingClipboardIds.toList() }
+        if (ids.isEmpty()) return
+        showingClipboardIds.clear()
+        ids.forEach { clipboardManager.markConsumedById(it) }
     }
 
     internal fun notifyDeploymentStatus(isDeploying: Boolean, message: String) {
@@ -2751,6 +2794,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 先重置候选状态到初始值，避免前一 session 的残留状态影响新输入
         candidateState.value = CandidateState()
 
+        // 剪贴板候选：只建立监听，**不在每次进入输入框时自动展示历史剪贴板**。
+        // 用户明确要求：复制内容一旦在当前键盘状态展示过（或被消费），换应用不该再弹出来。
+        // 真正展示时机只剩「用户刚复制新内容」这一种，见 [startClipboardCandidatesCollection]。
         startClipboardCandidatesCollection()
 
         attribute?.let { updateEnterKeyText(it) }
@@ -3600,6 +3646,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 只在本次上屏全为汉字时推进；粘贴/英文/标点/反查等会清空窗口，避免跨界拼接。
      */
     private val comboHistory = ArrayList<String>()
+
+    /**
+     * 当前候选栏正在展示的剪贴板条目 id（用于「按键盘输入后统一标记消费」）。
+     *
+     * 语义（用户明确）：
+     * - 复制后条目**每次进入输入框都会展示**（只要没被消费）；
+     * - 用户**点了键盘产生输入**后才消失，并对这些 id 调 markConsumedById → 之后任何应用
+     *   都不再显示；
+     * - 只切应用、没敲键盘 → 下次进输入框仍展示（这是期望行为）。
+     */
+    internal val showingClipboardIds = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
+
 
     /** 组合窗口保留的最大字数（按码点）：与 combo_max_chars 同量级，多留一点供长词后缀。 */
     private val comboWindowMaxChars: Int = 8

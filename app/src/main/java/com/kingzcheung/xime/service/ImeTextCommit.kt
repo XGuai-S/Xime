@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.service
 
 import com.kingzcheung.xime.util.FileLogger
+import android.content.Intent
 import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
@@ -63,12 +64,18 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
                 else -> mimeType
             }
 
-            // 宿主未声明支持图片 MIME 时 commitContent 必然失败，
-            // 提前返回 false，由调用方降级为复制到剪贴板
+            // 宿主 `contentMimeTypes` 只是一个**声明**，很多应用（微信/QQ/部分 IM 的
+            // 聊天输入框）并未声明却实际能收 commitContent。旧实现只看声明就 return false，
+            // 导致「点图片没反应、只能复制到剪贴板」，用户以为发送失败。
+            // 现在改为：声明支持的按 MIME 校验；未声明/不匹配也**仍然尝试** commitContent，
+            // 由 InputConnection 的真实返回值决定（false 才降级剪贴板）。
             val supportedMimeTypes = service.currentInputEditorInfo?.contentMimeTypes
-            if (!supportsMimeType(supportedMimeTypes, actualMimeType)) {
-                Log.i(XimeInputMethodService.TAG, "Host does not support image commit (contentMimeTypes=${supportedMimeTypes?.contentToString()}), falling back to clipboard")
-                return false
+            val declaredOk = supportsMimeType(supportedMimeTypes, actualMimeType)
+            if (!declaredOk) {
+                Log.i(
+                    XimeInputMethodService.TAG,
+                    "Host did not declare image MIME (contentMimeTypes=${supportedMimeTypes?.contentToString()}), trying commitContent anyway",
+                )
             }
 
             val cacheDir = File(service.cacheDir, "emoji_cache")
@@ -97,25 +104,25 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
                 0
             }
             
-            service.currentInputConnection?.commitContent(inputContentInfo, flags, null) ?: false
+            val ok = service.currentInputConnection?.commitContent(inputContentInfo, flags, null) ?: false
+            if (!ok) {
+                FileLogger.i(
+                    XimeInputMethodService.TAG,
+                    "commitImage: host rejected content (mime=$actualMimeType, declared=$declaredOk, pkg=${service.currentInputEditorInfo?.packageName})",
+                )
+            } else {
+                FileLogger.i(
+                    XimeInputMethodService.TAG,
+                    "commitImage: inserted into input box (mime=$actualMimeType, pkg=${service.currentInputEditorInfo?.packageName})",
+                )
+            }
+            ok
             
         } catch (e: Exception) {
             FileLogger.e(XimeInputMethodService.TAG, "Failed to commit image", e)
             false
         }
     }
-
-    /** 判断宿主声明的 contentMimeTypes 是否支持指定 MIME 类型（支持通配符匹配）。 */
-    private fun supportsMimeType(declaredMimeTypes: Array<String>?, mimeType: String): Boolean {
-        if (declaredMimeTypes.isNullOrEmpty()) return false
-        return declaredMimeTypes.any { declared ->
-            declared == "*/*" ||
-                declared.equals(mimeType, ignoreCase = true) ||
-                (declared.endsWith("/*") && mimeType.startsWith(declared.removeSuffix("/*"), ignoreCase = true))
-        }
-    }
-    
-
     internal fun selectClipboardItem(text: String) {
         if (service.candidateState.value.isComposing) {
             service.keyRouter.postRimeJob {
@@ -135,11 +142,13 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
     /**
      * 剪贴板**图片**条目点选。
      *
-     * 两条路径（与 Emoji 图片发送一致，复用 [commitImage] 的 MIME 探测）：
-     * 1. 宿主输入框声明支持图片 MIME → `commitContent` 直插（如部分笔记/邮件应用）；
-     * 2. 否则（微信/Telegram 等）→ 写入系统剪贴板，提示用户长按输入框粘贴发送。
+     * 发送链路（三段式）：
+     * 1. commitContent 直插输入框（微信等支持时图片直接进聊天框）；
+     * 2. Operit AI 专用定向发送（输入框完全不吃图，走它的 ACTION_SEND 入口）；
+     * 3. 写剪贴板 + 触发宿主粘贴动作（其余应用，静默，不判定结果）。
      *
-     * 图片条目没有文本上屏，但同样标记 consumed（候选栏/列表不再提示"新内容"）。
+     * 不为「输入框不收图」的宿主做额外兜底（京东聊天 / TRAE / QQ 等）：
+     * 强行补偿只会把用户引到别的页面或触发系统隐私弹窗，反而干扰正常应用。
      */
     internal fun selectClipboardImage(item: ClipboardItem) {
         service.clipboardManager.markConsumedById(item.id)
@@ -150,20 +159,67 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
             return
         }
         val mimeType = item.mimeType.ifEmpty { "image/jpeg" }
+
+        // 1. commitContent 直插
         if (commitImage(file.absolutePath, mimeType)) return
 
+        // 2. Operit AI 定向发送（唯一例外）
+        if (isOperitHost() && launchDirectImageSend(file.absolutePath, mimeType)) return
+
+        // 3. 写剪贴板 + paste（静默）
         val copied = service.clipboardManager.copyImageToSystemClipboard(
             imagePath = file.absolutePath,
             label = "xime_clipboard_image",
-            // 直接共享 files/clipboard_images 原文件（配合淘汰保护集），
-            // 避免再拷一份到 cache 造成重复占用
             shareCacheCopy = false,
+            useMediaStoreUri = true,
         )
-        Toast.makeText(
-            service,
-            if (copied) "已复制图片，长按输入框粘贴" else "复制图片失败",
-            Toast.LENGTH_SHORT,
-        ).show()
+        if (copied) {
+            try {
+                service.currentInputConnection?.performContextMenuAction(android.R.id.paste)
+            } catch (e: Exception) {
+                FileLogger.w(XimeInputMethodService.TAG, "performContextMenuAction(paste) failed", e)
+            }
+        }
+    }
+
+
+    /** 当前输入框是否属于 Operit AI（唯一需要定向发送的宿主）。 */
+    private fun isOperitHost(): Boolean {
+        val pkg = service.currentInputEditorInfo?.packageName ?: return false
+        return pkg.startsWith("com.ai.assistance.operit")
+    }
+
+    /**
+     * 定向调起宿主自己的图片接收入口。
+     *
+     * 用 `setPackage` 限定只唤起当前宿主，不弹全应用分享选择器；URI 走
+     * MediaStore 公共库（外部可读），保证对方能拿到图。调用方
+     * 调用方已限定为 Operit AI，其余应用不会走到这里。
+     */
+    private fun launchDirectImageSend(imagePath: String, mimeType: String): Boolean {
+        val pkg = service.currentInputEditorInfo?.packageName ?: return false
+        return try {
+            val imageFile = File(imagePath)
+            if (!imageFile.exists()) return false
+            val uri = MediaBridge.insert(service, imageFile, mimeType)
+                ?: getContentUriForImage(imageFile, mimeType)
+                ?: return false
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                setPackage(pkg)
+            }
+            service.startActivity(
+                Intent.createChooser(send, "发送图片")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            FileLogger.i(XimeInputMethodService.TAG, "launchDirectImageSend: dispatched to $pkg")
+            true
+        } catch (e: Exception) {
+            FileLogger.w(XimeInputMethodService.TAG, "launchDirectImageSend failed", e)
+            false
+        }
     }
 
     internal fun commitClipboardText(text: String) {
@@ -174,7 +230,15 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
         service.currentInputConnection?.deleteSurroundingText(count, 0)
     }
 
-    /** 生成图片 content URI（commitContent 用）：FileProvider 优先，抛错时降级 [MediaBridge] 中转（不写相册）。 */
+    private fun supportsMimeType(declaredMimeTypes: Array<String>?, mimeType: String): Boolean {
+        if (declaredMimeTypes.isNullOrEmpty()) return false
+        return declaredMimeTypes.any { declared ->
+            declared == "*/*" ||
+                declared.equals(mimeType, ignoreCase = true) ||
+                (declared.endsWith("/*") && mimeType.startsWith(declared.removeSuffix("/*"), ignoreCase = true))
+        }
+    }
+
     private fun getContentUriForImage(imageFile: File, mimeType: String): Uri? {
         try {
             return FileProvider.getUriForFile(
@@ -187,7 +251,6 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
         } catch (e: Exception) {
             FileLogger.w(XimeInputMethodService.TAG, "FileProvider getUriForFile failed, falling back to MediaBridge", e)
         }
-
         return MediaBridge.insert(service, imageFile, mimeType, autoCleanup = false)
     }
 }
