@@ -18,6 +18,3 @@
 [submodule "app/src/main/jni/librime-predict"]
 	path = app/src/main/jni/librime-predict
 	url = https://github.com/rime/librime-predict.git
-[submodule "app/src/main/assets/rime"]
-	path = app/src/main/assets/rime
-	url = https://github.com/kingzcheung/rime-wubi.git
