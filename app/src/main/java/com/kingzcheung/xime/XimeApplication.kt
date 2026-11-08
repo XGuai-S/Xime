@@ -33,13 +33,16 @@ class XimeApplication : Application(), ImageLoaderFactory {
         return ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizeBytes(16 * 1024 * 1024)
+                    // 输入法只在候选栏缩略图 / 剪贴板图片用到图片加载，
+                    // 16MB 内存缓存对常驻的 IME 进程偏大：省下来的常驻内存
+                    // 直接降低被 LMK 回收的概率（每次被杀都意味着下一次冷启动）。
+                    .maxSizeBytes(4 * 1024 * 1024)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("coil_cache"))
-                    .maxSizeBytes(32L * 1024 * 1024)
+                    .maxSizeBytes(8L * 1024 * 1024)
                     .build()
             }
             .build()
@@ -147,6 +150,12 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 低版本 getThemeById 自动回退到内置配色）
         SettingsPreferences.defaultKeyboardTheme = KeysConfigHelper.loadDefaultThemeId(this)
         SettingsPreferences.defaultDarkMode = KeysConfigHelper.loadDefaultDarkMode(this)
+
+        // 验证码自动填充：先做一次性纠偏（旧版本默认开启 → 改为默认关闭），
+        // 再把设置开关同步到进程级收集器
+        SettingsPreferences.migrateOtpAutofillToOptInOnce(this)
+        com.kingzcheung.xime.service.otp.OtpCollector.enabled =
+            SettingsPreferences.isOtpAutofillEnabled(this)
         // 键盘配置预热：loadConfig 要跑十几次 YAML 解析（xime.yaml 80KB），真机实测冷启动
         // 阻塞主线程约 1.7s。输入法服务与 Application 同进程，这里先异步解析一次，
         // 服务 onCreate 里那次同步调用就能命中 mtime 缓存（只剩一次 config.copy，微秒级）。

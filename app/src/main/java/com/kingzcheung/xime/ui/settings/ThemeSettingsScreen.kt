@@ -149,7 +149,9 @@ fun ThemeSettingsContent(
             item {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "提示: 配色切换后设置页面立即生效，键盘需重启输入法",
+                    // 键盘侧 registerSharedPrefsListener 已在 keyboard_theme 变化时重新读取
+                    // themeId 并刷新窗口背景，无需重启输入法；旧文案与实现相反（用户 2026-11 指出）。
+                    text = "提示: 配色切换后设置页面立即生效；键盘正在显示时会当场换色，无需重启输入法",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)

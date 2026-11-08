@@ -43,7 +43,8 @@ fun HandwritingLookupKeyboard(
     shadowEnabled: Boolean,
     shadowElevation: androidx.compose.ui.unit.Dp,
     shadowShapeRadius: androidx.compose.ui.unit.Dp,
-    uiState: KeyboardUiState,
+    /** 悬浮模式下底部内边距取不同口径（原先从整个 uiState 里取）。 */
+    isFloatingMode: Boolean,
     onKeyPress: (String) -> Unit,
     onButtonFeedback: ((String) -> Unit)?,
     onCandidates: ((List<HandwritingCandidate>) -> Unit)?,
@@ -141,7 +142,7 @@ fun HandwritingLookupKeyboard(
         modifier = modifier
             .fillMaxSize()
             .padding(
-                bottom = if (uiState.isFloatingMode) {
+                bottom = if (isFloatingMode) {
                     0.dp
                 } else {
                     10.dp

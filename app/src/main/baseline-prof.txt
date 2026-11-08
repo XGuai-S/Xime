@@ -1,0 +1,60 @@
+# Baseline Profile —— Xime 启动与按键热路径
+#
+# 作用：让 ART 在安装/首次运行前把这些类 AOT 编译，减少冷启动时的解释执行与 JIT 预热。
+#       输入法每次被系统回收后重新弹出都会受益（IME 进程频繁被 LMK 杀掉）。
+#
+# 规则格式（重要，写错 AGP 会直接拒绝）：
+#   类规则   = Lcom/example/MyClass;                ← 不带任何 flags
+#   方法规则 = HSPLcom/example/MyClass;->method()V   ← 只有方法级规则才带 H/S/P
+# 类级规则**不能**带 flags。本文档初版误写成 `HSPLcom/...;`，release 构建时
+# expandReleaseArtProfileWildcards 报 "Class rules don't support flags" 失败。
+# （debug 的 mergeDebugArtProfile 只拼接不解析语法，抓不到该错误。）
+#
+# 注意：
+#  1. 这里只写**应用自身**的类，使用源码里的类名。AGP 在 R8 混淆阶段会自动把
+#     这些名字映射成最终的混淆名，所以不要手写混淆后的名字。
+#  2. 库（kaml / kotlinx.serialization / Compose）不在此重复声明——它们各自的
+#     AAR 已自带 profile，手写反而可能因版本差异导致映射失败。
+#  3. 本文件是**保守的初始版本**（类级）。正式版本应由 Macrobenchmark 在真机上
+#     生成后覆盖（见 BUILD-ENV-arm64.md 的说明），类级规则效果弱于方法级规则。
+#
+# 验证方式：构建后确认 APK 内存在 assets/dexopt/baseline.prof；
+#          安装后 `adb shell dumpsys package <pkg> | grep -i prof` 可看到状态。
+
+# ── 应用入口 ──────────────────────────────────────────────
+Lcom/kingzcheung/xime/XimeApplication;
+Lcom/kingzcheung/xime/MainActivity;
+
+# ── 输入法服务与按键处理（最高频路径）────────────────────
+Lcom/kingzcheung/xime/service/XimeInputMethodService;
+Lcom/kingzcheung/xime/service/ImeKeyRouter;
+Lcom/kingzcheung/xime/service/ImeSessionController;
+Lcom/kingzcheung/xime/service/ImeKeyboardCallbacks;
+Lcom/kingzcheung/xime/service/ImeTextCommit;
+Lcom/kingzcheung/xime/service/CandidateState;
+Lcom/kingzcheung/xime/service/InputUIState;
+
+# ── 词库（冷启动 IO 线程装载 + 上屏写盘）────────────────
+Lcom/kingzcheung/xime/service/AutoWordStore;
+Lcom/kingzcheung/xime/service/WordFreqStore;
+Lcom/kingzcheung/xime/service/CandidateOrderStore;
+Lcom/kingzcheung/xime/service/WordBlacklistStore;
+Lcom/kingzcheung/xime/service/UserDataMerge;
+
+# ── rime 引擎 ────────────────────────────────────────────
+Lcom/kingzcheung/xime/rime/RimeEngine;
+Lcom/kingzcheung/xime/rime/RimeConfigHelper;
+Lcom/kingzcheung/xime/rime/T9InputController;
+
+# ── 配置解析（冷启动主线程最大单项开销）──────────────────
+Lcom/kingzcheung/xime/settings/KeysConfigHelper;
+Lcom/kingzcheung/xime/settings/SettingsPreferences;
+Lcom/kingzcheung/xime/settings/UserConfigDir;
+
+# ── 键盘 UI（首帧渲染）──────────────────────────────────
+Lcom/kingzcheung/xime/ui/keyboard/KeyboardView;
+Lcom/kingzcheung/xime/ui/keyboard/KeyboardLayoutKt;
+Lcom/kingzcheung/xime/ui/keyboard/CandidateBarKt;
+Lcom/kingzcheung/xime/ui/keyboard/KeyButtonKt;
+Lcom/kingzcheung/xime/ui/keyboard/T9KeyboardLayoutKt;
+Lcom/kingzcheung/xime/viewmodel/KeyboardViewModel;

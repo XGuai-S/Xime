@@ -144,6 +144,13 @@ object KeyActionRegistry {
         }
         register("clear_all", ActionDomain.SERVICE, GestureAction.CLEAR_ALL) { c, _ -> c.service.dispatchKey("clear_all") }
         register("undo_clear", ActionDomain.SERVICE, GestureAction.UNDO_CLEAR) { c, _ -> c.service.dispatchKey("undo_clear") }
+        // 删除键左右滑：整段回删上一次上屏 / 恢复，走与上下滑相同的 dispatchKey 通道
+        register("delete_last_commit", ActionDomain.SERVICE, GestureAction.DELETE_LAST_COMMIT) { c, _ ->
+            c.service.dispatchKey("delete_last_commit")
+        }
+        register("restore_last_commit", ActionDomain.SERVICE, GestureAction.RESTORE_LAST_COMMIT) { c, _ ->
+            c.service.dispatchKey("restore_last_commit")
+        }
 }
 
     /** 光标移动步数：value 缺省或非法时为 1 步。 */

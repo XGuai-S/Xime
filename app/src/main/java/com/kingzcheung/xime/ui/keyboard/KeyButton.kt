@@ -6,7 +6,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -38,8 +37,12 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import com.kingzcheung.xime.settings.LongPressDirectCommitState
+import com.kingzcheung.xime.settings.SettingsPreferences
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -60,6 +63,18 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+
+/**
+ * 键高进程内缓存（dp）。
+ *
+ * 键帽自适应字号需要「本键可用高度」。原来靠 BoxWithConstraints 拿 maxHeight——那是
+ * SubcomposeLayout，每次测量都会 subcompose 一次内容，几十个键就是几十次/帧。
+ * 现在改为按键自身 onSizeChanged 实测（尺寸变化才更新），首帧取这里缓存的上一次值，
+ * 避免键盘弹出时字号跳变。
+ */
+internal object KeyHeightCache {
+    var value: Float = 44f
+}
 
 /** 按键视觉缩进（padding），用于消除 spacedBy 死区。
  *  pointerInput 在 padding 之前，触摸区=全尺寸；
@@ -529,6 +544,28 @@ fun SwipeableKeyButton(
     val currentOnLongPressSelect by rememberUpdatedState(onLongPressSelect)
     val currentLongPressItems by rememberUpdatedState(longPressItems)
     val currentLongPressDrawableIds by rememberUpdatedState(longPressDrawableIds)
+    // 长按「直接上屏角标」：开启时不弹气泡，长按直接执行长按列表第一项（见 LongPressDirectPolicy）
+    val longPressContext = LocalContext.current
+    LongPressDirectCommitState.ensureInitialized(longPressContext)
+    // 读 Compose 状态：设置页一关开关，键盘当场按新值走（不必重建键盘）
+    val longPressDirectCommit = LongPressDirectCommitState.enabled.value
+    // 「角标」= 键面右上角原本就画着的那个提示字符（上滑目标，如 q 键的 0 / ～）
+    val cornerBadgeText: String? = (swipeUpKeyLabel ?: swipeText)?.takeIf { it.isNotEmpty() }
+    val longPressDirectActive = LongPressDirectPolicy.shouldCommitBadge(
+        enabled = longPressDirectCommit,
+        hasBadge = cornerBadgeText != null,
+        hasSwipeHandler = currentOnSwipe != null,
+    )
+    val longPressItemsEffective = if (longPressDirectActive) null else currentLongPressItems
+    // 长按 = 执行上滑动作：与滑一下上滑完全同一条路径，上屏的就是角标那个字符
+    val effectiveLongClick: (() -> Unit)? = if (longPressDirectActive) {
+        // 特殊长按行为优先：z 键反查（注入反引号进 reverse_lookup）等键的长按不是「角标」，
+        // 被「直接上屏角标」覆盖的话反查入口就彻底丢了（用户 2026-11 反馈）。
+        currentOnLongClick ?: ({
+            currentOnSwipe?.invoke(currentSwipeText ?: "")
+            Unit
+        })
+    } else currentOnLongClick
     val scope = rememberCoroutineScope()
     val swipeRepeatRunner = remember(scope) { SwipeRepeatRunner(scope) }
     val view = LocalView.current
@@ -557,7 +594,10 @@ fun SwipeableKeyButton(
     val keyLabelFontFamily = AppFonts.keyLabelFontFamily
     val keyFontFamily = AppFonts.keyFontFamily
 
-    BoxWithConstraints(
+    // 本键可用高度（dp）：由下方 onSizeChanged 实测，取代原来的 BoxWithConstraints
+    var measuredKeyHeightDp by remember { mutableStateOf(KeyHeightCache.value) }
+
+    Box(
         modifier = modifier
             .fillMaxHeight()
             .fillMaxWidth()
@@ -682,8 +722,8 @@ fun SwipeableKeyButton(
                     }
                 )
             }
-            .pointerInput(text, currentLongPressItems.isNullOrEmpty(), currentOnLongClick != null) {
-                if (currentLongPressItems.isNullOrEmpty()) {
+            .pointerInput(text, longPressItemsEffective.isNullOrEmpty(), effectiveLongClick != null) {
+                if (longPressItemsEffective.isNullOrEmpty()) {
                     // 容差点击：不因指针漂出键格（isOutOfBounds）而取消，见 detectTolerantTapGestures
                     detectTolerantTapGestures(
                         onPress = { offset ->
@@ -708,7 +748,7 @@ fun SwipeableKeyButton(
                                 currentOnClick()
                             }
                         },
-                        onLongPress = currentOnLongClick?.let {
+                        onLongPress = effectiveLongClick?.let {
                             {
                                 view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                                 it()
@@ -724,7 +764,7 @@ fun SwipeableKeyButton(
                     var localLongPressTriggered = false
                     var selectedIdx = 0
                     val downX = down.position.x
-                    val items = currentLongPressItems ?: return@awaitEachGesture
+                    val items = longPressItemsEffective ?: return@awaitEachGesture
                     
                     currentOnSwipeStateChange?.invoke(
                         SwipeState(isPressed = true, pressedText = currentPressText), buttonBounds
@@ -823,6 +863,15 @@ fun SwipeableKeyButton(
                 buttonBounds = coordinates.boundsInRoot()
             }
             .padding(LocalKeyVisualPadding.current)
+            // 实测键内容区高度（padding 之前量是键格高，这里量的是可用内容高，
+            // 与原 BoxWithConstraints 的 maxHeight 同口径）；相等值不会触发重组
+            .onSizeChanged { size ->
+                val dp = with(density) { size.height.toDp().value }
+                if (kotlin.math.abs(dp - measuredKeyHeightDp) > 0.5f) {
+                    measuredKeyHeightDp = dp
+                    KeyHeightCache.value = dp
+                }
+            }
             .then(shadowModifier)
             .clip(keyClipShape)
             .background(
@@ -833,7 +882,7 @@ fun SwipeableKeyButton(
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
         contentAlignment = if (layoutMode == ButtonLayout.COMPACT) Alignment.TopStart else Alignment.Center
     ) {
-        val contentScale = adaptiveKeyContentScale(maxHeight.value)
+        val contentScale = adaptiveKeyContentScale(measuredKeyHeightDp)
         val hintScale = adaptiveHintScale(contentScale)
         val hintOffset = adaptiveHintOffsetDp(contentScale).dp
         val hintExtraScale = LocalHintExtraScale.current
@@ -1227,6 +1276,11 @@ fun SwipeableIconKeyButton(
     /** 右滑动作；与 [onSwipeLeft] 任一配置后，该键横向滑动即接管，自动放弃父层光标手势。 */
     onSwipeRight: (() -> Unit)? = null,
     /**
+     * 左右滑触发阈值（dp）。默认走 [KeyGestureThresholds.HORIZONTAL_SWIPE_DP]；
+     * 删除键这类窄键传更小的值，否则手指在键内滑不到阈值。
+     */
+    horizontalSwipeThresholdDp: Float = KeyGestureThresholds.HORIZONTAL_SWIPE_DP,
+    /**
      * 长按是否连发（每 30ms 重复）。删除键为 true（长按连删）；
      * 普通功能键传 false（长按只触发一次，避免重复打开面板/切换状态）。
      */
@@ -1274,10 +1328,12 @@ fun SwipeableIconKeyButton(
     val density = LocalDensity.current
     val swipeUpThreshold = with(density) { (-KeyGestureThresholds.VERTICAL_SWIPE_DP).dp.toPx() }
     val swipeDownThreshold = with(density) { KeyGestureThresholds.VERTICAL_SWIPE_DP.dp.toPx() }
-    val swipeLeftThreshold = with(density) { (-KeyGestureThresholds.HORIZONTAL_SWIPE_DP).dp.toPx() }
-    val swipeRightThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_DP.dp.toPx() }
+    val swipeLeftThreshold = with(density) { (-horizontalSwipeThresholdDp).dp.toPx() }
+    val swipeRightThreshold = with(density) { horizontalSwipeThresholdDp.dp.toPx() }
     // 横向接管阈值：低于父层光标手势激活阈值（60dp），使配置了左右滑的键优先接管横向滑动
-    val horizontalSwipeSuppressThreshold = with(density) { KeyGestureThresholds.HORIZONTAL_SWIPE_SUPPRESS_DP.dp.toPx() }
+    val horizontalSwipeSuppressThreshold = with(density) {
+        minOf(KeyGestureThresholds.HORIZONTAL_SWIPE_SUPPRESS_DP, horizontalSwipeThresholdDp).dp.toPx()
+    }
     val suppressCursorMove = LocalSuppressCursorMove.current
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current

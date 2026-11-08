@@ -62,7 +62,14 @@ object RimeConfigHelper {
      * 该入口被 Application 预初始化与输入法服务共享，配合 deploymentLock
      * 避免两者并发触发两次全量编译。
      */
-    fun ensureDeployment(context: Context): Boolean {
+    /**
+     * @param force 调用方检测到「用户手改了词库表」时传 true：跳过 hash 快捷路径。
+     *   词频/造词/排序/黑名单这些表**故意不进**部署 hash（word_freq 每分钟都在变，
+     *   计入 hash 会让每次上屏都触发部署），代价是只改它们时 hash 一致、编译被静默
+     *   跳过 —— 表现为「重载了但词库没变」。force 只跳过 hash 判断，不删 build：
+     *   build 完整时仍走增量维护，只重编变更的 dict。
+     */
+    fun ensureDeployment(context: Context, force: Boolean = false): Boolean {
         synchronized(deploymentLock) {
             val buildDir = File(context.filesDir, "rime/build")
             // 部署前先把用户在可见目录（Documents/rime/xime）里的改动同步进
@@ -78,7 +85,12 @@ object RimeConfigHelper {
             // 表现为「部署完成但词库为空、候选恒空、engine=0 打不出字」。
             // 因此 hash 一致时必须再验产物完整性，缺产物则强制重建。
             val artifactsComplete = hasCompleteBuildArtifacts(context)
-            if (currentHash.isNotEmpty() &&
+            if (force) {
+                Log.i(TAG, "ensureDeployment: forced (user changed word tables), skip hash shortcut")
+                FileLogger.i(TAG, "ensureDeployment: forced by word-table change, skip hash shortcut")
+            }
+            if (!force &&
+                currentHash.isNotEmpty() &&
                 currentHash == SettingsPreferences.getDeploymentHash(context) &&
                 artifactsComplete
             ) {

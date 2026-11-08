@@ -33,6 +33,7 @@ import androidx.compose.material.icons.twotone.Info
 import androidx.compose.material.icons.twotone.Keyboard
 import androidx.compose.material.icons.twotone.KeyboardAlt
 import androidx.compose.material.icons.twotone.Palette
+import androidx.compose.material.icons.twotone.Sms
 import androidx.compose.material.icons.twotone.Storefront
 import androidx.compose.material.icons.twotone.Straighten
 import androidx.compose.material.icons.twotone.TableChart
@@ -78,6 +79,7 @@ fun SettingsMainContent(
     onNavigateToCorrection: () -> Unit = {},
     onNavigateToAutoWord: () -> Unit = {},
     onNavigateToSpeechToText: () -> Unit,
+    onNavigateToOtp: () -> Unit = {},
     onNavigateToAbout: () -> Unit,
     onNavigateToClipboard: () -> Unit = {},
     onNavigateToBackup: () -> Unit = {},
@@ -372,6 +374,91 @@ fun SettingsMainContent(
                             SettingsPreferences.setSttEnabled(context, enabled)
                         }
                     )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    // 验证码自动填充：从通知收集 → 候选栏 + 剪贴板。
+                    // 依赖「通知使用权」（可读所有通知，高敏感），因此**默认关闭、必须先授权**。
+                    var otpEnabled by remember { mutableStateOf(SettingsPreferences.isOtpAutofillEnabled(context)) }
+                    // 通知使用权状态：用 ON_RESUME 刷新——从系统「通知使用权」页面返回时必须更新，
+                    // 仅靠重组不可靠（该页是另一个 Activity，Compose 不一定重组）。
+                    val otpLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                    var otpNotifGranted by remember { mutableStateOf(otpCheckNotifAccess(context)) }
+                    // 用户点了开关但尚未授权 → 记下"想开"的意图，授权回来自动打开，省得再点一次
+                    var otpPendingEnable by remember { mutableStateOf(false) }
+                    androidx.compose.runtime.DisposableEffect(otpLifecycleOwner) {
+                        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                otpNotifGranted = otpCheckNotifAccess(context)
+                            }
+                        }
+                        otpLifecycleOwner.lifecycle.addObserver(obs)
+                        onDispose { otpLifecycleOwner.lifecycle.removeObserver(obs) }
+                    }
+                    androidx.compose.runtime.LaunchedEffect(otpNotifGranted, otpPendingEnable) {
+                        when {
+                            // 刚授权完 → 自动打开
+                            otpNotifGranted && otpPendingEnable -> {
+                                otpEnabled = true
+                                SettingsPreferences.setOtpAutofillEnabled(context, true)
+                                otpPendingEnable = false
+                            }
+                            // 授权被撤销 → 自动关闭，不留"开着却不生效"的假状态
+                            !otpNotifGranted && otpEnabled -> {
+                                otpEnabled = false
+                                SettingsPreferences.setOtpAutofillEnabled(context, false)
+                            }
+                        }
+                    }
+                    SettingsToggleItem(
+                        icon = Icons.TwoTone.Sms,
+                        title = "验证码自动填充",
+                        subtitle = when {
+                            !otpNotifGranted -> "开启前需授予「通知使用权」，点击开关前往授权"
+                            !otpEnabled -> "已授权，打开后从通知收集验证码"
+                            else -> "从通知收集验证码，显示在候选栏并写入剪贴板"
+                        },
+                        checked = otpEnabled,
+                        showArrow = true,
+                        onClick = { if (otpEnabled) onNavigateToOtp() },
+                        onCheckedChange = { wantOn ->
+                            if (wantOn) {
+                                if (otpNotifGranted) {
+                                    otpEnabled = true
+                                    SettingsPreferences.setOtpAutofillEnabled(context, true)
+                                } else {
+                                    // 未授权：记下意图 + 跳授权页，开关暂不高亮（不写入偏好）。
+                                    // 用户勾选授权并返回后，上面的 LaunchedEffect 会自动把它打开。
+                                    otpPendingEnable = true
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "请在列表里勾选「曦码」以授予通知使用权",
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                                        )
+                                    }.onFailure {
+                                        runCatching {
+                                            context.startActivity(
+                                                Intent(
+                                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                    Uri.fromParts("package", context.packageName, null),
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                otpEnabled = false
+                                SettingsPreferences.setOtpAutofillEnabled(context, false)
+                            }
+                        }
+                    )
+
                 })
             }
 
@@ -442,3 +529,11 @@ fun SettingsMainContent(
         }
     }
 }
+
+
+/** 是否已授予本应用的「通知使用权」。 */
+private fun otpCheckNotifAccess(context: android.content.Context): Boolean =
+    (android.provider.Settings.Secure.getString(
+        context.contentResolver,
+        "enabled_notification_listeners",
+    ) ?: "").contains(context.packageName)

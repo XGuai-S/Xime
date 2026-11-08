@@ -56,17 +56,20 @@ import com.kingzcheung.xime.ui.theme.keyboardBackground
 
 @Composable
 fun SettingsSection(
-    title: String,
+    /** 分组标题；传空串则不渲染标题（用于无标题的纯卡片）。 */
+    title: String = "",
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(modifier = modifier) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
+        if (title.isNotEmpty()) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -154,11 +157,13 @@ fun SettingsToggleItem(
     subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    /** 外部布局修饰（如子项的缩进，用于表达从属关系）。 */
+    modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     showArrow: Boolean = false
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .then(
                 if (onClick != null) Modifier.clickable(onClick = onClick)

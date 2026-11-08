@@ -141,13 +141,16 @@ internal object WordBlacklistStore {
         )
     /** 合并外部手改（不写盘）：返回合并后的表，调用方必须采纳。 */
     @Synchronized
-    fun reconcile(context: android.content.Context, table: Map<String, Map<String, Int>>): Map<String, Map<String, Int>> =
-        UserDataMerge.reconcileTable(
-            baselineText,
-            UserConfigDir.readText(context, FILE_NAME),
-            table,
-            ::parse,
-        )
+    fun reconcile(context: android.content.Context, table: Map<String, Map<String, Int>>): Map<String, Map<String, Int>> {
+        // 与另外三张表（词频/造词/排序）保持一致：没被手改就原样返回，改过则合并并
+        // **推进 baselineText**。原先漏了推进这一步 —— 指针永远停在旧内容，
+        // 于是"有没有外部改动"恒为真：每次「重载」都被判成手改 → 每次都强制重编。
+        val current = UserConfigDir.readText(context, FILE_NAME) ?: return table
+        if (!UserDataMerge.externalChanged(baselineText, current)) return table
+        val merged = UserDataMerge.reconcileTable(baselineText, current, table, ::parse)
+        baselineText = current
+        return merged
+    }
     /** 可见目录不可用时回退应用私有目录。 */
     private fun privateFile(context: android.content.Context): File =
         File(context.filesDir, FILE_NAME)

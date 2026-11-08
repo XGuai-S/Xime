@@ -32,13 +32,6 @@ import kotlinx.coroutines.withContext
 internal class ImeSchemaController(private val service: XimeInputMethodService) {
     internal fun reloadConfig() {
 
-        // 用户可能刚在 `/storage/emulated/0/rime/xime/` 下手改过词库文件（词频/造词/
-        // 排序/黑名单）：先把外部修改合并进内存，「重载」才真正加载手改内容——这些表
-        // 本来不随重载重读，不合并的话手改不仅不生效，下次保存还会被冲掉
-        // （见 UserDataMerge）。投主线程：与 saveWordData/recordWordFrequency 同线程
-        // 操作内存表，避免竞态；只读不写，与部署互不依赖。
-        service.mainHandler.post { service.reconcileUserDataFiles() }
-
         service.mainHandler.post {
             service.requestHideSelf(0)
             android.widget.Toast.makeText(service, "方案部署中...", android.widget.Toast.LENGTH_SHORT).show()
@@ -58,13 +51,30 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 // 注意：本类有三个部署入口（reloadConfig / deploy / deploySchema），都要同步。
                 RimeUserFileSync.sync(service)
                 
+                // 用户可能刚在可见目录手改过词库表（词频/造词/排序/黑名单）。这些表
+                // **不进部署 hash**（word_freq 每分钟都在变，计入 hash 会让每次上屏都触发
+                // 部署），所以只改它们时 hash 一致 → 编译被跳过 → 表现为「重载了但词库
+                // 没变」。这里先合并手改（切主线程，与上屏写入同线程），有改动就落盘
+                // 重新生成派生 dict，并强制走一遍维护/编译。
+                val userDataChanged = withContext(Dispatchers.Main) { service.reconcileUserDataFiles() }
+                if (userDataChanged) {
+                    withContext(Dispatchers.Main) {
+                        service.flushWordDataForReload()
+                        android.widget.Toast.makeText(
+                            service,
+                            "词库有改动，正在重新编译...",
+                            android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+
                 // 统一走 ensureDeployment（增量优先 + 失败才清空重建 + 成功才标记）。
                 // 🔴 历史 bug：直接 deleteRecursively() 清空 build + deploy() 失败也标记
                 // 「已部署完成」→ 私有 build 的 .bin 被毁且永不重建 → 下次启动
                 // isDeploymentComplete 误判已部署而跳过编译 → engine=0 打不出字。
                 // ensureDeployment 内部：hash 一致则跳过；build 存在则增量维护；
                 // 增量失败才清空全量；且仅部署成功才 storeDeploymentHash + done=true。
-                val deployed = RimeConfigHelper.ensureDeployment(service)
+                val deployed = RimeConfigHelper.ensureDeployment(service, force = userDataChanged)
                 if (!deployed) {
                     FileLogger.e(
                         XimeInputMethodService.TAG,
@@ -106,6 +116,10 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
         }
     }
     
+    /**
+     * 遗留入口：当前全仓没有调用点（设置页「部署」走 SchemaSettingsViewModel.deploySchema，
+     * 键盘菜单「重载」走 reloadConfig）。保留但未接线，改动前请先接上或删掉。
+     */
     private fun deploySchema() {
         try {
             // 同 reloadConfig：部署前先把可见目录里的用户修改写回工作目录
@@ -154,32 +168,26 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             "copy" -> ic.performContextMenuAction(android.R.id.copy)
             "cut" -> ic.performContextMenuAction(android.R.id.cut)
             "paste" -> ic.performContextMenuAction(android.R.id.paste)
+            "tab" -> {
+                // 发真实的 TAB 键：多行编辑器/终端/IDE 才会当缩进处理；
+                // 普通单行输入框本来就忽略 Tab，不会插入字符
+                val t = SystemClock.uptimeMillis()
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_TAB, 0))
+                ic.sendKeyEvent(KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_TAB, 0))
+            }
             "home" -> ic.setSelection(0, 0)
             "end" -> {
                 val before = ic.getTextBeforeCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0) ?: ""
                 val after = ic.getTextAfterCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0) ?: ""
                 ic.setSelection(before.length + after.length, before.length + after.length)
             }
-            "arrow_up" -> {
-                val t = SystemClock.uptimeMillis()
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP, 0))
-                ic.sendKeyEvent(KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP, 0))
-            }
-            "arrow_down" -> {
-                val t = SystemClock.uptimeMillis()
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN, 0))
-                ic.sendKeyEvent(KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_DOWN, 0))
-            }
-            "arrow_left" -> {
-                val t = SystemClock.uptimeMillis()
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, 0))
-                ic.sendKeyEvent(KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_LEFT, 0))
-            }
-            "arrow_right" -> {
-                val t = SystemClock.uptimeMillis()
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT, 0))
-                ic.sendKeyEvent(KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_RIGHT, 0))
-            }
+            // 方向键不再给宿主发 DPAD 键事件：宿主常把 DPAD 当焦点切换，
+            // 结果输入框失焦、编辑键盘被收起退回主键盘（用户 2026-11 反馈）。
+            // 改为直接操作光标（组合态移编码光标、空闲态移选区，见 moveCursor）。
+            "arrow_up" -> moveCursorToLine(ic, -1)
+            "arrow_down" -> moveCursorToLine(ic, 1)
+            "arrow_left" -> service.moveCursor(-1)
+            "arrow_right" -> service.moveCursor(1)
 
             "select_begin" -> {
                 editSelAnchor = (ic.getTextBeforeCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0) ?: "").length
@@ -214,6 +222,31 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 }
             }
         }
+    }
+
+    /**
+     * 上下方向键：把光标移到上一行/下一行的行首（不发送按键事件给宿主）。
+     *
+     * 发 DPAD 给宿主时，很多应用会把它解释成控件焦点切换，导致输入框失焦、
+     * 键盘（含编辑键盘）被系统收起——这正是「按箭头就返回主键盘」的原因。
+     */
+    private fun moveCursorToLine(ic: InputConnection, direction: Int) {
+        val before = ic.getTextBeforeCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0) ?: ""
+        val after = ic.getTextAfterCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0) ?: ""
+        val pos = before.length
+        val total = pos + after.length
+        val target = if (direction < 0) {
+            if (pos <= 0) {
+                0
+            } else {
+                val prevNewline = before.lastIndexOf('\n', pos - 2)
+                if (prevNewline >= 0) prevNewline + 1 else 0
+            }
+        } else {
+            val nextNewline = after.indexOf('\n')
+            if (nextNewline >= 0) pos + nextNewline + 1 else total
+        }
+        ic.setSelection(target, target)
     }
 
     private fun extendSelection(ic: InputConnection, direction: Int) {
@@ -339,6 +372,12 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             RimeUserFileSync.sync(service)
 
             val success = service.rimeEngine.deploy()
+            if (success) {
+                // 与其余部署入口一致：成功才落 hash + done。原先漏了这一步，导致
+                // ensureDeployment 下次必然 hash 失配、再白跑一轮部署。
+                RimeConfigHelper.storeDeploymentHash(service)
+                com.kingzcheung.xime.settings.SettingsPreferences.setDeploymentDone(service, true)
+            }
             
             withContext(Dispatchers.Main) {
                 if (success) {

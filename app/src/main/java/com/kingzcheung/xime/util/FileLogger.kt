@@ -154,6 +154,14 @@ object FileLogger {
     /** 当前日志级别（供设置页回显）。 */
     fun getLogLevel(): LogLevel = logLevel
 
+    /**
+     * DEBUG 级是否真的会落盘。
+     *
+     * 给热路径用：删除键 30-80ms 一次，诊断日志里那次跨进程 `getTextBeforeCursor`
+     * 和字符串拼接如果无条件执行，等于每个按键都白付一次 Binder IPC。
+     */
+    fun isDebugEnabled(): Boolean = logLevel.allows(LogLevel.DEBUG)
+
     /** 是否在写文件（级别非 OFF）。 */
     fun isLoggingEnabled(): Boolean = logLevel != LogLevel.OFF
 
@@ -164,6 +172,16 @@ object FileLogger {
     fun v(tag: String, message: String) {
         if (BuildConfig.DEBUG) Log.v(tag, message)
         write(LogLevel.VERBOSE, tag, message)
+    }
+
+    /**
+     * 惰性 DEBUG 日志：级别不够时**不构造消息**。
+     *
+     * 热路径（每键都会走的输入框/候选同步）里直接拼字符串本身就有开销，
+     * 而默认 ERROR 级别下这些串永远不会落盘，还会把用户输入拼进临时对象。
+     */
+    fun dLazy(tag: String, message: () -> String) {
+        if (logLevel.allows(LogLevel.DEBUG)) write(LogLevel.DEBUG, tag, message())
     }
 
     fun d(tag: String, message: String) {

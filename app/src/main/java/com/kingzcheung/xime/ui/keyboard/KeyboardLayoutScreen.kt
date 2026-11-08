@@ -26,7 +26,25 @@ import com.kingzcheung.xime.viewmodel.KeyboardViewModel
 @Composable
 fun KeyboardLayoutScreen(
     keyboardState: KeyboardLayoutState,
-    uiState: KeyboardUiState,
+    // 参数最小化：这里原来收整个 KeyboardUiState（data class，每次击键都是新实例），
+    // 导致整棵键盘树每次击键都重组。实际只用到下面这些字段，传字段后打字期间
+    // 参数相等，Compose 才能跳过重组（见 3.3.3 的帧时间对比）。
+    themeId: String,
+    isDarkTheme: Boolean,
+    isAsciiMode: Boolean,
+    schemaName: String,
+    enterKeyText: String,
+    isSttEnabled: Boolean,
+    isVoiceMode: Boolean,
+    isVoiceSticky: Boolean,
+    isFloatingMode: Boolean,
+    swipeCancelEpoch: Long,
+    capitalAmountExitSignal: Long,
+    /**
+     * T9 键盘要用整个 uiState（它内部三层都在传）。这里传实例恒定的 provider，
+     * 只在 T9 分支求值：全键盘分支不调用它，就不会订阅 uiState，键盘区才跳得动。
+     */
+    t9UiState: () -> KeyboardUiState,
     viewModel: KeyboardViewModel,
     callbacks: KeyboardCallbacks,
     onKeyPress: (String) -> Unit,
@@ -39,30 +57,38 @@ fun KeyboardLayoutScreen(
     t9Controller: T9InputController? = null,
     candidateState: State<CandidateState> = remember { mutableStateOf(CandidateState()) },
 ) {
+    // shift → esc 的判定：候选数量取自 candidateState（State，变化会触发本函数重组），
+    // 编码态取自 callbacks.isComposing()。在这里算好再当普通 Boolean 传给键盘区，
+    // 键盘区就只在这个布尔翻转时重组，而不是每敲一个字都整棵树重组。
+    val hasCandidates = shouldShiftShowEsc(
+        candidateState.value.candidates.size,
+        callbacks.isComposing(),
+    )
+
     // 键盘切换日志：必须放 LaunchedEffect。原实现是「组合期读写同一个 remember 状态」
     // （if (keyboardState != lastLoggedKb) { lastLoggedKb = keyboardState; ... }）——
     // 读让本函数订阅了该状态，写又在组合期发生 ⇒ 每次 keyboardState 变化都把自己标脏，
     // 整棵键盘树（面板 40+ 键）要多重组一遍，这就是 ?123 切换的「延迟感」来源之一。
-    LaunchedEffect(keyboardState, uiState.isAsciiMode) {
-        FileLogger.d("XimeKeyboard", "render keyboard: $keyboardState, ui ascii=${uiState.isAsciiMode}")
+    LaunchedEffect(keyboardState, isAsciiMode) {
+        FileLogger.d("XimeKeyboard", "render keyboard: $keyboardState, ui ascii=${isAsciiMode}")
     }
     val kbColors = KeysConfigHelper.getKeyboardColors()
     val longToColor: (Long) -> Color = { if (it > 0xFFFFFF) Color(it) else Color(0xFF000000 or it) }
-    val themeScheme = KeyboardThemes.getThemeById(uiState.themeId)
+    val themeScheme = KeyboardThemes.getThemeById(themeId)
     val themeBgColor =
-        themeScheme.keyboardBackground?.let { resolveSolidColor(it, uiState.isDarkTheme) }
+        themeScheme.keyboardBackground?.let { resolveSolidColor(it, isDarkTheme) }
     val keyboardBgColor = themeBgColor ?: KeyboardThemes.getKeyboardBackgroundColor(
-        uiState.themeId,
-        uiState.isDarkTheme
+        themeId,
+        isDarkTheme
     )
     val themeSpecialKeyColor =
-        KeyboardThemes.getSpecialKeyColor(uiState.themeId, uiState.isDarkTheme)
-    val keyBgColor = KeyboardThemes.getKeyBgColorOverride(uiState.themeId, uiState.isDarkTheme)
-        ?: if (uiState.isDarkTheme) longToColor(kbColors.keyBgColorDark) else longToColor(kbColors.keyBgColor)
-    val keyTextColor = KeyboardThemes.getKeyTextColorOverride(uiState.themeId, uiState.isDarkTheme)
-        ?: if (uiState.isDarkTheme) longToColor(kbColors.keyTextColorDark) else longToColor(kbColors.keyTextColor)
+        KeyboardThemes.getSpecialKeyColor(themeId, isDarkTheme)
+    val keyBgColor = KeyboardThemes.getKeyBgColorOverride(themeId, isDarkTheme)
+        ?: if (isDarkTheme) longToColor(kbColors.keyBgColorDark) else longToColor(kbColors.keyBgColor)
+    val keyTextColor = KeyboardThemes.getKeyTextColorOverride(themeId, isDarkTheme)
+        ?: if (isDarkTheme) longToColor(kbColors.keyTextColorDark) else longToColor(kbColors.keyTextColor)
     val specialKeyBgColor =
-        if (uiState.isDarkTheme) kbColors.specialKeyBgColorDark?.let { longToColor(it) }
+        if (isDarkTheme) kbColors.specialKeyBgColorDark?.let { longToColor(it) }
             ?: themeSpecialKeyColor else kbColors.specialKeyBgColor?.let { longToColor(it) }
             ?: themeSpecialKeyColor
     val specialKeyTextColor = KeyboardThemes.getSpecialKeyTextColorForBackground(
@@ -70,7 +96,7 @@ fun KeyboardLayoutScreen(
     )
     val kbShadow = KeysConfigHelper.getKeyboardShadow()
     val kbKey = KeysConfigHelper.getKeyboardKeyConfig()
-    val accentColor = KeyboardThemes.getAccentColor(uiState.themeId, uiState.isDarkTheme)
+    val accentColor = KeyboardThemes.getAccentColor(themeId, isDarkTheme)
 
     // 代码布局（九键 / 笔画 / 手写）的键面圆角与阴影圆角同样走「yaml 按键盘覆盖 → 设备档」，
     // 与 26 键 / 面板共用同一条解析：平板统一 14dp（此前这三处漏了设备档，仍是全局 8dp/硬编码 6dp）。
@@ -89,9 +115,9 @@ fun KeyboardLayoutScreen(
             GestureAction.COMMAND -> dispatchCommandAction(value, onKeyPress)
 
             GestureAction.TOGGLE_ASCII -> {
-                FileLogger.i("XimeKeyboard", "earth key toggle_ascii tapped, ui ascii=${uiState.isAsciiMode}")
+                FileLogger.i("XimeKeyboard", "earth key toggle_ascii tapped, ui ascii=${isAsciiMode}")
                 viewModel.resetShift()
-                callbacks.onKeyPress("ime_switch", uiState.isAsciiMode)
+                callbacks.onKeyPress("ime_switch", isAsciiMode)
             }
 
             GestureAction.TOGGLE_SHIFT -> {
@@ -107,7 +133,7 @@ fun KeyboardLayoutScreen(
     // 这里用 key() 让整个活动键盘在 cancel（epoch 变化）时 remount：
     // 所有键的 remember 状态重置、所有进行中手势协程被 Compose 取消，彻底清干净。
     key(keyboardState) {
-        key(uiState.swipeCancelEpoch) {
+        key(swipeCancelEpoch) {
             when (keyboardState) {
             is KeyboardLayoutState.Chinese -> {
                 if (isHandwritingLookup) {
@@ -125,7 +151,7 @@ fun KeyboardLayoutScreen(
                         onCandidates = onHandwritingCandidates,
                         onExit = { onHandwritingLookupExit?.invoke() },
                         clearSignal = handwritingClearSignal,
-                        uiState = uiState,
+                        isFloatingMode = isFloatingMode,
                         modifier = modifier,
                     )
                 } else {
@@ -133,8 +159,16 @@ fun KeyboardLayoutScreen(
                         onKeyPress = onKeyPress,
                         viewModel = viewModel,
                         callbacks = callbacks,
-                        uiState = uiState,
+                        themeId = themeId,
+                        isDarkTheme = isDarkTheme,
+                        schemaName = schemaName,
+                        enterKeyText = enterKeyText,
                         isAsciiMode = false,
+                        isSttEnabled = isSttEnabled,
+                        isVoiceMode = isVoiceMode,
+                        isVoiceSticky = isVoiceSticky,
+                        isFloatingMode = isFloatingMode,
+                        hasCandidates = hasCandidates,
                         modifier = modifier,
                     )
                 }
@@ -156,7 +190,7 @@ fun KeyboardLayoutScreen(
                         onCandidates = onHandwritingCandidates,
                         onExit = { onHandwritingLookupExit?.invoke() },
                         clearSignal = handwritingClearSignal,
-                        uiState = uiState,
+                        isFloatingMode = isFloatingMode,
                         modifier = modifier,
                     )
                 } else {
@@ -164,8 +198,16 @@ fun KeyboardLayoutScreen(
                         onKeyPress = onKeyPress,
                         viewModel = viewModel,
                         callbacks = callbacks,
-                        uiState = uiState,
+                        themeId = themeId,
+                        isDarkTheme = isDarkTheme,
+                        schemaName = schemaName,
+                        enterKeyText = enterKeyText,
                         isAsciiMode = true,
+                        isSttEnabled = isSttEnabled,
+                        isVoiceMode = isVoiceMode,
+                        isVoiceSticky = isVoiceSticky,
+                        isFloatingMode = isFloatingMode,
+                        hasCandidates = hasCandidates,
                         modifier = modifier,
                     )
                 }
@@ -190,13 +232,13 @@ fun KeyboardLayoutScreen(
                     keySpacingY = kbKey.spacingFor("number").second?.dp,
                     modifier = modifier,
                     onKeyPressDown = callbacks.onKeyPressDown,
-                    isFloatingMode = uiState.isFloatingMode,
+                    isFloatingMode = isFloatingMode,
                     specialKeyTextColor = specialKeyTextColor,
                     backKeyOnLeft = lastMainLayout is KeyboardLayoutState.Chinese ||
                         lastMainLayout is KeyboardLayoutState.English,
                     onReplaceCommittedText = callbacks.onReplaceCommittedText,
                     onCapitalAmountDisplay = callbacks.onCapitalAmountDisplay,
-                    capitalAmountExitSignal = uiState.capitalAmountExitSignal,
+                    capitalAmountExitSignal = capitalAmountExitSignal,
                 )
             }
 
@@ -206,8 +248,7 @@ fun KeyboardLayoutScreen(
                     onKeyPress = onKeyPress,
                     viewModel = viewModel,
                     callbacks = callbacks,
-                    uiState = uiState,
-                    isAsciiMode = uiState.isAsciiMode,
+                    isAsciiMode = isAsciiMode,
                     keyBackgroundColor = keyBgColor,
                     keyTextColor = keyTextColor,
                     specialKeyBackgroundColor = specialKeyBgColor,
@@ -221,7 +262,7 @@ fun KeyboardLayoutScreen(
                     keySpacingY = kbKey.spacingFor("symbol").second?.dp,
                     modifier = modifier,
                     onKeyPressDown = callbacks.onKeyPressDown,
-                    isFloatingMode = uiState.isFloatingMode,
+                    isFloatingMode = isFloatingMode,
                     specialKeyTextColor = specialKeyTextColor,
                 )
             }
@@ -242,7 +283,7 @@ fun KeyboardLayoutScreen(
                     keySpacingY = kbKey.spacingFor("stroke").second?.dp ?: if (tablet) 6.dp else null,
                     modifier = modifier,
                     onKeyPressDown = callbacks.onKeyPressDown,
-                    isFloatingMode = uiState.isFloatingMode,
+                    isFloatingMode = isFloatingMode,
                     specialKeyTextColor = specialKeyTextColor,
                     onGestureAction = onGestureAction,
                 )
@@ -264,14 +305,14 @@ fun KeyboardLayoutScreen(
                         onCandidates = onHandwritingCandidates,
                         onExit = { onHandwritingLookupExit?.invoke() },
                         clearSignal = handwritingClearSignal,
-                        uiState = uiState,
+                        isFloatingMode = isFloatingMode,
                         modifier = modifier,
                     )
                 } else if (t9Controller != null) {
                     T9KeyboardLayout(
                         onKeyPress = onKeyPress,
                         callbacks = callbacks,
-                        uiState = uiState,
+                        uiState = t9UiState(),
                         t9Controller = t9Controller,
                         candidateState = candidateState,
                         keyBackgroundColor = keyBgColor,
@@ -288,7 +329,7 @@ fun KeyboardLayoutScreen(
                         keySpacingY = kbKey.spacingFor("t9").second?.dp ?: if (tablet) 6.dp else null,
                         modifier = modifier,
                         onKeyPressDown = callbacks.onKeyPressDown,
-                        isFloatingMode = uiState.isFloatingMode,
+                        isFloatingMode = isFloatingMode,
                         specialKeyTextColor = specialKeyTextColor,
                         onGestureAction = onGestureAction,
                     )

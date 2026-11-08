@@ -30,11 +30,31 @@ internal object KeyGestureThresholds {
     /** 光标手势每次移动的步长。 */
     const val CURSOR_STEP_DP = 25f
 
+    /**
+     * 空格键左右滑「跟手移动光标」的步长：手指每平移这么多就移一格光标。
+     *
+     * 原来是「滑过 40dp 方向阈值后只移一格」，滑再多也不动，所以不跟手；
+     * 12dp（约 34px）接近一个汉字宽，滑动与光标位移基本一一对应。
+     */
+    const val CURSOR_DRAG_STEP_DP = 12f
+
     /** 按键上/下滑触发阈值（删除键的清空/撤销危险区同值）。 */
     const val VERTICAL_SWIPE_DP = 50f
 
     /** 按键左/右滑触发阈值。 */
     const val HORIZONTAL_SWIPE_DP = 50f
+
+    /**
+     * 删除键左/右滑触发阈值（比通用值低）。
+     *
+     * 通用 50dp 在 2.8x 密度下约 141px，而删除键本身只有约 48dp 宽——手指在键内
+     * 根本滑不出这个距离，手势实际永远触发不了（2026-11 真机实证：左右滑全被当成点击）。
+     * 取 12dp（约 34px）：Compose 的拖动检测要先吃掉约 8dp touchSlop，实际累计位移
+     * 会比手指位移小一截；26dp/18dp 在真机上仍要滑出键外才触发（2026-11 实测：
+     * 从键中心向左右各滑 60px 都被当成点击）。12dp 后短距离滑动即可触发，
+     * 手抖（<5dp 才算点击，且 touchSlop 另有一层）仍不会被误判。
+     */
+    const val HORIZONTAL_SWIPE_DELETE_DP = 12f
 
     /** 横向滑动抑制阈值：横向位移超过它就不再判定上/下滑。 */
     const val HORIZONTAL_SWIPE_SUPPRESS_DP = 30f

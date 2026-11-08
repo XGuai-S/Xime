@@ -45,6 +45,7 @@ fun SettingsScreen(
                 onNavigateToCorrection = { navController.navigate(SettingsRoutes.Correction) },
                 onNavigateToAutoWord = { navController.navigate(SettingsRoutes.AutoWord) },
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
+                onNavigateToOtp = { navController.navigate(SettingsRoutes.Otp) },
                 onNavigateToAbout = { navController.navigate(SettingsRoutes.About) },
                 onNavigateToClipboard = { navController.navigate(SettingsRoutes.Clipboard) },
                 onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) },
@@ -201,6 +202,9 @@ fun SettingsScreen(
             AutoWordSettingsContent(
                 onBack = { navController.popBackStack() }
             )
+        }
+        composable(SettingsRoutes.Otp) {
+            OtpSettingsContent(onBack = { navController.popBackStack() })
         }
         composable(SettingsRoutes.SpeechToText) {
             SpeechToTextSettingsContent(

@@ -151,7 +151,13 @@ enum class GestureAction(val value: String) {
      * 按住持续删除（删除键左滑）：单次执行等同一次删除；「持续」由按键手势层在按住期间
      * 按滑动幅度决定的间隔重复触发本动作实现，抬手即停。幅度映射见 [SwipeRepeatSpeed]。
      */
-    REPEAT_DELETE("repeat_delete");
+    REPEAT_DELETE("repeat_delete"),
+
+    /** 删除键左滑：整段回删「上一次上屏」的内容（随后可右滑恢复，见 [RESTORE_LAST_COMMIT]）。 */
+    DELETE_LAST_COMMIT("delete_last_commit"),
+
+    /** 删除键右滑：恢复上一次左滑整段回删的内容。 */
+    RESTORE_LAST_COMMIT("restore_last_commit");
 
     companion object {
         /** 根据 YAML 字符串值查找对应的枚举，找不到返回 null。 */

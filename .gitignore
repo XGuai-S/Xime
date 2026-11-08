@@ -21,6 +21,9 @@ signing-key-base64.txt
 node_modules
 *.jks
 keystore-base64.txt
+# 签名配置含明文密码，绝不入库
+keystore.properties
+app/keystore.properties
 PROGRESS.md
 DECISIONS.md
 # librime and its dependencies

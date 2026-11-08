@@ -228,7 +228,10 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
                 val engine = RimeEngine.getInstance()
                 val deployed = engine.deploy()
                 if (deployed) {
+                    // hash 与 done 必须一起落：只写 hash 不写 done，ensureDeployment 会判成
+                    // 「hash 一致但未完成」而多跑一轮无谓的部署检查。
                     RimeConfigHelper.storeDeploymentHash(context)
+                    com.kingzcheung.xime.settings.SettingsPreferences.setDeploymentDone(context, true)
                 }
                 deployed
             }

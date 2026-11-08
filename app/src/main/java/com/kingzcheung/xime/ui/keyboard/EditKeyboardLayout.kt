@@ -177,7 +177,7 @@ fun EditKeyboardLayout(
 
             SideButtonGrid(
                 items = listOf(
-                    "段首" to "home", "段尾" to "end",
+                    "段首" to "home", "段尾" to "end", "Tab" to "tab",
                     "删除" to "delete", "回车" to "enter"
                 ),
                 columns = if (isWide) 2 else 1,

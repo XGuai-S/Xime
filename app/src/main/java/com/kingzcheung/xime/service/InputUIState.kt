@@ -8,6 +8,12 @@ import com.kingzcheung.xime.plugin.core.api.PluginResultItem
 import com.kingzcheung.xime.viewmodel.SchemaSwitchUiState
 
 data class InputUIState(
+    /**
+     * 设置修订号：显示类设置（候选注释/字号/每页词数/编码位置/首候选入框）本身是
+     * 「每次重组现读 prefs」，但没有监听 → 键盘空闲时改设置看不到变化。
+     * 监听里自增这个值，让整棵键盘 UI 重组一次，顺带重读那些设置。
+     */
+    val settingsRevision: Int = 0,
     val isAsciiMode: Boolean = false,
     val schemaName: String = "",
     val currentSchemaId: String = "",

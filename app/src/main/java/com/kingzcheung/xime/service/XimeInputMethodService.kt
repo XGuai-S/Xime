@@ -234,6 +234,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal val deleteCoalesceLock = Any()
     internal var deleteJobActive = false
     internal var pendingDeleteCount = 0
+    /**
+     * 删除调度世代：输入框切换时自增。
+     * 排队中的退格 job 持有旧世代，执行前比对即整体作废，不再作用到新输入框。
+     */
+    @Volatile
+    internal var deleteGeneration = 0
 
     init {
         // 按键任务按入队顺序在 key-process 单线程上执行（天然 FIFO），主线程只负责
@@ -448,6 +454,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var deleteSessionActive = false
     private var deleteSessionBeforeText = ""
     private var deleteSessionBeforeCode = ""
+    /**
+     * 删除键左滑撤销槽：被整段回删的上屏内容，以及删除后光标前的文本（落点锚）。
+     *
+     * 右滑恢复前用锚校验光标没被别人动过，避免把旧内容插到错误位置；
+     * 换输入框时随 [resetDeleteStateForNewInputSession] 一起作废。
+     */
+    internal var swipeDeletedChunk: String? = null
+    internal var swipeDeletedAnchor: String? = null
+
     /** 累积的 partial commit 段列表（多段选词场景下逐段追加，文本+拼音同源，供调频/回滚） */
     internal val t9PartialSegments = mutableListOf<T9PartialSegment>()
     /**
@@ -669,16 +684,40 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private fun registerSharedPrefsListener() {
         val prefs = SettingsPreferences.getPrefsPublic(this)
         sharedPrefsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            when (key) {
-                "dark_mode", "keyboard_theme", "show_bottom_buttons", "keyboard_height_dp", "keyboard_bottom_padding_dp" -> {
+            when {
+                key == "dark_mode" || key == "keyboard_theme" || key == "show_bottom_buttons" ||
+                    // 工具栏按钮原来只在 loadDarkModePreference 里读一次、没有任何刷新入口，
+                    // 增删按钮后必须重建键盘才生效（用户 2026-11 排查）
+                    key == "toolbar_buttons" -> {
                     loadDarkModePreference()
                     applyWindowBackground()
                 }
-                "floating_mode", "floating_mode_landscape" -> {
+                // 键盘尺寸/底距/左右边距按「方向 × 悬浮」拆成多套键
+                // （keyboard_height_dp_landscape / _floating / _floating_landscape 等）。
+                // 原来只精确匹配基础键名，改横屏/悬浮那几套不会刷新，表现为「调了没反应」。
+                key != null && (
+                    key.startsWith("keyboard_height_dp") ||
+                        key.startsWith("keyboard_bottom_padding_dp") ||
+                        key.startsWith("keyboard_margin_start_dp") ||
+                        key.startsWith("keyboard_margin_end_dp")
+                    ) -> {
                     loadDarkModePreference()
                     applyWindowBackground()
                 }
-                "stt_enabled" -> {
+                key == "floating_mode" || key == "floating_mode_landscape" -> {
+                    loadDarkModePreference()
+                    applyWindowBackground()
+                }
+                // 显示类设置：候选栏每次重组都会现读 prefs，但没人触发重组。
+                // 自增修订号 → 键盘整体重组一次，设置立即见效（不必等下一次按键）。
+                key == "show_candidate_comments" || key == "candidate_text_size" ||
+                    key == "page_size" || key == "input_text_location" ||
+                    key == "candidate_first_in_input_box" -> {
+                    uiState.value = uiState.value.copy(
+                        settingsRevision = uiState.value.settingsRevision + 1,
+                    )
+                }
+                key == "stt_enabled" -> {
                     val sttEnabled = SettingsPreferences.isSttEnabled(this@XimeInputMethodService)
                     uiState.value = uiState.value.copy(isSttEnabled = sttEnabled)
                     // 关闭开关时结束进行中的语音会话
@@ -686,7 +725,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         endVoiceSession()
                     }
                 }
-                SettingsPreferences.KEY_STT_KEEP_ENGINE_ALIVE -> {
+                key == SettingsPreferences.KEY_STT_KEEP_ENGINE_ALIVE -> {
                     // 开启时立即预热模型常驻待命（走 AsrSupport.warmup 注册常驻后端）；
                     // 关闭时不主动销毁，:asr 服务端按同步到的设置恢复空闲回收，
                     // 且下一会话开始时 OfflineAsrBackend 会重新同步设置
@@ -694,13 +733,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         Thread { AsrBackendFactory.warmup(this@XimeInputMethodService) }.start()
                     }
                 }
-                SettingsPreferences.KEY_SMART_PREDICTION_ENABLED -> onPredictionSettingChanged()
-                SettingsPreferences.KEY_CLIPBOARD_SYNC_ENABLED -> updateClipboardSync()
-                SettingsPreferences.KEY_CLIPBOARD_SYNC_PLUGIN_ID -> {
+                key == SettingsPreferences.KEY_SMART_PREDICTION_ENABLED -> onPredictionSettingChanged()
+                key == SettingsPreferences.KEY_CLIPBOARD_SYNC_ENABLED -> updateClipboardSync()
+                key == SettingsPreferences.KEY_CLIPBOARD_SYNC_PLUGIN_ID -> {
                     stopClipboardSync()
                     updateClipboardSync()
                 }
-                SettingsPreferences.KEY_HARDWARE_KEYBOARD_DETECTION_ENABLED -> {
+                key == SettingsPreferences.KEY_HARDWARE_KEYBOARD_DETECTION_ENABLED -> {
                     hasHardwareKeyboard = SettingsPreferences.isHardwareKeyboardDetectionEnabled(this@XimeInputMethodService) &&
                         resources.configuration.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS
                     applyCompactMode()
@@ -886,6 +925,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 必须在任何异步操作之前同步加载键盘按键配置，
         // 否则 KeyboardLayout 组合时 swipeUp/swipeDown 配置可能尚未就绪，
         // 导致按键上的符号不显示、上滑/下滑手势不触发。
+        //
+        // 【实测结论：不要再来"优化"这一段】
+        // 本段 runBlocking 的实际阻塞时长实测仅 3~94ms（真机三次采样）：
+        // Application.onCreate 里的异步预热已让 loadConfig 命中 mtime 缓存，
+        // 在冷启动 1038ms 中只占 3~9%，不是瓶颈。
+        // 曾改成「后台线程解析 + 主线程限时等待 200ms」，实测冷启动无改善
+        // （1103/1121ms vs 1038ms，噪声内），故回滚为原实现（更简单）。
         runBlocking(Dispatchers.IO) {
             val t0 = System.nanoTime()
             KeysConfigHelper.loadConfig(this@XimeInputMethodService)
@@ -962,93 +1008,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 }
                 notifyDeploymentStatus(false, "")
 
-                applyInitialSchemaAfterInit()
-
-                // 恢复备份时若引擎未就绪，自造词快照只落了盘没合并：此处补做一次
-                // （librime 按时间戳合并，不会吃掉本机新词）。失败保留标记，下次引擎就绪再试。
-                if (SettingsPreferences.isPendingDictMerge(this@XimeInputMethodService)) {
-                    val merged = SyncManager.mergePendingSnapshots(this@XimeInputMethodService)
-                    FileLogger.i(
-                        TAG,
-                        "initRimeEngine: pending 自造词快照合并=${merged.getOrNull() ?: "失败"}"
-                    )
-                    if (merged.isSuccess) SettingsPreferences.setPendingDictMerge(this@XimeInputMethodService, false)
-                }
-
-                withContext(Dispatchers.Main) {
-                    val savedSchema = SettingsPreferences.getCurrentSchema(this@XimeInputMethodService)
-                    val availableSchemas = rimeEngine.getAvailableSchemas()
-                    val currentSchema = rimeEngine.getCurrentSchema()
-                    Log.d(TAG, "initRimeEngine: currentSchema=$currentSchema, savedSchema=$savedSchema, availableSchemas=${availableSchemas.joinToString()}")
-                    
-                    when {
-                        isHandwritingSchema(savedSchema) -> {
-                            // 手写方案：不要调 rimeEngine.switchSchema（Rime 没有手写引擎），
-                            // 也不要覆盖 savedSchema（由 onStartInput 恢复 UI）
-                            Log.d(TAG, "initRimeEngine: savedSchema is handwriting, keeping current Rime schema")
-                            // UI 布局恢复：冷启动时第一次 onStartInput 先于引擎初始化完成，
-                            // RimeEngine.isInitialized()=false 会跳过 handwriting UI 恢复，
-                            // 此处必须补切，否则第一次弹出键盘停留在默认全键盘
-                            val hwDir = com.kingzcheung.xime.model.ModelStorage.getModelDir(
-                                this@XimeInputMethodService, "ochwpro"
-                            )
-                            com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(
-                                this@XimeInputMethodService, "ochwpro"
-                            )
-                            val modelOk = java.io.File(hwDir, "ochwpro.onnx").exists() &&
-                                java.io.File(hwDir, "char_index.json").exists()
-                            if (modelOk) {
-                                val page = keyboardViewModel.page.value
-                                val alreadyHandwriting = page is com.kingzcheung.xime.keyboard.KeyboardPage.Main &&
-                                    page.type == com.kingzcheung.xime.keyboard.MainType.HANDWRITING
-                                if (!alreadyHandwriting) {
-                                    keyboardViewModel.switchMain(com.kingzcheung.xime.keyboard.MainType.HANDWRITING)
-                                }
-                                // 手写模型按"用键盘时加载"管理：不在此预载，
-                                // HandwritingKeyboardLayout 创建时（LaunchedEffect）负责加载
-                            } else {
-                                FileLogger.w(TAG, "initRimeEngine: handwriting model missing, keep full keyboard")
-                                android.widget.Toast.makeText(
-                                    this@XimeInputMethodService,
-                                    "请先下载手写模型",
-                                    android.widget.Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        }
-                        savedSchema in availableSchemas -> {
-                            // 即使 savedSchema == currentSchema 也要调用 switchSchema，
-                            // 因为 nativeCreateSession 后 schema 的 processor/translator 等
-                            // 可能未完全初始化，switchSchema 会触发完整的初始化流程
-                            Log.d(TAG, "initRimeEngine: Switching to saved schema: $savedSchema")
-                            schemaController.applyPageSizeSetting(savedSchema)
-                            rimeEngine.switchSchema(savedSchema)
-                        }
-                        SchemaManager.isSchemaCompiled(this@XimeInputMethodService, savedSchema) -> {
-                            Log.d(TAG, "initRimeEngine: Schema compiled but not in get_schema_list, switching anyway")
-                            schemaController.applyPageSizeSetting(savedSchema)
-                            rimeEngine.switchSchema(savedSchema)
-                        }
-                        availableSchemas.isNotEmpty() -> {
-                            // savedSchema 不可用且未编译，退而求其次用第一个可用方案
-                            val fallbackSchema = availableSchemas.first()
-                            Log.d(TAG, "initRimeEngine: savedSchema '$savedSchema' not available, falling back to '$fallbackSchema'")
-                            schemaController.applyPageSizeSetting(fallbackSchema)
-                            rimeEngine.switchSchema(fallbackSchema)
-                            SettingsPreferences.setCurrentSchema(this@XimeInputMethodService, fallbackSchema)
-                        }
-                    }
-                    
-                    sessionController.updateSchemaName()
-                    // onStartInput 在部署进行中会跳过 schema 切换与选项恢复，
-                    // 部署完成后这里补齐 UI 状态，保证键盘可用
-                    sessionController.restorePersistedSchemaOptions()
-                    updateUI()
-                    Log.d(TAG, "initRimeEngine: Rime engine initialized successfully")
-                    // 引擎可用后加载用户词库词集合，供组合生词查重（异步，失败静默）
-                    refreshSchemeDictWords(force = true)
-                    // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）
-                    cleanupAutoWordFromCustomPhrase()
-                }
+                // 必须在主线程执行：函数内部直接读写 viewModel / uiState（抽取时漏了这层，
+                // 原来紧跟着的那段内联 withContext(Main) 代码才是真正干活的地方，两者重复执行两遍）。
+                withContext(Dispatchers.Main) { applyInitialSchemaAfterInit() }
+                // 引擎可用后加载用户词库词集合，供组合生词查重（异步，失败静默）
+                refreshSchemeDictWords(force = true)
+                // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）
+                cleanupAutoWordFromCustomPhrase()
             } catch (e: Exception) {
                 FileLogger.e(TAG, "initRimeEngine: Failed to initialize Rime engine", e)
                 notifyDeploymentStatus(false, "初始化失败")
@@ -1224,10 +1190,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         schemaController.applyPageSizeSetting(savedSchema)
                         rimeEngine.switchSchema(savedSchema)
                     } else {
-                        // 即使 schema 相同也重新 switch 一下，确保 processor 完全初始化
-                        debugLog("onStartInput: Schema already matches, re-switching to init processors")
-                        schemaController.applyPageSizeSetting(savedSchema)
-                        rimeEngine.switchSchema(savedSchema)
+                        // schema 已匹配：不再重复 switchSchema。
+                        // 旧实现为了「确保 processor 完全初始化」每次都重切，但 switchSchema 会
+                        // 阻塞取 rimeLock，并在锁内写 custom.yaml —— 每个输入框的首帧都在等这把锁。
+                        // 引擎已加载该方案时 processors 本来就绪，重切是纯浪费。
+                        debugLog("onStartInput: Schema already matches, skip re-switch")
                     }
                     actualSchema = savedSchema
                 }
@@ -1278,9 +1245,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 纯数字输入框（号码/验证码等）自动进入数字面板，可由设置关闭
         val forceNumberPanel = EditorInfoClassifier.isNumberEditor(attribute) &&
             SettingsPreferences.isAutoNumberKeyboardEnabled(this)
-        debugLog(
-            "onStartInput: editor inputType=0x${Integer.toHexString(attribute?.inputType ?: 0)}, " +
-                "restricted=$editorRestricted, forceNumberPanel=$forceNumberPanel"
+        // 用 FileLogger（release 也写）：数字/电话框的 inputType 是排查
+        // 「手机号框进不了中文」「内容闪烁」的关键，debugLog 只在 debug 版可见。
+        FileLogger.i(
+            TAG,
+            "onStartInput: inputType=0x${Integer.toHexString(attribute?.inputType ?: 0)}" +
+                " cls=0x${Integer.toHexString((attribute?.inputType ?: 0) and android.text.InputType.TYPE_MASK_CLASS)}" +
+                " restricted=$editorRestricted forceNumberPanel=$forceNumberPanel" +
+                " autoNumKeyboard=${SettingsPreferences.isAutoNumberKeyboardEnabled(this)}",
         )
         keyboardViewModel.resetKeyboard(startAscii, schemaId, forceNumberPanel)
     } else {
@@ -1363,6 +1335,40 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             showClipboardCandidates(items)
         }
     }
+    }
+
+    /**
+     * 把验证码从候选栏撤下（键盘任意按键点击后调用，用户 2026-11 规则）。
+     *
+     * 只摘掉 [otpCodes] 里的文本，别的联想候选不动；主线程外的调用切主线程执行。
+     * 展示侧同时由 OtpCollector 挡住再注入（见 isOtpDisplayable），两处配合保证
+     * 「按过键就不再显示」。
+     */
+    internal fun dismissOtpCandidates(otpCodes: List<String>) {
+        if (otpCodes.isEmpty()) return
+        val apply = {
+            val cs = candidateState.value
+            val kept = cs.associationCandidates.filterNot { it in otpCodes }
+            if (kept.size != cs.associationCandidates.size) {
+                candidateState.value = cs.copy(associationCandidates = kept)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) apply() else mainHandler.post(apply)
+    }
+
+    /**
+     * 候选栏当前展示的剪贴板首条（未展示/无条目返回 null）。
+     *
+     * 供空格键上屏用：调用方必须在 [markShowingClipboardConsumed] **之前**取快照，
+     * 否则条目已被标记消费、候选栏被清空，空格就退化成插入空格字符。
+     */
+    internal fun firstVisibleClipboardItem(): com.kingzcheung.xime.clipboard.ClipboardItem? {
+        val items = recentClipboardItemsState.value
+        return if (shouldSpaceCommitClipboard(candidateState.value.isShowingRecentClipboard, items.size)) {
+            items.first()
+        } else {
+            null
+        }
     }
 
     /**
@@ -1917,6 +1923,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     override fun onCreateInputView(): View {
+        // 注意：**不要**在这里复用旧的 keyboardContainer。
+        // 实测（3.2.81）复用已 detach 的 Compose 容器会让输入法窗口显示失败——键盘直接弹不出来。
+        // 视图重建的「闪一下」只能从减少重建诱因（窗口/会话层）去压，不能靠复用一个死视图。
+        FileLogger.i(TAG, "onCreateInputView: build keyboard view")
         keyboardContainer = VoiceKeyboardContainer(
             context = this,
             uiStateProvider = { uiState.value },
@@ -2752,8 +2762,33 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     // ── 原有方法 ──
 
     
+    /** 上一次输入会话的编辑框指纹（包名|fieldId|inputType），识别"同一输入框重启"。 */
+    @Volatile
+    private var lastEditorSignature: String? = null
+
+    /** 上一次 onStartInput 的时刻，配合指纹判断快速重启（QQ 撤回/发送就这样刷）。 */
+    @Volatile
+    private var lastStartInputAtMs: Long = 0L
+
+    /** 同一编辑框快速重启的判定窗口。 */
+    private val SAME_EDITOR_RESTART_WINDOW_MS = 3000L
+
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        // QQ 撤回/发送消息时会把输入框重建一遍：系统给出的是 restarting=false 的"新会话"，
+        // 但实际还是同一个编辑框（同样的包名/fieldId/inputType，且间隔很短）。
+        // 这种重启不该换 sessionId、不该清候选栏——否则键盘会闪一下再弹出。
+        val nowMs = System.currentTimeMillis()
+        val editorSignature = attribute?.let { "${it.packageName}|${it.fieldId}|${it.inputType}" }
+        val sameEditorQuickRestart = editorSignature != null &&
+            editorSignature == lastEditorSignature &&
+            nowMs - lastStartInputAtMs in 0 until SAME_EDITOR_RESTART_WINDOW_MS
+        FileLogger.i(
+            TAG,
+            "onStartInput: sig=$editorSignature restarting=$restarting quickRestart=$sameEditorQuickRestart",
+        )
+        lastEditorSignature = editorSignature
+        lastStartInputAtMs = nowMs
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         loadDarkModePreference()
 
@@ -2770,6 +2805,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // （无 composing 时会在光标处插入空串，选中文字时等于删除选区）。
         if (!restarting) {
             inputBoxComposingActive = false
+            // 换输入框：删除会话/排队退格/撤回槽全部作废（见 resetDeleteStateForNewInputSession），
+            // 否则旧框内容会被撤回进新框、排队的退格会在新框上重放多删字。
+            resetDeleteStateForNewInputSession()
+            otpAutoFilledInCurrentSession = false
+        }
+        if (sameEditorQuickRestart) {
+            // 同一编辑框的快速重启：什么都不重建，直接返回（等价于一次无操作刷新）
+            return
         }
 
         predictionManager.clearCommittedText()
@@ -2784,20 +2827,34 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         restoreSchemaOnStartInput(restarting)
 
         uiState.value = uiState.value.copy(
-            inputSessionId = System.nanoTime(),
+            // restarting = 宿主对**同一个**输入框调 restartInput（QQ 发送/撤回消息、
+            // 部分 App 刷新输入框都会走这里）。此时若照常换 inputSessionId，
+            // KeyboardView 的 LaunchedEffect 会走一遍「新输入会话」重置
+            // （t9Controller.reset + InputSessionStarted 分发），表现为键盘闪一下再弹出。
+            inputSessionId = if (restarting || sameEditorQuickRestart) {
+                uiState.value.inputSessionId
+            } else {
+                System.nanoTime()
+            },
             isInputSessionRestarting = restarting,
             isSttEnabled = SettingsPreferences.isSttEnabled(this@XimeInputMethodService),
         )
 
         resetKeyboardOnStartInput(attribute, restarting)
+        // 键盘已在显示时切到另一个（验证码）输入框：onStartInputView 可能因 restarting 跳过，
+        // 这里补一次（内部有「框里已含该验证码则不填」防重）。
+        if (!restarting) maybeAutoFillOtp(attribute)
 
-        // 先重置候选状态到初始值，避免前一 session 的残留状态影响新输入
-        candidateState.value = CandidateState()
-
-        // 剪贴板候选：只建立监听，**不在每次进入输入框时自动展示历史剪贴板**。
-        // 用户明确要求：复制内容一旦在当前键盘状态展示过（或被消费），换应用不该再弹出来。
-        // 真正展示时机只剩「用户刚复制新内容」这一种，见 [startClipboardCandidatesCollection]。
-        startClipboardCandidatesCollection()
+        if (!restarting && !sameEditorQuickRestart) {
+            // 只有真正的输入会话切换才重建这些状态。
+            // restartInput（QQ 发送/撤回消息后宿主刷新输入框）如果也重建，候选栏会被
+            // 清空再被剪贴板候选写入，视觉上就是「闪一下」，且白付一次存储读取 + 监听重启。
+            candidateState.value = CandidateState()
+            // 剪贴板候选：只建立监听，**不在每次进入输入框时自动展示历史剪贴板**。
+            // 用户明确要求：复制内容一旦在当前键盘状态展示过（或被消费），换应用不该再弹出来。
+            // 真正展示时机只剩「用户刚复制新内容」这一种，见 [startClipboardCandidatesCollection]。
+            startClipboardCandidatesCollection()
+        }
 
         attribute?.let { updateEnterKeyText(it) }
     }
@@ -2806,12 +2863,90 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        FileLogger.i(TAG, "onStartInputView: restarting=$restarting")
         info?.let { updateEnterKeyText(it) }
+        // 验证码自动填充（方案 B 兜底）：MIUI 等国内 ROM 会过滤 SMS_RECEIVED 广播，
+        // 这里在键盘弹出时主动查一次最近短信。IO 线程执行，不阻塞键盘首帧。
         hasHardwareKeyboard = SettingsPreferences.isHardwareKeyboardDetectionEnabled(this) &&
             resources.configuration.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS
         applyCompactMode()
         applyWindowBackground()
         updateCursorUpdateMonitoring()
+        // 验证码自动填充：点进「验证码输入框」（数字类）时，把刚收到的验证码直接填入
+        maybeAutoFillOtp(info)
+    }
+
+    /**
+     * 验证码自动填充。
+     *
+     * 只在用户点进**数字类输入框**（验证码框的典型 inputType）时触发，且只填
+     * 5 分钟内收到的验证码（更早的短信验证码早已失效）；填完立即从待用列表移除，
+     * 重复进入同一框不会二次填入。
+     *
+     * 局限：这是**启发式**判断——只看 inputType 类别，无法确知该框语义，
+     * 因此「金额/数量」等纯数字框也可能被填。用 5 分钟时效 + 填后即移除来收缩误伤面。
+     */
+    /**
+     * 本次输入会话里是否已经自动填过验证码。
+     *
+     * `onStartInput` 与 `onStartInputView` 会各调一次 [maybeAutoFillOtp]（同一次聚焦），
+     * 原来只靠「输入框里已含该码」防重，而 `getExtractedText` 在 Compose/Flutter 等宿主
+     * 常返回 null，防重直接失效 → 字段里出现 `123456123456`。
+     * 现在用会话级标志只填一次；换输入框时复位，保留「换框后仍可自动填充」的原行为。
+     */
+    private var otpAutoFilledInCurrentSession = false
+
+    private fun maybeAutoFillOtp(info: EditorInfo?) {
+        if (info == null) return
+        if (otpAutoFilledInCurrentSession) return
+        if (!runCatching { SettingsPreferences.isOtpAutofillEnabled(this) }.getOrDefault(false)) return
+        // 「自动填充」独立开关：关掉后仍收集（候选栏/剪贴板照常），只是不往输入框填
+        if (!runCatching { SettingsPreferences.isOtpAutoFillEnabled(this) }.getOrDefault(true)) return
+        val cls = info.inputType and android.text.InputType.TYPE_MASK_CLASS
+        if (cls != android.text.InputType.TYPE_CLASS_NUMBER) return
+
+        // 密码框：数字密码变体不填
+        val variation = info.inputType and android.text.InputType.TYPE_MASK_VARIATION
+        if (variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD) return
+
+        // 金额/数量/坐标类：带「可为小数」或「可为负数」标志的数字框不是验证码框，不填。
+        // 验证码永远是纯正整数，这是区分金额框最可靠的特征。
+        val numberFlags = info.inputType and (
+            android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            )
+        if (numberFlags != 0) {
+            FileLogger.d(TAG, "auto-fill skipped: decimal/signed number field (amount-like)")
+            return
+        }
+        val otp = runCatching {
+            com.kingzcheung.xime.service.otp.OtpCollector.takeFresh()
+        }.getOrNull() ?: return
+
+        // 防重复：输入框里已经含这句验证码就不再填。
+        // （同一框反复进入、或 onStartInput 与 onStartInputView 双重触发时，
+        //   否则会变成 123456123456。）
+        val current = runCatching {
+            currentInputConnection
+                ?.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
+                ?.text?.toString().orEmpty()
+        }.getOrDefault("")
+        if (current.contains(otp)) {
+            FileLogger.d(TAG, "auto-fill skipped: field already contains otp")
+            return
+        }
+
+        FileLogger.i(TAG, "auto-fill otp into number field, len=${otp.length}")
+        runCatching { commitText(otp) }.onFailure {
+            FileLogger.w(TAG, "auto-fill otp commitText failed", it)
+            return
+        }
+        otpAutoFilledInCurrentSession = true
+        // **不 consume**：验证码保留到过期（OtpCollector.FRESH_WINDOW_MS）或被新码替换，
+        // 用户填错/删掉后 5 分钟内仍能再次自动填入。
+        runCatching {
+            android.widget.Toast.makeText(this, "已填入验证码", android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     /** 上次请求的 CURSOR_UPDATE 模式：未变化时不重复发 IPC。 */
@@ -3150,34 +3285,67 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         com.kingzcheung.xime.handwriting.HandwritingEngine.release()
     }
 
+    /**
+     * [onWindowHidden] 的延迟清理句柄。
+     *
+     * 宿主调 `restartInput()`（QQ 发送/撤回消息后刷新输入框）时，键盘窗口常会**短促**
+     * 隐藏再显示。若隐藏时就 `clearInputState()`，重显时要整套重建（面板/页面/候选全没了），
+     * 视觉上就是「闪一下再弹出」。这里延迟清理，窗口重新显示就取消。
+     */
+    private var windowHiddenCleanup: Runnable? = null
+
+    /**
+     * 短促隐藏的判定窗口：超过这个时长才认为是用户真的收起了键盘。
+     *
+     * 实测（QQ 撤回消息）：`onStartInputView` → `onWindowHidden` → 约 1.7s → 再
+     * `onStartInputView` + `onWindowShown`。600ms 挡不住，会把状态清掉再重建，
+     * 视觉上就是闪一下。取 3s 覆盖这种抖动；真正收起键盘 3s 后仍会清理。
+     */
+    private val WINDOW_HIDDEN_CLEANUP_DELAY_MS = 3000L
+
     override fun onWindowHidden() {
         super.onWindowHidden()
-        clearInputState()
-        recentClipboardItemsState.value = emptyList()
-        // 键盘隐藏时重置快捷发送表单临时态：表单开启状态下直接隐藏键盘（未走 onClose）
-        // 会把 showQuickSendForm 残留到下次弹窗，候选栏上方渲染出残留表单背景造成遮挡；
-        // 回车键文案也需一并还原（打开表单时被改为"确定"）。
-        if (uiState.value.showQuickSendForm || uiState.value.quickSendFormFocused) {
-            uiState.value = uiState.value.copy(
-                showQuickSendForm = false,
-                quickSendFormFocused = false,
-                quickSendCodeFocused = false,
-                quickSendEditingItemId = null,
-                quickSendEditingItemText = "",
-                quickSendEditingItemCode = "",
-                enterKeyText = "发送",
-            )
-            QuickSendFormEditTextHolder.editText = null
-            QuickSendFormCodeEditTextHolder.editText = null
+        FileLogger.i(TAG, "onWindowHidden: cleanup scheduled in ${WINDOW_HIDDEN_CLEANUP_DELAY_MS}ms")
+        windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
+        val cleanup = Runnable {
+            windowHiddenCleanup = null
+            FileLogger.i(TAG, "windowHidden cleanup: clearInputState")
+            clearInputState()
+            recentClipboardItemsState.value = emptyList()
+            // 键盘隐藏时重置快捷发送表单临时态：表单开启状态下直接隐藏键盘（未走 onClose）
+            // 会把 showQuickSendForm 残留到下次弹窗，候选栏上方渲染出残留表单背景造成遮挡；
+            // 回车键文案也需一并还原（打开表单时被改为"确定"）。
+            if (uiState.value.showQuickSendForm || uiState.value.quickSendFormFocused) {
+                uiState.value = uiState.value.copy(
+                    showQuickSendForm = false,
+                    quickSendFormFocused = false,
+                    quickSendCodeFocused = false,
+                    quickSendEditingItemId = null,
+                    quickSendEditingItemText = "",
+                    quickSendEditingItemCode = "",
+                    enterKeyText = "发送",
+                )
+                QuickSendFormEditTextHolder.editText = null
+                QuickSendFormCodeEditTextHolder.editText = null
+            }
         }
+        windowHiddenCleanup = cleanup
+        mainHandler.postDelayed(cleanup, WINDOW_HIDDEN_CLEANUP_DELAY_MS)
     }
 
     override fun onWindowShown() {
         super.onWindowShown()
-        // 键盘弹出时对比系统取色与缓存的动态主题色，壁纸取色变化则重建主题并热更新 UI。
-        // 每次弹出只做两次资源读取对比，取色未变时零成本。
-        KeyboardThemes.refreshDynamicSchemes(this)
-        clipboardSyncBridge?.pullOnce()
+        val cancelled = windowHiddenCleanup != null
+        windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
+        windowHiddenCleanup = null
+        FileLogger.i(TAG, "onWindowShown: cancelledPendingCleanup=$cancelled")
+        // 键盘刚显示的**这一帧**不要做取色对比与剪贴板同步 IPC：
+        // 两者都在主线程，会把首帧推后，表现为弹出时「闪一下」。
+        // 推到 decorView 的下一帧执行，效果不变（取色/同步都是异步生效的）。
+        window?.window?.decorView?.post {
+            KeyboardThemes.refreshDynamicSchemes(this)
+            clipboardSyncBridge?.pullOnce()
+        }
     }
     
     private fun clearInputState() {
@@ -3246,6 +3414,43 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     /**
+     * 「退格后显示编码」时间窗终点。
+     *
+     * 优化「首候选显示在输入框」这个功能：该功能让输入框显示**首候选汉字**，
+     * 好处是边打边预览将上屏的词，但**退格时**汉字整块换掉，用户看不到编码在
+     * 逐字减少，体感像"一下清空"。
+     *
+     * 这里在退格后的短暂窗口内改为显示**编码**，让逐字回退可见；
+     * 窗口结束自动恢复显示候选词（原功能不受影响）。
+     */
+    @Volatile
+    internal var forceCodeUntilMs = 0L
+
+    internal val FORCE_CODE_WINDOW_MS = 1500L
+
+    internal fun isForceCodeWindowActive(): Boolean =
+        System.currentTimeMillis() < forceCodeUntilMs
+
+    internal fun beginForceCodeWindow() {
+        forceCodeUntilMs = System.currentTimeMillis() + FORCE_CODE_WINDOW_MS
+    }
+
+    /**
+     * 提前结束「退格后显示编码」窗口。
+     *
+     * 用户 2026-11 要求：点一下删除键后输入框短暂显示编码（逐字回退可见）是对的，
+     * 但只要接着按下任意编码键，就应当立刻恢复「首候选词显示在输入框」——不能等
+     * 满 [FORCE_CODE_WINDOW_MS] 才切回去，否则继续打字时输入框里一直是裸露的编码。
+     */
+    internal fun endForceCodeWindow() {
+        forceCodeUntilMs = 0L
+    }
+
+    /** 只读：输入框 composing 区当前是否有我们写入的内容（删除路径判断用）。 */
+    internal val inputBoxComposingActiveForDelete: Boolean
+        get() = inputBoxComposingActive
+
+    /**
      * 清理输入框中的 composing 区域（未上屏的拼音编码 / 语音临时文本）。
      *
      * 无论输入位置设置（输入框/候选栏）都执行。
@@ -3254,14 +3459,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * （收起键盘/焦点切换误删选中文字的根因）。因此仅在标记过 composing 时才清空，
      * 否则只调用 finishComposingText（无 composing 时是无害空操作，仅兜底清理残留 span）。
      */
-    internal fun endComposingInputBox() {
+    internal fun endComposingInputBox(forceClear: Boolean = false) {
         currentInputConnection?.let {
-            if (inputBoxComposingActive) {
+            // forceClear：调用方确知刚写过 composing（如命令候选的标签），但标记可能不准
+            // （写入被容错吞掉 / 焦点变化抢先重置），此时强制清空，避免标签被
+            // finishComposingText 提交成普通文本残留在输入框。
+            if (forceClear || inputBoxComposingActive) {
                 it.setComposingText("", 0)
-                it.finishComposingText()
-            } else {
-                it.finishComposingText()
             }
+            it.finishComposingText()
         }
         inputBoxComposingActive = false
         lastInputBoxComposingText = null
@@ -3284,9 +3490,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 此类宿主直接不提供英文联想候选。
      */
     internal fun supportsEnglishCandidateReplace(): Boolean {
+        val session = uiState.value.inputSessionId
+        if (session == englishReplaceProbeSession) return englishReplaceProbeResult
+        // 无活动输入连接时不缓存：此时必然 false，会话恢复后应重新探测
         val ic = currentInputConnection ?: return false
-        return runCatching { ic.getTextBeforeCursor(1, 0) != null }.getOrDefault(false)
+        val supported = runCatching { ic.getTextBeforeCursor(1, 0) != null }
+            .getOrDefault(false)
+        englishReplaceProbeSession = session
+        englishReplaceProbeResult = supported
+        return supported
     }
+
+    /**
+     * [supportsEnglishCandidateReplace] 的会话级缓存（-1 = 尚未探测）。
+     *
+     * getTextBeforeCursor 是跨进程 IPC（0.1~1ms 级），而本方法被按键热路径调用 4 处
+     * （ImeKeyRouter.refreshAfterKey 每按键、1196 行、ImeSessionController 444 行等），
+     * 英文输入时几乎每按键一次。宿主能力在同一输入会话内不会变化，故按
+     * [InputUIState.inputSessionId] 缓存；切换输入框后 sessionId 更新即自动失效重探。
+     */
+    private var englishReplaceProbeSession: Long = -1L
+    private var englishReplaceProbeResult: Boolean = false
 
     override fun onDestroy() {
         super.onDestroy()
@@ -3509,6 +3733,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal val candidateTransform = CandidateTransformCoordinator(this)
 
     override fun commitText(text: String) {
+        // 上屏即作废「清空/删除撤回」槽：
+        // 否则「上滑清空 → 打字 → 单击删除 → 下滑撤回」会把很久以前清空的整段内容插回来
+        // （单击删除不再刷新撤回槽，旧槽会一直存活）。
+        lastClearedText = ""
+        lastUndoAnchorText = null
         commitTextAndPredict(text, isPaste = false)
     }
 
@@ -3955,6 +4184,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (isPaste || editorSecret) return
         if (isT9Schema(uiState.value.currentSchemaId)) return
         if (uiState.value.isAsciiMode) return
+        // 大写金额 / 计算器：候选栏展示的是程序生成的结果，和输入编码没有任何关系，
+        // 记进词频就是脏数据（用户实测：输入 ma 的候选里出现「肆元整」「伍元整」）。
+        val cs = candidateState.value
+        if (cs.capitalAmountAmount.isNotEmpty() || cs.capitalAmountExpression.isNotEmpty()) return
+        if (calculatorEngine.isActive()) return
         // 声明了 nofreq 的词典词条（表头 `# nofreq: true` / `#@/nofreq`，如个人词库
         // XGuai_user.dict.yaml）：不参与上屏词频统计（word_freq.txt/yaml 不收录），
         // 但仍走自动造词链（能正常学习/组合）。只在词频层面跳过。
@@ -3962,9 +4196,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 自动造词开关（xime.yaml auto_word.enabled）：关闭时不做任何收录/统计
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         if (!autoWordConfig.enabled) return
+        // 兜底编码只属于「刚被选中的那个候选」。
+        // 金额整串重写（commitTextSilently）、手写叠写、语音上屏这些**非候选**上屏如果
+        // 也借用它，就会把上一条候选的编码写到这些文本头上——实测污染过：
+        // ma → 肆元整 / 伍元整 / 曲、l → 国。这里要求「本次上屏的文本就是刚选中的候选词」
+        // 才允许用快照编码。
         val code = candidateState.value.inputText
             .ifEmpty { candidateState.value.preeditText }
-            .ifEmpty { lastSelectedCandidateCode.orEmpty() }
+            .ifEmpty {
+                if (lastSelectedCandidateWord == text) lastSelectedCandidateCode.orEmpty() else ""
+            }
         // 反查模式（` 引导符）上屏的字**不进词频、不造词**：
         // 反查是「按字找码」，上屏的字与 ` 后面的码没有任何输入法编码关系，
         // 记进词频会写入 `` `aaek `` / `` hc` `` 这类脏编码（历史已污染过 9 类条目），
@@ -4027,6 +4268,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 预览、或只上屏了词的一部分——都不算选中，不参与晋升计数。
         val selectedWord = lastSelectedCandidateWord
         lastSelectedCandidateWord = null
+        // 编码快照与词快照同生命周期：留着会在下一次「非候选上屏」时被误用。
+        lastSelectedCandidateCode = null
         val shownCandidates = candidateState.value.candidates
         val committedWholeWordFromCandidates =
             text in shownCandidates || (shownCandidates.isEmpty() && text == selectedWord)
@@ -4370,18 +4613,56 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *
      * 必须主线程调用：与 [saveWordData] / [recordWordFrequency] 同线程操作内存表。
      */
-    internal fun reconcileUserDataFiles() {
-        // 与 saveWordData / recordWordFrequency 互斥，见 wordTablesLock 注释。
+    internal fun reconcileUserDataFiles(): Boolean {
+        // 返回「是否检测到外部手改」：各 Store.reconcile 在文件没被改过时原样返回
+        // 传入的实例，因此引用比较即可判断，无需再算一遍 hash。
+        var changed = false
         wordTablesLock.lock()
         try {
-            candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
-            wordFreqTable = WordFreqStore.reconcile(this, wordFreqTable)
-            autoWordTemp = AutoWordStore.reconcileTemp(this, autoWordTemp)
-            autoWordFixed = AutoWordStore.reconcileFixed(this, autoWordFixed)
-            wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+            val newOrder = CandidateOrderStore.reconcile(this, candidateOrderTable)
+            if (newOrder !== candidateOrderTable) {
+                candidateOrderTable = newOrder
+                changed = true
+            }
+            val newFreq = WordFreqStore.reconcile(this, wordFreqTable)
+            if (newFreq !== wordFreqTable) {
+                wordFreqTable = newFreq
+                changed = true
+            }
+            val newTemp = AutoWordStore.reconcileTemp(this, autoWordTemp)
+            if (newTemp !== autoWordTemp) {
+                autoWordTemp = newTemp
+                changed = true
+            }
+            val newFixed = AutoWordStore.reconcileFixed(this, autoWordFixed)
+            if (newFixed !== autoWordFixed) {
+                autoWordFixed = newFixed
+                changed = true
+            }
+            val newBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
+            if (newBlacklist !== wordBlacklist) {
+                wordBlacklist = newBlacklist
+                changed = true
+            }
         } finally {
             wordTablesLock.unlock()
         }
+        if (changed) {
+            FileLogger.i(TAG, "reconcileUserDataFiles: detected external word-table edits")
+        }
+        return changed
+    }
+
+    /**
+     * 「重载」检测到词库手改后，把手改结果落盘并重新生成派生文件
+     * （`word_freq.dict.yaml` 等由 [WordFreqStore.save] 内部生成）。
+     *
+     * 为什么必须先做这一步：reconcile 只合并内存，磁盘上的 dict 还是旧的；紧接着的
+     * 增量部署按**文件时间戳**决定重编谁，读不到新内容就等于没编。必须主线程调用
+     * （与 [recordWordFrequency] 同线程，锁内串行）。
+     */
+    internal fun flushWordDataForReload() {
+        saveWordData()
     }
 
     /**
@@ -4431,6 +4712,32 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         deleteSessionActive = true
         deleteSessionBeforeText = before
         deleteSessionBeforeCode = if (isInputTextInInputBox()) "" else candidateState.value.inputText
+    }
+
+    /**
+     * 换输入框时作废全部删除簿记（用户 2026-11 修复）。
+     *
+     * 为什么**不结算**：结算走 [finishDeleteSession]，它用「新框光标前文本」与「旧框快照」
+     * 做前缀差；新框为空时 `DeleteUndo.removedPrefix(旧文本, "")` 会返回旧框**整段**内容，
+     * 等于把上一个框的文字记成本次删除——一次下滑撤回就会把它插进新框。
+     * 所以这里只作废（清会话、清撤回槽、丢弃排队退格、复位连按时间戳），不写撤回槽。
+     */
+    internal fun resetDeleteStateForNewInputSession() {
+        deleteGeneration++
+        deleteSessionActive = false
+        deleteSessionBeforeText = ""
+        deleteSessionBeforeCode = ""
+        // 撤回槽跨输入框没有意义：留着会被 anchorMatches(null, …) 放行，插到错误的位置
+        lastClearedText = ""
+        lastUndoAnchorText = null
+        // 左滑回删的撤销槽同理：换框后不允许再把旧内容恢复进新框
+        swipeDeletedChunk = null
+        swipeDeletedAnchor = null
+        synchronized(deleteCoalesceLock) {
+            pendingDeleteCount = 0
+            deleteJobActive = false
+        }
+        keyRouter.forgetDeleteContinuity()
     }
 
     /**

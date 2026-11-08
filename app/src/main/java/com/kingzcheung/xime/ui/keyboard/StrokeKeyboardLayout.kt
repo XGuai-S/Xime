@@ -592,9 +592,14 @@ private fun StrokeKeyboardContent(
                 swipeDownLabel = if (compactMode) null else "下滑撤回",
                 onSwipeUp = { onKeyPress("clear_all") },
                 onSwipeDown = { onKeyPress("undo_clear") },
+                // 与 26 键删除键一致：左滑回删上一次上屏、右滑恢复
                 onSwipeLeft = {
                     suppressCursorMove.value = true
-                    onKeyPress("clear_composition")
+                    onKeyPress("delete_last_commit")
+                },
+                onSwipeRight = {
+                    suppressCursorMove.value = true
+                    onKeyPress("restore_last_commit")
                 },
                 onSwipeStateChange = onSwipeStateChange,
                 shadowEnabled = shadowEnabled,

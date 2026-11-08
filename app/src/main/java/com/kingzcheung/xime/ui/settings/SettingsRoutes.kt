@@ -25,6 +25,7 @@ object SettingsRoutes {
     const val Correction = "correction"
     const val AutoWord = "auto_word"
     const val SpeechToText = "speech_to_text"
+    const val Otp = "otp"
     const val About = "about"
     const val Developer = "developer"
     const val StorageSpace = "storage_space"

@@ -77,6 +77,26 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
 
         refreshPendingEnglishAssociations(pendingEnglish)
 
+        // ── 验证码自动填充 ──────────────────────────────────────────────
+        // 空闲态（没有编码、非 T9）时，把后台收集到的短信验证码放进候选栏。
+        // 走联想通道（associationCandidates）：空闲态该列表通常为空，不会与真正联想冲突；
+        // 点击走 handleAssociationSelect → commitText，正是验证码上屏该做的事。
+        // 放在本函数最末尾，确保不被前面的逻辑覆盖。
+        // 不再排除 T9：T9 空闲时 inputText 同样为空，验证码应该照常进候选栏
+        if (inputText.isEmpty()) {
+            runCatching {
+                val otpList = com.kingzcheung.xime.service.otp.OtpCollector.displayList()
+                if (otpList.isNotEmpty()) {
+                    // 只替换联想通道内容，**不动** isShowingRecentClipboard：
+                    // 置 false 会让「候选栏显示的是剪贴板条目」和「空格该粘贴什么」两处判断打架，
+                    // 出现「看到剪贴板却上屏验证码」（用户 2026-11 反馈的同类错位）。
+                    service.candidateState.value = service.candidateState.value.copy(
+                        associationCandidates = otpList,
+                    )
+                }
+            }
+        }
+
         if (!service.uiState.value.toolPanelInputFocused) {
             syncInputBoxComposition(codeInInputBox, shown.text, shown.candidates, shown.isComposing)
         }
@@ -144,16 +164,92 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         displayCandidates: List<String>,
         isComposing: Boolean,
     ) {
+        // 删除窗口（退格保护窗）：保留窗口只为两件事——
+        //   1. 窗口内不 early return（否则输入框什么都不写，宿主看到 composing 区 stale
+        //      → 表现为"一下没了"）；
+        //   2. 没有候选可写时用编码兜底、且绝不走 endComposingInputBox 把输入框整段清掉。
+        // **不再**改变显示内容：用户 2026-11 要求删除全过程输入框都显示首码候选，
+        // 所以「首候选显示在输入框」开启时，窗口内同样写候选词（见下面的 candidate）。
+        val inWindow = service.isForceCodeWindowActive()
         val candidateFirst = SettingsPreferences.showCandidateFirstInInputBox(service)
-        if (!codeInInputBox && !candidateFirst) return
+        if (!codeInInputBox && !inWindow && !candidateFirst) return
+
+        // 数字类/电话类/日期类输入框**不支持 composing text**：宿主对 setComposingText
+        // 要么直接拒绝，要么立刻清除，导致「输入框内容反复闪」；有的还会把编码当普通文本提交。
+        // 这类框一律不写 composing，编码/候选只在候选栏显示。
+        // 复用已有分类器：数字 / 电话 / 日期时间（且非密码）三类不支持 composing text。
+        if (EditorInfoClassifier.isNumberEditor(service.currentInputEditorInfo)) {
+            service.endComposingInputBox()
+            return
+        }
+        // **命令类**组合键候选（如 oiz →「重新部署」）只属于候选栏，不是可上屏内容。
+        // 绝不写进输入框：命令项的 label 一旦进了 composing 区，点选执行命令后就变成
+        // 普通文本残留（真机表现「有的输入框留下"重新部署"字样」）。
+        // 注意这里只判断 isCommand：文本类组合键（orq 日期 / omt 明天 / onl 农历 / ojq 节气）
+        // 仍按原逻辑走首候选写入，行为不变。
+        val firstAction = service.candidateState.value.candidateActions.firstOrNull()
+        if (firstAction?.isCommand == true) {
+            service.endComposingInputBox()
+            return
+        }
+        // ★ 退格窗口内也**优先写候选词**（用户 2026-11 要求：删除全过程输入框显示首码候选），
+        //   仍然绝不因为 text=null 就走 endComposing——那条链会把输入框里那段文字
+        //   一次性清掉（历史真机问题："一下清空"）。没有候选时才用编码兜底。
+
         val candidates = service.candidateState.value.candidates.ifEmpty { displayCandidates }
         val candidate = candidates.firstOrNull().orEmpty()
             .takeIf { candidateFirst && isComposing && it.isNotEmpty() }
         // 首候选词优先；无候选时用编码兜底，保证输入框始终有内容
         val text = candidate ?: displayText.takeIf { isComposing && it.isNotEmpty() }
         if (text == null) {
+            if (inWindow) {
+                // ★ 窗口内 text=null：
+                //   引擎还有编码 → 写编码（保持可见逐字退）
+                //   引擎已空 → **只清一次**：若上次已 finish 过（lastInputBoxComposingText
+                //   已是 null），本次**什么都不做**——重复 setComposingText("")+finish
+                //   会把宿主 composing 区再删一遍，表现为"多删一个字"。
+                val engineCode = service.rimeEngine.getInput()
+                    .ifEmpty { service.candidateState.value.inputText }
+                if (engineCode.isNotEmpty()) {
+                    val ic = service.currentInputConnection
+                    if (ic != null) {
+                        ic.beginBatchEdit()
+                        try {
+                            FileLogger.dLazy("ImeSessionController") { "[BOX] window, engine has='$engineCode'" }
+                            ic.setComposingText(engineCode, 1)
+                            service.markInputBoxComposing()
+                            service.lastInputBoxComposingText = engineCode
+                            service.lastInputBoxComposingCaret = 1
+                        } finally { ic.endBatchEdit() }
+                    }
+                    return
+                }
+                // 引擎空了：
+                if (service.lastInputBoxComposingText == null) {
+                    // 已经 finish 过了：什么都不做（重复清 = 多删一个字）
+                    FileLogger.d("ImeSessionController", "[BOX] window, already cleared, skip")
+                    return
+                }
+                val ic = service.currentInputConnection
+                if (ic != null) {
+                    ic.beginBatchEdit()
+                    try {
+                        FileLogger.d("ImeSessionController", "[BOX] window, engine empty -> finish once")
+                        ic.setComposingText("", 1)
+                        ic.finishComposingText()
+                    } finally { ic.endBatchEdit() }
+                    service.lastInputBoxComposingText = null
+                    service.lastInputBoxComposingCaret = Int.MIN_VALUE
+                }
+                return
+            }
+            FileLogger.d("ImeSessionController", "[BOX] text=null -> endComposingInputBox")
             service.endComposingInputBox()
             return
+        }
+        FileLogger.dLazy("ImeSessionController") {
+            "[BOX] write textLen=${text.length} candidateFirst=$candidateFirst" +
+                " inWindow=$inWindow isComposing=$isComposing"
         }
         // 候选词不是可编辑编码，光标固定在末尾；编码沿用编辑光标
         showInputBoxComposition(
@@ -352,6 +448,15 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
                 hasPrevPage = false,
                 preeditCaretPos = -1,
             )
+            // 仅当本次组合键包含**命令项**（如 oiz → 重新部署）时才清空输入框：
+            // 命令的 label 不是可上屏内容，留在 composing 区会在执行命令后变成残留文本。
+            // 文本类组合键（orq 日期 等）保持原有行为——不在此清空，交给后续 syncInputBoxComposition
+            // 按「首候选进输入框」的既有规则处理。
+            if (evaluated.any { (_, action) -> action.isCommand }) {
+                service.mainHandler.post {
+                    runCatching { service.endComposingInputBox(forceClear = true) }
+                }
+            }
             return
         }
         // 候选重排（纯引擎路径）：两级优先级，都不涉及 rime 编译。

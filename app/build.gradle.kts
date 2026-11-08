@@ -64,6 +64,15 @@ val localAbi: String? = Properties().run {
     getProperty("xime.abi")?.trim()?.takeIf { it.isNotEmpty() }
 }
 
+// arm64 主机构建开关：NDK 官方不提供 arm64 Linux 版工具链，本机无法编译 native。
+// local.properties 里写 xime.skipNative=true 时跳过 CMake，直接打包 src/main/jniLibs 下
+// 已有的预编译 .so（arm64-v8a）。CI / x86-64 环境不设该属性，行为与上游一致。
+val skipNative: Boolean = Properties().run {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) load(file.inputStream())
+    getProperty("xime.skipNative")?.trim()?.equals("true", ignoreCase = true) == true
+}
+
 android {
     namespace = "com.kingzcheung.xime"
     compileSdk = 37
@@ -80,8 +89,8 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261146
-        versionName = "3.2.61"
+        versionCode = 20261189
+        versionName = "3.3.4"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -119,6 +128,16 @@ android {
     }
 
     buildTypes {
+        // 调试版也用 release 签名：包名相同，只有签名一致才能「覆盖安装」，
+        // 从而保留已有数据与系统授权（通知使用权 / 自启动 appops）。
+        // 否则 debug 签名与 release 不同，必须卸载重装 → 授权全丢。
+        debug {
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -153,11 +172,13 @@ android {
         aidl = true
     }
 
-    // NDK 构建配置
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/jni/CMakeLists.txt")
-            version = "3.22.1"
+    // NDK 构建配置（本机 arm64 无法编译 native 时由 xime.skipNative 关闭，改用 jniLibs 预编译 .so）
+    if (!skipNative) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/jni/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 
@@ -294,6 +315,10 @@ dependencies {
 
     // Kaml for YAML parsing
     implementation(libs.kaml)
+
+    // Baseline Profile 安装器：安装时把 baseline-prof.txt 交给 ART，
+    // 使 src/main/baseline-prof.txt 里的启动/热路径类提前 AOT 编译。
+    implementation(libs.androidx.profileinstaller)
 
     // Autofill inline suggestions (API 30+)
     implementation(libs.androidx.autofill)

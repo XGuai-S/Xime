@@ -20,6 +20,9 @@ coil = "2.7.0"
 coroutines = "1.11.0"
 kaml = "0.104.0"
 exp4j = "0.4.8"
+# Baseline Profile 安装器：把打包进 APK 的 baseline-prof.txt 在安装时交给 ART，
+# 让启动热路径代码在首次运行前就 AOT 编译，减少冷启动的解释执行/JIT 开销。
+profileinstaller = "1.4.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -63,6 +66,7 @@ coil = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 kaml = { group = "com.charleskorn.kaml", name = "kaml", version.ref = "kaml" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version = "1.11.0" }
 exp4j = { group = "net.objecthunter", name = "exp4j", version.ref = "exp4j" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
 onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntimeAndroid" }
 androidx-autofill = { module = "androidx.autofill:autofill", version = "1.3.0" }
 androidx-room3-runtime = { module = "androidx.room3:room3-runtime", version.ref = "room" }

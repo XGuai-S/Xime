@@ -42,6 +42,9 @@ internal val SUPPORTED_COMMAND_NAMES: Set<String> = setOf(
     "shift_caps",
     "emoji",
     "symbol",
+    // 删除键左滑：整段回删上一次上屏的内容；右滑：恢复刚被左滑删掉的那段
+    "delete_last_commit",
+    "restore_last_commit",
 )
 
 /**

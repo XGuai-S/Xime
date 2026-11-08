@@ -1096,17 +1096,41 @@ fun KeyboardView(
                             is KeyboardLayoutState.T9Pinyin -> t9OnKeyPress
                             is KeyboardLayoutState.Symbol -> symbolOnKeyPress
                         }
+                        // 上面这几个 lambda 每次重组都会新建实例。它们直接作为
+                        // KeyboardLayoutScreen 的参数一路传到 KeyboardLayout，参数不稳定 ⇒
+                        // 打字时整棵键盘树（几十个键）每帧都得重组。
+                        // 这里包一层「实例恒定、转发到最新实现」的 lambda：
+                        // 行为不变（永远调到当前那一版），但参数在打字期间保持相等，
+                        // Compose 可以跳过键盘区的重组。
+                        val latestOnKeyPress by rememberUpdatedState(currentOnKeyPress)
+                        val stableOnKeyPress: (String) -> Unit = remember { { key -> latestOnKeyPress(key) } }
                         CompositionLocalProvider(
                             LocalSuppressCursorMove provides suppressCursorMove,
                             LocalCursorGestureActive provides cursorGestureActive,
                         ) {
+                            // T9 需要整个 uiState：用实例恒定的 provider，只在 T9 分支求值
+                            // （全键盘分支不调用 → 不订阅 uiState → 键盘区可被跳过重组）。
+                            // 必须经 rememberUpdatedState 转发：直接捕获 state 会锁死首次的值
+                            val latestStateForT9 by rememberUpdatedState(state)
+                            val t9UiStateProvider: () -> KeyboardUiState = remember { { latestStateForT9 } }
                             KeyboardLayoutScreen(
                                 keyboardState = keyboardState,
-                                uiState = state,
+                                themeId = state.themeId,
+                                isDarkTheme = state.isDarkTheme,
+                                isAsciiMode = state.isAsciiMode,
+                                schemaName = state.schemaName,
+                                enterKeyText = state.enterKeyText,
+                                isSttEnabled = state.isSttEnabled,
+                                isVoiceMode = state.isVoiceMode,
+                                isVoiceSticky = state.voiceSticky,
+                                isFloatingMode = state.isFloatingMode,
+                                swipeCancelEpoch = state.swipeCancelEpoch,
+                                capitalAmountExitSignal = state.capitalAmountExitSignal,
+                                t9UiState = t9UiStateProvider,
                                 candidateState = candidateState,
                                 viewModel = viewModel,
                                 callbacks = callbacks,
-                                onKeyPress = currentOnKeyPress,
+                                onKeyPress = stableOnKeyPress,
                                 modifier = Modifier.weight(1f).then(cursorMod),
                                 isHandwritingLookup = isHandwritingLookup,
                                 onHandwritingCandidates = { candidates ->
@@ -1324,7 +1348,6 @@ fun KeyboardView(
                         },
                         viewModel = viewModel,
                         callbacks = callbacks,
-                        uiState = state,
                         isAsciiMode = state.isAsciiMode,
                         keyBackgroundColor = keyBgColor,
                         keyTextColor = keyTextColor,

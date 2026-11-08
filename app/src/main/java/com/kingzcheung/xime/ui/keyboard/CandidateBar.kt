@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -180,11 +181,26 @@ fun CandidateBar(
         0.15f
     )
     val iconButtonTint = MaterialTheme.colorScheme.onSurfaceVariant
-    val showComments = SettingsPreferences.showCandidateComments(context)
+    // 显示类设置：原来每次重组读 4 次 SharedPreferences（候选栏在编码态几乎每键重组）。
+    // 改成 state + 监听，正常重组零读盘；设置页改了立刻生效。
+    var candidateDisplaySettings by remember {
+        mutableStateOf(loadCandidateDisplaySettings(context))
+    }
+    DisposableEffect(context) {
+        val prefs = SettingsPreferences.getPrefsPublic(context)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || key in CANDIDATE_DISPLAY_PREF_KEYS) {
+                candidateDisplaySettings = loadCandidateDisplaySettings(context)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    val showComments = candidateDisplaySettings.showComments
     // 编码已经在输入框里时不再重复画气泡；反之（编码显示在候选栏，或「候选首词」占用输入框、
     // 编码让位）必须靠候选栏气泡显示，否则编码两处都看不到。
-    val codeInInputBox = SettingsPreferences.isCodeInInputBox(context)
-    val candidateTextSize = SettingsPreferences.getCandidateTextSize(context)
+    val codeInInputBox = candidateDisplaySettings.codeInInputBox
+    val candidateTextSize = candidateDisplaySettings.candidateTextSize
     val candidateFontFamily = AppFonts.candidateFontFamily
     val commentFontFamily = AppFonts.commentFontFamily
 
@@ -214,7 +230,7 @@ fun CandidateBar(
     // 叠加 canScrollForward 判断（见分支内注释）
     val candidateListState = rememberLazyListState()
     // 每页候选词数（UI 读取设置）：候选栏横排展示数量跟随设置，不再硬编码 20。
-    val pageSize = SettingsPreferences.getPageSize(context).coerceAtLeast(1)
+    val pageSize = candidateDisplaySettings.pageSize.coerceAtLeast(1)
 
     val displayCandidates: List<String>
     val displayAssociation: List<String>
@@ -1053,3 +1069,33 @@ private fun Modifier.drawPreeditBubble(
     }
 }
 
+/**
+ * 候选栏读取的显示类设置快照。
+ *
+ * 这些值原来在组合期直接调 `SettingsPreferences.getXxx`（每次都是 SharedPreferences 读盘），
+ * 而候选栏在编码态几乎每按一个键就重组一次。改为快照 + prefs 监听后，
+ * 只有设置真正变化时才重新读取。
+ */
+private data class CandidateDisplaySettings(
+    val showComments: Boolean,
+    val codeInInputBox: Boolean,
+    val candidateTextSize: Int,
+    val pageSize: Int,
+)
+
+/** 影响 [CandidateDisplaySettings] 的 prefs key（设置变化时刷新快照）。 */
+private val CANDIDATE_DISPLAY_PREF_KEYS = setOf(
+    "show_candidate_comments",
+    "input_text_location",
+    "candidate_first_in_input_box",
+    "candidate_text_size",
+    "page_size",
+)
+
+private fun loadCandidateDisplaySettings(context: android.content.Context): CandidateDisplaySettings =
+    CandidateDisplaySettings(
+        showComments = SettingsPreferences.showCandidateComments(context),
+        codeInInputBox = SettingsPreferences.isCodeInInputBox(context),
+        candidateTextSize = SettingsPreferences.getCandidateTextSize(context),
+        pageSize = SettingsPreferences.getPageSize(context),
+    )

@@ -357,9 +357,16 @@ class CapitalAmountDisplayTest {
             source("KeyboardViewModel.kt").contains("val source: com.kingzcheung.xime.service.InputUIState,"),
         )
         assertTrue("KeyboardView 未传信号", keyboardView.contains("capitalAmountExitSignal = state.capitalAmountExitSignal,"))
+        // 3.3.3 起 KeyboardLayoutScreen 不再整包接收 uiState（参数最小化，避免每次击键
+        // 重组整棵键盘树），信号改为同名参数直传 → 断言「收下参数」+「原样传下去」两段。
+        val layoutScreen = source("KeyboardLayoutScreen.kt")
         assertTrue(
-            "KeyboardLayoutScreen 未传信号",
-            source("KeyboardLayoutScreen.kt").contains("capitalAmountExitSignal = uiState.capitalAmountExitSignal,"),
+            "KeyboardLayoutScreen 未接收退出信号",
+            layoutScreen.contains("capitalAmountExitSignal: Long,"),
+        )
+        assertTrue(
+            "KeyboardLayoutScreen 未把信号传下去",
+            layoutScreen.contains("capitalAmountExitSignal = capitalAmountExitSignal,"),
         )
     }
 

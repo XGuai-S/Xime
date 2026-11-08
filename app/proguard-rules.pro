@@ -33,9 +33,12 @@
 
 -processkotlinnullchecks remove
 
-# ── 打包提速：降低 R8 优化强度 ──
-# 实测（arm64 proot，8Gen3，本机 load 基线约 4）：R8 优化阶段占整个打包约 80%
-# （minifyReleaseWithR8 ≈4 分钟 / 总 4m43s）。
-# 取舍：完全 -dontoptimize 可把整体降到 2m16s，但 APK 从 25.7MB 膨胀到 34.8MB（+35%），
-# 代价过大。改用「只跑 1 轮优化 + 保留通用优化集」，在体积与速度间取得平衡。
+# ── R8 优化强度（实测结论：保持 1 轮）──
+# 上游为「打包提速」只用 1 轮（原作者实测 R8 占打包约 80%，8Gen3 上约 4 分钟）。
+# 本机做过对照实验（-optimizationpasses 1 → 3，强制 --no-build-cache --no-configuration-cache 重跑）：
+#   dex 9805756 字节 / APK 32044623 字节 —— 与 1 轮**完全一致（字节级）**，
+#   而 R8+打包耗时从约 2 分钟涨到 4m14s。
+# 原因：本项目已 -dontobfuscate + -optimizations !class/merging/* + R8 full mode，
+#   优化在第一轮即到达不动点，增加轮数不再产生任何变化。
+# 结论：不要调高轮数，纯亏时间。保持 1 轮。
 -optimizationpasses 1

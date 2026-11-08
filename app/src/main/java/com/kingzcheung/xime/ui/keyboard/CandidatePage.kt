@@ -233,8 +233,12 @@ fun CandidatePage(
             scrollScope.launch { listState.animateScrollBy(direction.toFloat() * viewport) }
         }
     }
-    // 候选内容变化（新输入/切过滤/删词）回到顶部（列表实例每次重组都新建，用哈希做键）
-    LaunchedEffect(state.candidateRows.hashCode()) {
+    // 候选内容变化（新输入/切过滤/删词）回到顶部。
+    // 用 O(1) 指纹（行数 + 首行首个候选的全局索引）代替 hashCode()：
+    // 后者要在组合期遍历整份候选列表，展开态每敲一个键都要重算一遍。
+    val contentKey = state.candidateRows.size to
+        (state.candidateRows.firstOrNull()?.firstOrNull()?.globalIndex ?: -1)
+    LaunchedEffect(contentKey) {
         listState.scrollToItem(0)
     }
     // 硬件键盘 DPAD 上/下的翻页联动

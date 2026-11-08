@@ -115,11 +115,15 @@ class KeyboardBehaviorContractTest {
         // 无候选且非编码态时必须保持原 shift 行为，否则大小写切换一直失效；
         // 编码态（编码打不出来时候选数为 0）则必须转 esc，否则清不了已敲的编码。
         val layout = source("KeyboardLayout.kt")
+        // 判定已上移到 KeyboardLayoutScreen（3.2.98 参数最小化）：键盘区在打字期间会被
+        // Compose 跳过重组，若仍在 KeyboardLayout 内直接 callbacks.candidateCount()
+        // （普通函数调用、不订阅任何 State），候选出现时 shift 就不会转 esc。
+        val screen = source("KeyboardLayoutScreen.kt")
         assertTrue(
-            "hasCandidates 应由候选数量或编码态推导",
-            layout.contains(
-                "val hasCandidates = shouldShiftShowEsc(callbacks.candidateCount(), callbacks.isComposing())"
-            ),
+            "hasCandidates 应由候选数量或编码态推导（且数量取自 candidateState 这个 State）",
+            screen.contains("val hasCandidates = shouldShiftShowEsc(") &&
+                screen.contains("candidateState.value.candidates.size") &&
+                screen.contains("callbacks.isComposing()"),
         )
         assertTrue(
             "缺少 shouldShiftShowEsc 纯函数（判定逻辑无法单测）",

@@ -29,6 +29,15 @@ object SettingsPreferences {
     /** 纠错模型影子模式（只记录"会怎么改"，不改行为，默认关闭）。 */
 
     private const val KEY_CORRECTOR_ENABLED = "corrector_enabled"
+
+    /** 验证码自动填充开关（通知收集 → 候选栏 + 剪贴板），默认**关闭**。 */
+    private const val KEY_OTP_AUTOFILL = "otp_autofill_enabled"
+
+    /** 一次性迁移标记：把旧版本的默认开启状态纠正为默认关闭。 */
+    private const val KEY_OTP_MIGRATED = "otp_autofill_migrated_optin"
+
+    /** 自动填充开关：**独立于收集**。关了它仍会收集（候选栏/剪贴板照常）。 */
+    private const val KEY_OTP_AUTO_FILL = "otp_auto_fill_enabled"
     
     private const val KEY_SOUND_ENABLED = "sound_enabled"
     /** 按键按压气泡开关（键帽上方弹出的按键预览）。默认开，与历史行为一致。 */
@@ -130,6 +139,9 @@ object SettingsPreferences {
     private const val KEY_COMPACT_MODE = "compact_mode"
     private const val KEY_SHOW_CANDIDATE_COMMENTS = "show_candidate_comments"
     private const val KEY_CANDIDATE_FIRST_IN_INPUT_BOX = "candidate_first_in_input_box"
+
+    /** 长按按键直接上屏角标（长按气泡第一项），不再弹气泡滑动选择。 */
+    private const val KEY_LONG_PRESS_DIRECT_COMMIT = "long_press_direct_commit"
     private const val KEY_INPUT_TEXT_LOCATION = "input_text_location"
     private const val KEY_PAGE_SIZE = "page_size"
     private const val KEY_CANDIDATE_TEXT_SIZE = "candidate_text_size"
@@ -166,6 +178,23 @@ object SettingsPreferences {
 
     fun setShowCandidateFirstInInputBox(context: Context, show: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_CANDIDATE_FIRST_IN_INPUT_BOX, show).apply()
+    }
+
+    /**
+     * 长按按键是否「直接上屏角标」：开启时长按直接上屏键面原有的角标字符，
+     * 不再弹长按气泡；关闭则恢复原来的气泡滑动选择。默认开启。
+     *
+     * 键盘侧请读 [LongPressDirectCommitState.enabled]（Compose 可观察），
+     * 否则设置页切换后要等键盘重建才生效。
+     */
+    fun isLongPressDirectCommit(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_LONG_PRESS_DIRECT_COMMIT, true)
+    }
+
+    fun setLongPressDirectCommit(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_LONG_PRESS_DIRECT_COMMIT, enabled).apply()
+        // 同步镜像：键盘常驻不重建，只改 SharedPreferences 的话键位仍按旧值走
+        LongPressDirectCommitState.enabled.value = enabled
     }
 
     /**
@@ -373,6 +402,48 @@ object SettingsPreferences {
 
     fun setKeyTapLogEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_KEY_TAP_LOG, enabled).apply()
+    }
+
+    /**
+     * 验证码自动填充：从通知栏收集验证码 → 候选栏 + 剪贴板。
+     *
+     * 默认**关闭**：该功能依赖「通知使用权」（可读所有通知，属高敏感权限），
+     * 必须由用户显式授权并手动开启，不做默认开启。
+     */
+    fun isOtpAutofillEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_OTP_AUTOFILL, false)
+    }
+
+    /**
+     * 一次性迁移标记：v3.2.61 起「验证码自动填充」由默认开启改为**默认关闭**
+     * （依赖高敏感的通知使用权）。旧版本可能已在 prefs 里留下 true，
+     * 启动时纠正一次并置位，避免出现「开关是开着的、但用户从没授权过」。
+     */
+    fun migrateOtpAutofillToOptInOnce(context: Context) {
+        if (getPrefs(context).getBoolean(KEY_OTP_MIGRATED, false)) return
+        getPrefs(context).edit()
+            .putBoolean(KEY_OTP_AUTOFILL, false)
+            .putBoolean(KEY_OTP_MIGRATED, true)
+            .apply()
+        com.kingzcheung.xime.service.otp.OtpCollector.enabled = false
+    }
+
+    /**
+     * 「自动填充」是否开启（点进数字框自动填入）。**与收集开关独立**：
+     * 关闭后仍会收集验证码到候选栏与剪贴板，只是不再自动往输入框填。默认开启。
+     */
+    fun isOtpAutoFillEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_OTP_AUTO_FILL, true)
+    }
+
+    fun setOtpAutoFillEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_OTP_AUTO_FILL, enabled).apply()
+    }
+
+    fun setOtpAutofillEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_OTP_AUTOFILL, enabled).apply()
+        com.kingzcheung.xime.service.otp.OtpCollector.enabled = enabled
+        if (!enabled) com.kingzcheung.xime.service.otp.OtpCollector.clear()
     }
 
     /** 智能纠错（相邻键纠错候选，默认关闭）。 */
@@ -1102,4 +1173,27 @@ object SettingsPreferences {
             .remove(KEY_APPLIED_LAYOUT_FILES)
             .apply()
     }
+}
+
+/**
+ * 长按「直接上屏角标」开关的可观察镜像。
+ *
+ * 键盘是常驻进程、输入法视图不会因为设置页开关变化而重建；若按键只在组合时
+ * `remember` 读一次 SharedPreferences，用户关掉开关后长按仍会走上屏角标。
+ * 这里用一个 Compose 状态做单一真源：设置页写入时同步更新，按键读它即自动重组。
+ */
+object LongPressDirectCommitState {
+
+    /** 当前是否启用（Compose 可观察）。 */
+    val enabled = androidx.compose.runtime.mutableStateOf(false)
+
+    private var initialized = false
+
+    /** 首次读取时用持久化值初始化；之后以 [enabled] 为准。 */
+    fun ensureInitialized(context: android.content.Context) {
+        if (initialized) return
+        initialized = true
+        enabled.value = SettingsPreferences.isLongPressDirectCommit(context)
+    }
+
 }

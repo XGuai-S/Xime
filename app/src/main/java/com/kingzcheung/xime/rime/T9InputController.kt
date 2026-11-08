@@ -106,10 +106,18 @@ class T9InputController(
         // 这条约束原本只写在注释里（"必须且只会被非主线程调用"），靠人工保证不可靠：
         // 一旦将来有人从 Compose/主线程调到 onRightCandidateSelected，runBlocking 会
         // 直接卡死 UI 且极难定位。这里在 debug 构建下把约束变成可执行的断言。
-        if (BuildConfig.DEBUG && Looper.myLooper() == Looper.getMainLooper()) {
-            throw IllegalStateException(
-                "awaitT9Queue() 被主线程调用：runBlocking 会阻塞 UI 并可能与 Main 派发死锁",
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (BuildConfig.DEBUG) {
+                throw IllegalStateException(
+                    "awaitT9Queue() 被主线程调用：runBlocking 会阻塞 UI 并可能与 Main 派发死锁",
+                )
+            }
+            // release：绝不能阻塞主线程（宁可读到稍旧的缓冲状态，也不能 ANR）
+            FileLogger.e(
+                "T9InputController",
+                "awaitT9Queue() 被主线程调用，已跳过等待以避免 ANR（需修复调用方）",
             )
+            return
         }
         lastT9Job?.let { runBlocking { it.join() } }
     }

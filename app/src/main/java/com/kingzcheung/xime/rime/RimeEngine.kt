@@ -311,14 +311,15 @@ class RimeEngine {
         if (nativeHasSession() && getAvailableSchemas().isNotEmpty()) return true
 
         // 等待编译完成（不持有 rimeLock，避免阻塞主线程 UI 操作）
+        // 轮询粒度 100ms：原来是 1000ms，部署刚结束时会白等最多 1 秒才创建 session。
         var waited = 0L
         while (nativeIsMaintaining() && waited < timeoutMs) {
             try {
-                Thread.sleep(1000)
+                Thread.sleep(100)
             } catch (_: InterruptedException) {
                 return false
             }
-            waited += 1000
+            waited += 100
         }
 
         locked {
@@ -331,11 +332,11 @@ class RimeEngine {
                     return true
                 }
                 try {
-                    Thread.sleep(1000)
+                    Thread.sleep(100)
                 } catch (_: InterruptedException) {
                     return false
                 }
-                waited += 1000
+                waited += 100
             }
             FileLogger.w(TAG, "ensureSession: schemas not available after ${timeoutMs}ms, deployment may still be running")
             return false
@@ -679,12 +680,14 @@ class RimeEngine {
 
     fun setOption(option: String, value: Boolean) {
         if (!nativeHasSession()) return
-        nativeSetOption(option, value)
+        // 与 processKey/setInput 等共用 rimeLock：native 侧会话状态不是线程安全的，
+        // 原来这两个完全不过锁，与按键处理并发时可能读到半更新的选项。
+        locked { nativeSetOption(option, value) }
     }
 
     fun getOption(option: String): Boolean {
         if (!nativeHasSession()) return false
-        return nativeGetOption(option)
+        return locked { nativeGetOption(option) }
     }
 
     fun setPageSize(schemaId: String, pageSize: Int) {

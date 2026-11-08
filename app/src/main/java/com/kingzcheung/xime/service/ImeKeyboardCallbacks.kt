@@ -40,11 +40,13 @@ internal fun rememberImeKeyboardCallbacks(
                 service.keyRouter.handleKeyPress(key, isShifted)
             },
             onKeyPressDown = { key ->
-                // 删除键按下：开一次删除会话快照（下滑撤回删除用），必须在首次退格
-                // 派发之前（同一主线程回调内同步完成），否则首个被删字符漏记。
+                // 删除键按下**不再**在这里开删除会话（下滑撤回删除的记账）：
+                // 会话要跨进程读一次光标前文本，单击一次就为撤回读屏不划算——
+                // 用户 2026-11 要求只优化点击态。改由 ImeKeyRouter.handleKeyPress 在
+                // 检测到连按/长按（间隔 ≤ DELETE_CONTINUOUS_WINDOW_MS）时才开账；
+                // 代价：连删的第一个字不进撤回账（详见 DeleteTapPolicy）。
                 // 会话结算见 XimeInputMethodService.finishDeleteSession：由撤回请求或
                 // 其它按键触发，不在抬手上结算（抬手时退格 job 可能还在队列里没落盘）。
-                if (key == "delete") service.beginDeleteSession()
                 service.feedbackManager.performKeyPressDownEffect(key, view)
             },
             onKeyRelease = { key ->
@@ -169,6 +171,9 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
         }
         if (index >= 0 && index < adjustedCandidates.size) {
             val text = adjustedCandidates[index]
+            // 若这一项是待用验证码（短信自动填充），上屏后从待用列表移除，
+            // 避免候选栏一直挂着已经填过的验证码。非验证码文本 consume 是空操作。
+            runCatching { com.kingzcheung.xime.service.otp.OtpCollector.consume(text) }
             val pendingEnglish = cs.pendingEnglishText
             if (pendingEnglish.isNotEmpty()) {
                 // 英文直接上屏模式：编码已逐字落盘，选中候选词时需回删屏上编码再提交候选词。

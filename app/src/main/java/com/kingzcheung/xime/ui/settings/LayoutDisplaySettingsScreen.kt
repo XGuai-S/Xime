@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.kingzcheung.xime.settings.LongPressDirectCommitState
 import com.kingzcheung.xime.settings.SettingsPreferences
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -261,6 +262,36 @@ fun LayoutDisplaySettingsContent(
                             onCheckedChange = { enabled ->
                                 candidateFirstInInputBox = enabled
                                 SettingsPreferences.setShowCandidateFirstInInputBox(context, enabled)
+                            }
+                        )
+                    }
+
+                    // 长按直接上屏角标（用户 2026-11）：关掉则恢复长按气泡滑动选择。
+                    // 与键盘共用 LongPressDirectCommitState，拨动开关键盘立即生效，不必重启键盘。
+                    LongPressDirectCommitState.ensureInitialized(context)
+                    val longPressDirectCommit = LongPressDirectCommitState.enabled.value
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "长按直接上屏角标",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "长按按键直接上屏键面上原有的角标字符（右上角标注的那个字），不再弹气泡滑动选择。没有角标的键保持原行为。关闭则恢复长按气泡。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = longPressDirectCommit,
+                            onCheckedChange = { enabled ->
+                                SettingsPreferences.setLongPressDirectCommit(context, enabled)
                             }
                         )
                     }
