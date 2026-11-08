@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -46,26 +47,20 @@ internal fun crispShadowColor(backgroundColor: Color): Color {
  * 同样的绘制参数与分支。
  */
 @Composable
+@Suppress("UNUSED_PARAMETER")
 internal fun rememberCrispShadowModifier(
     backgroundColor: Color,
     shadowEnabled: Boolean,
     shadowElevation: Dp,
     shadowShapeRadius: Dp,
 ): Modifier {
-    val density = LocalDensity.current
-    return remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    // 3.3.10 起按键阴影不再绘制（用户 2026-11-09 决定：「假阴影删掉」）。
+    //
+    // 实测这是绘制长尾的主因：30 个键每帧各提交一条圆角 path，
+    // 关掉后中文键盘整帧 p90 16.24 → 9.70ms、p95 21.18 → 11.48ms、
+    // 掉帧（超一个 vsync）8% → 1%，而布局/测量耗时不变（0.05ms）。
+    //
+    // 函数签名与 keyboard.shadow.* 配置项保留：调用点有 5 处，留着以后
+    // 换位图化实现（9-patch 缓存）时可直接接回去，不用改调用方。
+    return Modifier
 }
