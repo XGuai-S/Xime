@@ -80,11 +80,15 @@ class ControlRowKeyWidthTest {
     }
 
     @Test
-    fun `英文键盘控制行第四键 earth 靠内置默认取到侧键宽度`() {
-        // qwerty_en 的控制行是 [mode_change, comma, space, earth, enter]，earth 不写 width，
-        // 必须由 functionKeyWidth 兜底为 1.1；否则该键会与左右邻键不等宽，比例就破了。
+    fun `英文键盘控制行第四键 earth 与中文 period 同宽`() {
+        // qwerty_en 的控制行是 [mode_change, comma, space, earth, enter]，对应中文的 period 位置。
+        // 3.3.8 之前 earth 不写 width，落到 functionKeyWidth 的内置默认 1.1，
+        // 而中文 period 显式 0.9 —— 结果是英文控制行总权重 6.3、中文 6.1，
+        // 整行 5 个键都跟着变，earth 自己还比 period 宽 22%，切中英时第四行看着就"变大了"。
+        // 现在显式写 0.9，两边总权重都是 6.1，逐键完全对齐。
         val keys = section(realYaml(), "qwerty_en")
-        assertNull("earth 应靠内置默认而不是显式 width", keys["earth"]?.width)
+        assertWidth(0.9f, keys["earth"]?.width)
+        assertWidth(0.9f, section(realYaml(), "qwerty")["period"]?.width)
         val source = RepoFiles.file("src/main/java/com/kingzcheung/xime/ui/keyboard/KeyboardLayout.kt")
             .readText()
         val body = source.substringAfter("private fun functionKeyWidth(").substringBefore("\n}")

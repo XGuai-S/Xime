@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * 第二项手势需求的内置配置核验：
  * - 空格键左右滑移动文本光标（新增）
- * - 删除键左滑快速删除文本（历史已有，此处回归钉住，防止被误删）
+ * - 删除键左滑整段回删上一次上屏、右滑恢复（3.3.7 起，此前被误改回 repeat_delete）
  */
 class SpaceAndDeleteSwipeGestureConfigTest {
 
@@ -42,8 +42,9 @@ class SpaceAndDeleteSwipeGestureConfigTest {
     }
 
     @Test
-    fun `删除键左滑为按住快速删除`() {
+    fun `删除键左滑整段回删右滑恢复`() {
         val delete = section("qwerty")["delete"] ?: error("qwerty 缺少 delete")
-        assertEquals(GestureAction.REPEAT_DELETE, delete.swipeLeft?.action)
+        assertEquals(GestureAction.DELETE_LAST_COMMIT, delete.swipeLeft?.action)
+        assertEquals(GestureAction.RESTORE_LAST_COMMIT, delete.swipeRight?.action)
     }
 }

@@ -42,6 +42,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -538,8 +543,21 @@ fun CandidateBar(
                 }
             }
 
+            // 候选栏「出现」时淡入 80ms：只在无候选 → 有候选时触发；
+            // 已有候选之间切换不参与动画，避免连续打字每按一键就闪一下。
+            val candidatesVisible = displayCandidates.isNotEmpty() ||
+                displayImages.isNotEmpty() || displayAssociation.isNotEmpty()
+            val candidatesAlpha by animateFloatAsState(
+                targetValue = if (candidatesVisible) 1f else 0f,
+                animationSpec = tween(durationMillis = 80, easing = LinearOutSlowInEasing),
+                label = "candidatesAlpha",
+            )
             LazyRow(
-                modifier = if (state is CandidateBarState.Idle) Modifier else Modifier.weight(1f),
+                modifier = if (state is CandidateBarState.Idle) {
+                    Modifier
+                } else {
+                    Modifier.weight(1f).graphicsLayer { alpha = candidatesAlpha }
+                },
                 state = candidateListState,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 // 图片候选芯片比文字候选高：居中对齐，避免同排文字候选被顶到上沿

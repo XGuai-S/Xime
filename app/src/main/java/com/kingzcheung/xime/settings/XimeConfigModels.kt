@@ -410,7 +410,7 @@ data class AutoWordConfig(
     val enabled: Boolean = true,
     /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 7。 */
     @SerialName("promote_days")
-    val promoteDays: Int = 7,
+    val promoteDays: Int = 3,
     /** 窗口内需达到的上屏次数。默认 2。 */
     @SerialName("promote_count")
     val promoteCount: Int = 1,

@@ -863,8 +863,22 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 读取可用方案列表。
+     *
+     * ⚠️ 必须持 [rimeLock]：`nativeGetAvailableSchemas` → `RimeGetSchemaList` 会在
+     * C++ 侧构造 `rime::Schema` 对象，内部不是线程安全的。并发调用（例如设置页
+     * `selectSchema` 与键盘 `applyInitialSchemaAfterInit` 同时进来），或与部署/维护
+     * 并发时，会在 `__dynamic_cast` 上 SIGSEGV 直接杀进程——这是内核信号，上层
+     * try/catch 拦不住（真机 tombstone_04/05/06 正是这条栈）。
+     *
+     * 拿不到锁（部署/维护持锁中）返回空数组：调用方都按「无可用方案」处理
+     * （`applyInitialSchemaAfterInit` 的四个分支都不会误切方案），下一次
+     * onStartInput 会重新读取，因此无需在 UI 线程阻塞等待最长 30s+ 的编译。
+     */
     fun getAvailableSchemas(): Array<String> {
-        return nativeGetAvailableSchemas() ?: emptyArray()
+        if (!isInitialized) return emptyArray()
+        return tryLocked(emptyArray<String>()) { nativeGetAvailableSchemas() ?: emptyArray() }
     }
 
     /** 读取方案配置字符串项（librime 解析，含 custom.yaml patch 合并后的最终值）。 */

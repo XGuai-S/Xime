@@ -848,7 +848,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
                 }
                 val blacklistTable = WordBlacklistStore.load(this@XimeInputMethodService)
-                // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 7 天）
+                // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 3 天）
                 // 没再上屏的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
                 val prunedTemp = AutoWordStore.prune(
                     tempTable,
@@ -3306,6 +3306,22 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     override fun onWindowHidden() {
         super.onWindowHidden()
         FileLogger.i(TAG, "onWindowHidden: cleanup scheduled in ${WINDOW_HIDDEN_CLEANUP_DELAY_MS}ms")
+        // 收起键盘立即清空候选栏：不等 3 秒延迟清理，否则下次弹出的一瞬间
+        // 仍会看到上一次的候选/编码残留。只清显示层与 native 组合态；
+        // 面板、语音等重状态仍交给下面的延迟清理，宿主 restartInput 造成的
+        // 短促隐藏重显时不会整屏重建（保留 3.2.80 修过的「闪一下」）。
+        candidateState.value = candidateState.value.copy(
+            candidates = emptyList(),
+            candidateComments = emptyList(),
+            associationCandidates = emptyList(),
+            pendingEnglishText = "",
+            hasNextPage = false,
+            hasPrevPage = false,
+            candidateActions = emptyList(),
+            inputText = "",
+            isComposing = false,
+        )
+        rimeEngine.clearComposition()
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         val cleanup = Runnable {
             windowHiddenCleanup = null

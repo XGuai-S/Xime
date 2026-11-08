@@ -20,6 +20,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -204,6 +209,31 @@ internal fun Modifier.keySemantics(
     onClick { tap(); true }
 }
 
+/**
+ * 按键按下 / 抬起的缩放反馈（3.3.9 手感优化）。
+ *
+ * 只走 graphicsLayer：缩放不进入布局与测量，未按下时无动画开销；
+ * 按下 45ms 收到 0.96，抬起用高刚度弹簧回弹。打字时的「扎实感」
+ * 主要来自这 40~80ms 的过渡，而不是每帧少画几毫秒。
+ */
+@Composable
+internal fun Modifier.keyPressScale(pressed: Boolean): Modifier {
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = if (pressed) {
+            tween(durationMillis = 45, easing = LinearOutSlowInEasing)
+        } else {
+            spring(dampingRatio = 0.62f, stiffness = 900f)
+        },
+        label = "keyPressScale",
+    )
+    return this.graphicsLayer {
+        scaleX = scale
+        scaleY = scale
+    }
+}
+
+
 @Composable
 fun KeyButton(
     text: String,
@@ -269,6 +299,7 @@ fun KeyButton(
             modifier = modifier
                 .fillMaxHeight()
                 .fillMaxWidth()
+                .keyPressScale(isPressed)
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = {
@@ -601,6 +632,7 @@ fun SwipeableKeyButton(
         modifier = modifier
             .fillMaxHeight()
             .fillMaxWidth()
+            .keyPressScale(isPressed)
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = {
@@ -1197,6 +1229,7 @@ fun IconKeyButton(
         modifier = modifier
             .fillMaxHeight()
             .fillMaxWidth()
+            .keyPressScale(isPressed)
             .pointerInput(Unit) {
                 detectTolerantTapGestures(
                     onPress = {
@@ -1372,6 +1405,7 @@ fun SwipeableIconKeyButton(
         modifier = modifier
             .fillMaxHeight()
             .fillMaxWidth()
+            .keyPressScale(isPressed)
             .pointerInput(Unit) {
                 // 容差点击：不因指针漂出键格（isOutOfBounds）而取消，见 detectTolerantTapGestures
                 detectTolerantTapGestures(

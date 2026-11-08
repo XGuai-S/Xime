@@ -11,7 +11,8 @@ import org.junit.Test
  *
  * 这四项都属于「不报错、不崩，只在真机上才看得出来」的行为：
  * 1. 大写金额模式负数结果必须带「负」，否则会当成正数错钱；
- * 2. 中英键盘删除键左滑要能按住连删且幅度越大越快（图标键此前显式关闭重复）；
+ * 2. 中英键盘删除键左滑整段回删上一次上屏内容、右滑恢复（3.3.7 恢复 3.2.72 语义，
+ *    左滑不再绑按住快删——快删由长按承担）；
  * 3. 第三行第一个键（shift）有候选或处于编码态时要变 esc 并能清空候选/编码；
  * 4. 换行键上滑要重复输出上一次上屏内容。
  *
@@ -33,12 +34,16 @@ class KeyboardBehaviorContractTest {
     // ── 2. 中英键盘删除键左滑按住连删 ──
 
     @Test
-    fun `中英键盘删除键左滑均为按住快速删除`() {
+    fun `中英键盘删除键左滑整段回删右滑恢复`() {
         for (layout in listOf("qwerty", "qwerty_en")) {
             val delete = section(layout)["delete"] ?: error("$layout 缺少 delete")
             assertEquals(
-                "$layout 删除键左滑应为按住快速删除",
-                GestureAction.REPEAT_DELETE, delete.swipeLeft?.action,
+                "$layout 删除键左滑应为整段回删上一次上屏",
+                GestureAction.DELETE_LAST_COMMIT, delete.swipeLeft?.action,
+            )
+            assertEquals(
+                "$layout 删除键右滑应为恢复被回删内容",
+                GestureAction.RESTORE_LAST_COMMIT, delete.swipeRight?.action,
             )
         }
     }

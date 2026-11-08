@@ -12,8 +12,8 @@ import java.io.File
  * 临时词库与固定词库的词都会在输入对应编码时**直接合并进候选栏**（不经 rime、
  * 不占用快捷短语 custom_phrase.txt），被用户选中上屏即计数；
  * 同一词被选中满 1 次晋升到**固定词库**（[FIXED_FILE_NAME]）。
- * 超过 7 天没再被选中的词在 [prune] / [promote] 中淘汰，不会无限堆积；
- * 临时词库文件**不限大小**（不设条数/字节上限），体积完全靠 7 天过期控制——
+ * 超过 3 天没再被选中的词在 [prune] / [promote] 中淘汰，不会无限堆积；
+ * 临时词库文件**不限大小**（不设条数/字节上限），体积完全靠 3 天过期控制——
  * 既不担心文件撑爆，也不会出现满额后新词学不进来的问题。
  *
  * ## 与 [WordFreqStore] 的分工
@@ -40,8 +40,8 @@ internal object AutoWordStore {
     /** 固定词库文件名（与 xime.yaml 同级）。 */
     internal const val FIXED_FILE_NAME = "auto_word.txt"
 
-    /** 晋升考察窗口 / 临时词库过期窗口：7 天。窗口内未满晋升条件即删除。 */
-    internal const val PROMOTE_WINDOW_DAYS = 7
+    /** 晋升考察窗口 / 临时词库过期窗口：3 天。窗口内未满晋升条件即删除。 */
+    internal const val PROMOTE_WINDOW_DAYS = 3
 
     /** 窗口内需达到的上屏次数。 */
     internal const val PROMOTE_MIN_COUNT = 1
@@ -59,7 +59,7 @@ internal object AutoWordStore {
     internal const val COMBO_MAX_CHARS = 4
 
     private const val TEMP_HEADER =
-        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 1 次晋升固定词库；超过 7 天没再被选中则删除）"
+        "# 临时词库：词\t编码\t首次上屏时间\t被选中次数\t最后上屏时间（被选中满 1 次晋升固定词库；超过 3 天没再被选中则删除）"
 
     private const val FIXED_HEADER = "# 固定词库：词\t编码\t权重（由临时词库晋升，输入时合并进候选栏出候选）"
 
@@ -272,7 +272,7 @@ internal object AutoWordStore {
         // （上屏历史镜像），但造词库只学「≥2 字可组合的词」——单字方案里本身就能打，
         // 学进造词库只会污染候选（合并时固定库权重会把它顶到前面）。
         if (code.isEmpty() || !isLearnedWord(word)) return temp
-        // 临时词库**不限大小**：不设条数/编码/字节上限（体积由 7 天过期窗口控制），
+        // 临时词库**不限大小**：不设条数/编码/字节上限（体积由 3 天过期窗口控制），
         // 任何词都能学进来——以前组合生词把 4096 个编码额度占满后新词被拒收的问题不再存在。
         val codeWords = temp[code]
         val existing = codeWords?.get(word)
@@ -364,7 +364,7 @@ internal object AutoWordStore {
      * - 最近 [windowDays] 天内上屏满 [minCount] 次的词 → 移入固定词库（权重按次数换算）；
      * - 超过 [windowDays] 天没再上屏的词 → 从临时库淘汰。
      *
-     * 早先版本晋升从**首次**上屏算起，导致「首次上屏后 7 天内没攒够次数」的词
+     * 早先版本晋升从**首次**上屏算起，导致「首次上屏后 3 天内没攒够次数」的词
      * 永远无法晋升（windowPassed 恒真），实测 5 万条临时词库 0 条晋升。
      * 改为按 lastSeen 判定后，常用词只要最近仍在使用就能晋升。
      *

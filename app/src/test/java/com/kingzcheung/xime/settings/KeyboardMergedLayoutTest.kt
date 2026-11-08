@@ -326,24 +326,28 @@ class KeyboardMergedLayoutTest {
     }
 
     @Test
-    fun `删除键左滑为按住快速删除且动作已注册`() {
-        // 左滑标为 repeat_delete 后，按键在按住期间按实时滑动幅度决定删除速度；
-        // 右滑保留 clear_composition 命令（只清编码，不删已上屏内容）。
+    fun `删除键左滑整段回删右滑恢复且动作已注册`() {
+        // 左滑绑 delete_last_commit（整段回删上一次上屏），右滑绑 restore_last_commit，
+        // 两者都在 KeyActionRegistry 注册过，缺一处就会静默失效。
         val keys = KeysConfigHelper.parseKeyboardYamlSection(ximeYamlText(), "qwerty")
             ?: error("xime.yaml 缺少 delete 配置")
         assertEquals(
-            "delete.swipe_left 应为 repeat_delete",
-            GestureAction.REPEAT_DELETE,
+            "delete.swipe_left 应为 delete_last_commit",
+            GestureAction.DELETE_LAST_COMMIT,
             keys["delete"]?.swipeLeft?.action,
         )
         assertEquals(
-            "delete.swipe_right 应保留 clear_composition 命令",
-            "clear_composition",
-            keys["delete"]?.swipeRight?.value,
+            "delete.swipe_right 应为 restore_last_commit",
+            GestureAction.RESTORE_LAST_COMMIT,
+            keys["delete"]?.swipeRight?.action,
         )
         assertTrue(
-            "repeat_delete 必须已注册到动作表",
-            KeyActionRegistry.fromId("repeat_delete") != null,
+            "delete_last_commit 必须已注册到动作表",
+            KeyActionRegistry.fromId("delete_last_commit") != null,
+        )
+        assertTrue(
+            "restore_last_commit 必须已注册到动作表",
+            KeyActionRegistry.fromId("restore_last_commit") != null,
         )
     }
 
