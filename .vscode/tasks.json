@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "assembleDebug",
+			"type": "shell",
+			"command": "./gradlew assembleDebug --quiet",
+			"problemMatcher": [
+				"$kotlinc"
+			],
+			"group": "build"
+		}
+	]
+}

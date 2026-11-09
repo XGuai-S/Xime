@@ -1,0 +1,131 @@
+name: Build and Test APK
+
+on:
+  push:
+    branches:
+      - main
+      - dev*
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+        
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+          cache-dependency-path: |
+            gradle/libs.versions.toml
+            **/*.gradle*
+            **/gradle-wrapper.properties
+          
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+        
+      - name: Install NDK and SDK platform
+        run: |
+          sdkmanager "ndk;29.0.14206865" "platforms;android-37.2"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+        
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          
+      - name: Cache native deps
+        uses: actions/cache@v6
+        with:
+          path: |
+            app/src/main/jni/onnxruntime
+            app/src/main/jniLibs/**/libonnxruntime.so
+          key: native-${{ runner.os }}-${{ hashFiles('app/build-logic/tasks-native.gradle.kts') }}
+          restore-keys: |
+            native-${{ runner.os }}-
+
+      - name: Download native deps (ONNX Runtime)
+        run: ./gradlew downloadOnnx --no-daemon --refresh-dependencies
+        
+      - name: Cache CMake build
+        uses: actions/cache@v6
+        with:
+          path: |
+            app/.cxx
+            app/src/main/jni/boost
+            app/src/main/jni/boost-*.tar.xz
+          key: cmake-${{ runner.os }}-${{ hashFiles('app/src/main/jni/CMakeLists.txt') }}
+          restore-keys: |
+            cmake-${{ runner.os }}-
+            
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Set up Rust (xime-plugin CLI)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/xime-plugin/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('tools/xime-plugin/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build Plugins (TS → JS)
+        run: |
+          cd tools/xime-plugin
+          cargo run --quiet -- build --all --plugins-dir ../../plugins --out ../../build/plugin-js
+          cargo run --quiet -- build test-fixture --out ../../build/plugin-js
+
+      - name: Run Unit Tests
+        run: ./gradlew :app:testDebugUnitTest :plugin-core:testDebugUnitTest --no-daemon
+        
+      - name: Generate Test Report
+        if: always()
+        uses: mikepenz/action-junit-report@v6
+        with:
+          report_paths: '**/build/test-results/testDebugUnitTest/*.xml'
+          fail_on_failure: true
+          
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results
+          path: app/build/test-results/testDebugUnitTest/
+          retention-days: 7
+          
+      - name: Build Debug APKs
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Build Plugin XIPKs
+        run: bash scripts/build-plugins.sh
+
+      - name: Upload Debug APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-apks
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            build/plugin-release/*.xipk
+          retention-days: 7

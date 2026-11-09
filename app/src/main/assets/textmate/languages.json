@@ -1,0 +1,9 @@
+{
+  "languages": [
+    {
+      "grammar": "textmate/yaml/syntaxes/yaml.tmLanguage.json",
+      "name": "yaml",
+      "scopeName": "source.yaml"
+    }
+  ]
+}

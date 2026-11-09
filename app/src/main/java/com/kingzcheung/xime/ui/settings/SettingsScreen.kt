@@ -1,0 +1,354 @@
+package com.kingzcheung.xime.ui.settings
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+
+@Composable
+fun SettingsScreen(
+    initialRoute: String? = null,
+    initialPluginId: String? = null,
+    onThemeChanged: () -> Unit = {},
+    onWizardBack: () -> Unit = {}
+) {
+    val navController = rememberNavController()
+    val startDestination = if (initialRoute == "manage_dict") SettingsRoutes.Dictionary
+    else if (initialRoute == "schema") SettingsRoutes.Schema
+    else if (initialRoute == "plugins") SettingsRoutes.Plugins
+    else SettingsRoutes.Main
+
+    LaunchedEffect(initialPluginId) {
+        if (initialPluginId != null) {
+            navController.navigate("plugin_market_detail/$initialPluginId")
+        }
+    }
+    
+    NavHost(
+        navController = navController,
+        startDestination = startDestination
+    ) {
+        composable(SettingsRoutes.Main) {
+            SettingsMainContent(
+                onNavigateToSchema = { navController.navigate(SettingsRoutes.Schema) },
+                onNavigateToMarket = { navController.navigate(SettingsRoutes.Market) },
+                onNavigateToTheme = { navController.navigate(SettingsRoutes.Theme) },
+                onNavigateToKeyEffect = { navController.navigate(SettingsRoutes.KeyEffect) },
+                onNavigateToLayoutDisplay = { navController.navigate(SettingsRoutes.LayoutDisplay) },
+                onNavigateToDictionary = { navController.navigate(SettingsRoutes.Dictionary) },
+                onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
+                onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
+                onNavigateToSmartPrediction = { navController.navigate(SettingsRoutes.SmartPrediction) },
+                onNavigateToCorrection = { navController.navigate(SettingsRoutes.Correction) },
+                onNavigateToAutoWord = { navController.navigate(SettingsRoutes.AutoWord) },
+                onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
+                onNavigateToOtp = { navController.navigate(SettingsRoutes.Otp) },
+                onNavigateToAbout = { navController.navigate(SettingsRoutes.About) },
+                onNavigateToClipboard = { navController.navigate(SettingsRoutes.Clipboard) },
+                onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) },
+                onNavigateToLogSettings = { navController.navigate(SettingsRoutes.LogSettings) }
+            )
+        }
+        composable(SettingsRoutes.Schema) {
+            SchemaSettingsContent(
+                onBack = {
+                    if (initialRoute == "schema") {
+                        navController.navigate(SettingsRoutes.Main) {
+                            popUpTo(SettingsRoutes.Main) { inclusive = true }
+                        }
+                    } else {
+                        navController.popBackStack()
+                    }
+                    onWizardBack()
+                },
+                onNavigateToMarket = { navController.navigate(SettingsRoutes.Market) },
+                // 「打开配置目录」打开 rime 工作目录：方案词典与词库所在目录（应用私有 files/rime），
+                // 与「用其他应用打开目录」定位的是同一个目录
+                onNavigateToRimeFileBrowser = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
+                onNavigateToFileManager = { navController.navigate(SettingsRoutes.RimeFileBrowser) },
+                onNavigateToSchemaDictBrowser = { navController.navigate(SettingsRoutes.SchemaDictBrowser) },
+                // 上游 v3.2.2 在此新增 onNavigateToImported（「已导入」独立页面，依赖
+                // SchemaLocalContent 新增的 title 参数与 SchemaSettingsScreen 的入口）。
+                // 本分支的方案页保留了本地实现（未合并上游的方案页重构），故暂不接入。
+            )
+        }
+        composable(SettingsRoutes.Market) {
+            MarketHubContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToDetail = { schemeId ->
+                    navController.navigate("schema_market_detail/$schemeId")
+                },
+                onNavigateToModelDetail = { modelId ->
+                    navController.navigate("model_market_detail/$modelId")
+                },
+                onNavigateToPluginDetail = { pluginId ->
+                    navController.navigate("plugin_market_detail/$pluginId")
+                },
+                onNavigateToLayoutDetail = { layoutId ->
+                    navController.navigate("layout_market_detail/$layoutId")
+                },
+                onNavigateToLocal = { navController.navigate(SettingsRoutes.SchemaLocal) },
+                onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
+            )
+        }
+        composable(SettingsRoutes.SchemaLocal) {
+            SchemaLocalContent(
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(SettingsRoutes.ModelLocal) {
+            ModelLocalContent(
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = SettingsRoutes.SchemaMarketDetail,
+            arguments = listOf(navArgument("schemeId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val schemeId = backStackEntry.arguments?.getString("schemeId") ?: return@composable
+            MarketSchemeDetailContent(
+                schemeId = schemeId,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = SettingsRoutes.ModelMarketDetail,
+            arguments = listOf(navArgument("modelId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val modelId = backStackEntry.arguments?.getString("modelId") ?: return@composable
+            MarketModelDetailContent(
+                modelId = modelId,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = SettingsRoutes.PluginMarketDetail,
+            arguments = listOf(navArgument("pluginId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val pluginId = backStackEntry.arguments?.getString("pluginId") ?: return@composable
+            PluginMarketDetailContent(
+                pluginId = pluginId,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = SettingsRoutes.LayoutMarketDetail,
+            arguments = listOf(navArgument("layoutId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val layoutId = backStackEntry.arguments?.getString("layoutId") ?: return@composable
+            LayoutMarketDetailContent(
+                layoutId = layoutId,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(SettingsRoutes.Theme) {
+            ThemeSettingsContent(
+                onBack = { navController.popBackStack() },
+                onThemeChanged = onThemeChanged,
+            )
+        }
+        composable(SettingsRoutes.Plugins) {
+            PluginsSettingsContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToPluginSettings = { pluginId ->
+                    navController.navigate("${SettingsRoutes.PluginSettings}/$pluginId")
+                },
+                onNavigateToPluginMarketDetail = { pluginId ->
+                    navController.navigate("plugin_market_detail/$pluginId")
+                },
+                onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
+                onNavigateToClipboardSync = { navController.navigate(SettingsRoutes.ClipboardSync) },
+                onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) }
+            )
+        }
+        composable(
+            route = "${SettingsRoutes.PluginSettings}/{pluginId}",
+            arguments = listOf(navArgument("pluginId") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val pluginId = backStackEntry.arguments?.getString("pluginId")
+            PluginSettingsContent(
+                pluginId = pluginId ?: "",
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.KeyEffect) {
+            KeyEffectSettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.LayoutDisplay) {
+            LayoutDisplaySettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.SmartPrediction) {
+            SmartPredictionSettingsContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToModelManagement = { navController.navigate(SettingsRoutes.ModelLocal) },
+                onNavigateToModelDetail = { modelId ->
+                    navController.navigate("model_market_detail/$modelId")
+                }
+            )
+        }
+        composable(SettingsRoutes.Correction) {
+            CorrectionSettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.AutoWord) {
+            AutoWordSettingsContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.Otp) {
+            OtpSettingsContent(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.SpeechToText) {
+            SpeechToTextSettingsContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToPluginSettings = { pluginId ->
+                    navController.navigate("${SettingsRoutes.PluginSettings}/$pluginId")
+                },
+                onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
+                onNavigateToModelMarket = { navController.navigate(SettingsRoutes.MarketModel) }
+            )
+        }
+        composable(SettingsRoutes.Dictionary) {
+            DictionaryHubContent(
+                onNavigateToUserDict = { navController.navigate(SettingsRoutes.DictionaryUserDict) },
+                onNavigateToCustomPhrase = { navController.navigate(SettingsRoutes.DictionaryCustomPhrase) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.DictionaryUserDict) {
+            UserDictContent(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.DictionaryCustomPhrase) {
+            CustomPhraseSettingsContent(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.SchemaDictBrowser) {
+            SchemaDictBrowserContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.RimeFileBrowser) {
+            // 通用文件管理器：从 rime 工作目录（私有 files/rime，方案词典所在）开始
+            RimeFileBrowserContent(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.Clipboard) {
+            ClipboardSettingsContent(
+                onBack = { navController.popBackStack() },
+                // 剪贴板同步作为剪贴板的内页（返回回到剪贴板设置）
+                onNavigateToClipboardSync = { navController.navigate(SettingsRoutes.ClipboardSync) }
+            )
+        }
+        composable(SettingsRoutes.ClipboardSync) {
+            ClipboardSyncSettingsContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToMarket = { navController.navigate(SettingsRoutes.MarketPlugins) }
+            )
+        }
+        composable(SettingsRoutes.Backup) {
+            BackupSettingsContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
+                onNavigateToMarket = { navController.navigate(SettingsRoutes.MarketPlugins) },
+                onNavigateToPluginSettings = { pluginId ->
+                    navController.navigate("${SettingsRoutes.PluginSettings}/$pluginId")
+                }
+            )
+        }
+        composable(SettingsRoutes.About) {
+            AboutContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToPrivacy = { navController.navigate(SettingsRoutes.Privacy) },
+                onNavigateToLicenses = { navController.navigate(SettingsRoutes.Licenses) },
+                onNavigateToLogViewer = { navController.navigate(SettingsRoutes.LogViewer) },
+                onNavigateToLogSettings = { navController.navigate(SettingsRoutes.LogSettings) },
+                onNavigateToDeveloper = { navController.navigate(SettingsRoutes.Developer) },
+                onNavigateToStorageSpace = { navController.navigate(SettingsRoutes.StorageSpace) }
+            )
+        }
+        composable(SettingsRoutes.Developer) {
+            DeveloperContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToHandwritingCapture = { navController.navigate(SettingsRoutes.HandwritingCapture) }
+            )
+        }
+        composable(SettingsRoutes.StorageSpace) {
+            StorageSpaceScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) }
+            )
+        }
+        composable(SettingsRoutes.MarketModel) {
+            MarketHubContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToDetail = { schemeId ->
+                    navController.navigate("schema_market_detail/$schemeId")
+                },
+                onNavigateToModelDetail = { modelId ->
+                    navController.navigate("model_market_detail/$modelId")
+                },
+                onNavigateToPluginDetail = { pluginId ->
+                    navController.navigate("plugin_market_detail/$pluginId")
+                },
+                onNavigateToLayoutDetail = { layoutId ->
+                    navController.navigate("layout_market_detail/$layoutId")
+                },
+                onNavigateToLocal = { navController.navigate(SettingsRoutes.SchemaLocal) },
+                onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
+                initialTab = 1,
+            )
+        }
+        composable(SettingsRoutes.MarketPlugins) {
+            MarketHubContent(
+                onBack = { navController.popBackStack() },
+                onNavigateToDetail = { schemeId ->
+                    navController.navigate("schema_market_detail/$schemeId")
+                },
+                onNavigateToModelDetail = { modelId ->
+                    navController.navigate("model_market_detail/$modelId")
+                },
+                onNavigateToPluginDetail = { pluginId ->
+                    navController.navigate("plugin_market_detail/$pluginId")
+                },
+                onNavigateToLayoutDetail = { layoutId ->
+                    navController.navigate("layout_market_detail/$layoutId")
+                },
+                onNavigateToLocal = { navController.navigate(SettingsRoutes.SchemaLocal) },
+                onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
+                initialTab = 2,
+            )
+        }
+        composable(SettingsRoutes.LogViewer) {
+            LogViewerScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.LogSettings) {
+            LogSettingsContent(
+                onBack = { navController.popBackStack() },
+                onOpenLogViewer = { navController.navigate(SettingsRoutes.LogViewer) },
+            )
+        }
+        composable(SettingsRoutes.HandwritingCapture) {
+            HandwritingCaptureScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.Privacy) {
+            PrivacyPolicyContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(SettingsRoutes.Licenses) {
+            LicensesContent(
+                onBack = { navController.popBackStack() }
+            )
+        }
+    }
+}

@@ -1,0 +1,42 @@
+package com.kingzcheung.xime.service
+
+import com.kingzcheung.xime.rime.RimeCandidate
+
+data class CandidateState(
+    val candidates: List<String> = emptyList(),
+    val candidateComments: List<String> = emptyList(),
+    val inputText: String = "",
+    val preeditText: String = "",
+    val isComposing: Boolean = false,
+    val hasNextPage: Boolean = false,
+    val hasPrevPage: Boolean = false,
+    val associationCandidates: List<String> = emptyList(),
+    val pendingEnglishText: String = "",
+    val isShowingRecentClipboard: Boolean = false,
+    /** 当前宿主是否支持英文候选的"回删替换"（终端等受限宿主为 false，不展示英文候选）。 */
+    val englishReplaceSupported: Boolean = true,
+    /** 候选词变换映射（插件 candidate_transform 能力）：与 [candidates] 平行；
+     *  空列表 = 纯引擎语义（显示 index 即引擎 index）。见 CandidateAction。 */
+    val candidateActions: List<CandidateAction> = emptyList(),
+    /** 跨页全量候选（仅候选展开态时由服务层填充，供本地分页与单字筛选）。
+     *  空列表 = 未填充或引擎无候选。全局索引用于 selectCandidateByGlobalIndex。 */
+    val expandedCandidates: List<RimeCandidate> = emptyList(),
+    /** 与 [expandedCandidates] 平行的上屏动作（引擎引用 / 外部纠错候选）。空 = 纯引擎语义。 */
+    val expandedActions: List<CandidateAction> = emptyList(),
+    /** 编码显示串中的光标偏移（字符，-1 = 末尾/非编辑态）。
+     *  全键盘组合态滑动编辑时由服务层从 editingCaretPos 映射（快照比对自愈），供气泡竖线与输入框光标。 */
+    val preeditCaretPos: Int = -1,
+    /** 数字键盘「大写金额模式」的候选栏回显：算式（如 `123+45`）。
+     *  金额已随按键实时上屏，候选栏据此列出两条候选（纯金额 / 算式），点选由服务层分辨。 */
+    val capitalAmountExpression: String = "",
+    /** 上条算式对应的大写金额（如 `壹佰陆拾捌元整`）；与 [capitalAmountExpression] 同为空表示不显示。 */
+    val capitalAmountAmount: String = "",
+    /**
+     * [candidates] 中属于**临时词库**（自动造词但尚未晋升）的下标集合。
+     * 渲染层据此给这些候选加「◌」前缀做视觉区分，与固定词库（已晋升）/引擎候选分开。
+     *
+     * 只存下标、不改 [candidates] 本体：候选文本同时被上屏、黑名单、输入框首词等
+     * 非显示路径消费，标记符号绝不能混进文本（否则会把「◌词」写进用户词库）。
+     */
+    val autoWordTempIndices: Set<Int> = emptySet(),
+)

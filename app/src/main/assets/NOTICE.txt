@@ -1,0 +1,21 @@
+NOTICE for Xime Application
+
+This application uses third-party libraries and code:
+
+================================================================================
+ONNX Runtime
+================================================================================
+
+Source: https://github.com/microsoft/onnxruntime
+License: MIT License
+
+Used for neural network inference in association prediction, punctuation and handwriting recognition.
+
+================================================================================
+Librime
+================================================================================
+
+Source: https://github.com/rime/librime
+License: BSD 3-Clause License
+
+Used as the core input method engine.

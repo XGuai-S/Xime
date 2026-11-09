@@ -1,0 +1,225 @@
+package com.kingzcheung.xime.settings
+
+import android.content.Context
+import android.util.Log
+import com.charleskorn.kaml.YamlList
+import com.charleskorn.kaml.YamlMap
+import com.charleskorn.kaml.YamlScalar
+import java.io.File
+import java.util.Locale
+
+data class DictEntry(
+    val word: String,
+    val code: String,
+    val weight: Int? = null
+)
+
+object DictionaryHelper {
+    private const val TAG = "DictionaryHelper"
+
+    /** 解析一个 .dict.yaml 文本里 `...` 之后的词条（`词<TAB>码`，也容忍空格分隔）。纯函数。 */
+    fun parseDictEntries(text: String): List<DictEntry> {
+        val out = mutableListOf<DictEntry>()
+        var inData = false
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (!inData) {
+                if (line == "...") inData = true
+                continue
+            }
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val parts = line.split("\t", "  ", " ").filter { it.isNotEmpty() }
+            if (parts.size >= 2) out.add(DictEntry(parts[0], parts[1]))
+        }
+        return out
+    }
+
+    /**
+     * 解析文本码表（`词<TAB>码[<TAB>频率]`，无 `...` 分隔符、无头部要求）。
+     * 来源有两处，格式一致：librime 用户词库（userdb）读出的码表文本、
+     * 以及 custom_phrase 等 stabledb 文本表。纯函数。
+     */
+    fun parseCodeTable(text: String): List<DictEntry> {
+        val out = mutableListOf<DictEntry>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith('#')) continue
+            val parts = line.split('\t')
+            if (parts.size >= 2) {
+                out.add(DictEntry(parts[0], parts[1], parts.getOrNull(2)?.toIntOrNull()))
+            }
+        }
+        return out
+    }
+
+    /** 解析 .dict.yaml 头部的 `import_tables`（块式 `- x` 或内联 `[a, b]`）。纯函数。 */
+    fun parseImportTables(text: String): List<String> {
+        val tables = linkedSetOf<String>()
+        val lines = text.lines()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if (line == "...") break // 头部结束，后面是词条
+            if (line.startsWith("import_tables:")) {
+                val inline = line.substringAfter(":").trim()
+                if (inline.startsWith("[")) {
+                    inline.trim('[', ']').split(",")
+                        .map { it.trim().trim('"') }.filter { it.isNotEmpty() }
+                        .forEach { tables.add(it) }
+                } else {
+                    var j = i + 1
+                    while (j < lines.size && lines[j].trim().startsWith("- ")) {
+                        // 块式条目可能带行尾注释（如 `- Flypy   # 主词库`），
+                        // 必须剥掉 `#` 之后的内容，否则拿到的名字带注释后缀、找不到词库文件。
+                        var name = lines[j].trim().removePrefix("- ").trim()
+                        val hash = name.indexOf('#')
+                        if (hash >= 0) name = name.substring(0, hash)
+                        name = name.trim().trim('"').trim()
+                        if (name.isNotEmpty() && name != "..." ) tables.add(name)
+                        j++
+                    }
+                    i = j - 1
+                }
+            }
+            i++
+        }
+        return tables.toList()
+    }
+
+    /**
+     * 跟随 `import_tables` 递归收集词条（注入读取器，便于单测；按表名去重防环）。
+     * 修复"主词典靠 import_tables 组装时(如 quick5/cangjie5)词库查看器为空"。
+     * [extraRoots] 用于方案声明的个人词库（`translator.packs`），与主词典同样递归展开。
+     */
+    fun collectEntries(
+        rootDict: String,
+        extraRoots: List<String> = emptyList(),
+        readDict: (String) -> String?,
+    ): List<DictEntry> {
+        val out = mutableListOf<DictEntry>()
+        val seen = linkedSetOf<String>()
+        val queue = ArrayDeque(listOf(rootDict) + extraRoots)
+        while (queue.isNotEmpty()) {
+            val name = queue.removeFirst()
+            if (!seen.add(name)) continue
+            val text = readDict(name) ?: continue
+            out.addAll(parseDictEntries(text))
+            for (t in parseImportTables(text)) if (t !in seen) queue.addLast(t)
+        }
+        return out
+    }
+
+    /**
+     * 跟随 `import_tables` 递归流式收集词条（注入读取器，便于单测；按表名去重防环）。
+     *
+     * 与 [collectEntries] 的区别：**不返回列表**，而是逐词条回调 [onEntry]，
+     * 调用方边读边处理（如进集合、筛单字码），全程不驻留几十万个 [DictEntry]。
+     * 大词库（数十万行）用它可显著降低堆峰值与 GC 压力。
+     *
+     * 表头标记（`nofreq` / `no_auto_word`）通过 [onDictHeader] 回调下发，
+     * 调用方据此决定该词典的词条是否进排除集。
+     *
+     * @param rootDicts 根词典名（各启用方案的主词典）
+     * @param readDict 按词库名读取 `.dict.yaml` 全文，返回 null 表示不存在
+     * @param onDictStart 每本词典开始解析时回调（词典名、nofreq 标记、no_auto_word 标记）
+     * @param onEntry 每个词条回调（词典名、词、码）
+     */
+    fun collectEntriesStreaming(
+        rootDicts: List<String>,
+        readDict: (String) -> String?,
+        onDictStart: (dictName: String, noFreq: Boolean, noAutoWord: Boolean) -> Unit = { _, _, _ -> },
+        onEntry: (dictName: String, word: String, code: String) -> Unit,
+    ) {
+        val seen = linkedSetOf<String>()
+        val queue = ArrayDeque(rootDicts)
+        while (queue.isNotEmpty()) {
+            val name = queue.removeFirst()
+            if (!seen.add(name)) continue
+            val text = readDict(name) ?: continue
+            onDictStart(name, hasNoFreqMark(text), hasNoAutoWordMark(text))
+            for (entry in parseDictEntries(text)) {
+                onEntry(name, entry.word, entry.code)
+            }
+            for (t in parseImportTables(text)) if (t !in seen) queue.addLast(t)
+        }
+    }
+
+    /** 词典表头是否声明了 `nofreq`（`# nofreq: true` 或 `#@/nofreq`）。 */
+    fun hasNoFreqMark(text: String): Boolean =
+        NO_FREQ_MARK.containsMatchIn(text)
+
+    /** 词典表头是否声明了 `no_auto_word`（`# no_auto_word: true` 或 `#@/no_auto_word`）。 */
+    fun hasNoAutoWordMark(text: String): Boolean =
+        NO_AUTO_WORD_MARK.containsMatchIn(text)
+
+    private val NO_FREQ_MARK =
+        Regex("#@/nofreq|#\\s*nofreq\\s*:\\s*true", RegexOption.IGNORE_CASE)
+
+    private val NO_AUTO_WORD_MARK =
+        Regex("#@/no_auto_word|#\\s*no_auto_word\\s*:\\s*true", RegexOption.IGNORE_CASE)
+
+    /**
+     * 从方案 `.schema.yaml` 读取 `translator.packs` 中声明的个人词库名（如 pinyin_simp 的
+     * `user_simp`），没有则返回空。这些表同样是方案里的静态码表，与主词典一并展示。
+     */
+    internal fun readSchemaPacks(rimeDir: File, schemaId: String): List<String> {
+        val schemaFile = File(rimeDir, "$schemaId.schema.yaml")
+        if (!schemaFile.exists()) return emptyList()
+        val text = try {
+            schemaFile.readText(Charsets.UTF_8).trimStart('\uFEFF')
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        // kaml 解析（schema.yaml 是 YAML，避免脆弱的正则）；
+        // 第三方方案的 .schema.yaml 可能含锚点/别名等非严格语法导致解析失败，此时回退正则。
+        val viaKaml = readSchemaPacksKaml(text)
+        if (viaKaml != null) return viaKaml
+        return readSchemaPacksRegex(text)
+    }
+
+    private fun readSchemaPacksKaml(text: String): List<String>? {
+        return try {
+            val root = SchemaManager.yaml.parseToYamlNode(text) as? YamlMap ?: return emptyList()
+            val packs = root.get<YamlMap>("translator")?.get("packs") as? YamlList ?: return emptyList()
+            packs.items.mapNotNull { (it as? YamlScalar)?.content }
+                .map { it.trim().removeSurrounding("\"") }
+                .filter { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readSchemaPacksRegex(text: String): List<String> {
+        return try {
+            val block = Regex("""^translator:[\s\S]*?^  packs:\s*\n([\s\S]*?)(?=^\S|\Z)""", RegexOption.MULTILINE)
+                .find(text)?.groupValues?.get(1) ?: return emptyList()
+            Regex("""^\s*-\s*"?(\w+)"?""", RegexOption.MULTILINE).findAll(block)
+                .map { it.groupValues[1] }
+                .toList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun loadDictionary(context: Context, schemaId: String): List<DictEntry> {
+        val dictName = SchemaManager.getReferencedDictName(context, schemaId) ?: schemaId
+        val dir = SchemaManager.getRimeDir(context)
+        return try {
+            collectEntries(dictName, readSchemaPacks(dir, schemaId)) { name ->
+                val f = File(dir, "$name.dict.yaml")
+                if (f.exists()) f.readText(Charsets.UTF_8) else null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load dictionary for $schemaId", e)
+            emptyList()
+        }
+    }
+
+    fun searchDictionary(entries: List<DictEntry>, query: String): List<DictEntry> {
+        if (query.isEmpty()) return entries.take(100)
+        val lowerQuery = query.lowercase(Locale.ROOT)
+        return entries.filter {
+            it.word.contains(query) || it.code.contains(query) || it.code.lowercase(Locale.ROOT).contains(lowerQuery)
+        }.take(100)
+    }
+}

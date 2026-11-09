@@ -1,0 +1,5 @@
+# 格式：对象 + label + action + value（label 和 value 不同）
+keyboard:
+  keys:
+    x:
+      swipe_up: { label: "剪切", action: "commit", value: "x_cut" }

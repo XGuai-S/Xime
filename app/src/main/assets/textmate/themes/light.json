@@ -1,0 +1,46 @@
+{
+  "name": "Light",
+  "settings": [
+    {
+      "settings": {
+        "background": "#FFFFFF",
+        "foreground": "#000000"
+      }
+    },
+    {
+      "name": "Comment",
+      "scope": "comment",
+      "settings": { "foreground": "#008000" }
+    },
+    {
+      "name": "Keyword",
+      "scope": "keyword",
+      "settings": { "foreground": "#0000FF" }
+    },
+    {
+      "name": "String",
+      "scope": "string",
+      "settings": { "foreground": "#A31515" }
+    },
+    {
+      "name": "Number",
+      "scope": "constant.numeric",
+      "settings": { "foreground": "#098658" }
+    },
+    {
+      "name": "Boolean",
+      "scope": "constant.language",
+      "settings": { "foreground": "#0000FF" }
+    },
+    {
+      "name": "Operator",
+      "scope": "keyword.operator",
+      "settings": { "foreground": "#000000" }
+    },
+    {
+      "name": "YAML Key",
+      "scope": "entity.name.tag.yaml",
+      "settings": { "foreground": "#881280" }
+    }
+  ]
+}

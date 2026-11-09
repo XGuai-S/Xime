@@ -1,0 +1,70 @@
+{
+  "scopeName": "source.yaml",
+  "name": "YAML",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#document-marker" },
+    { "include": "#string-double" },
+    { "include": "#string-single" },
+    { "include": "#key" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#list-marker" },
+    { "include": "#anchor" },
+    { "include": "#colon-operator" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.yaml",
+      "match": "#.*$"
+    },
+    "document-marker": {
+      "match": "^(---|\\.\\.\\.)\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.document.yaml" }
+      }
+    },
+    "string-double": {
+      "name": "string.quoted.double.yaml",
+      "begin": "\"",
+      "end": "\"(?!')",
+      "patterns": [
+        { "name": "constant.character.escape.yaml", "match": "\\\\." }
+      ]
+    },
+    "string-single": {
+      "name": "string.quoted.single.yaml",
+      "begin": "'",
+      "end": "'(?!')",
+      "patterns": [
+        { "name": "constant.character.escape.yaml", "match": "''" }
+      ]
+    },
+    "key": {
+      "match": "((?:[\\w.\\-]+|\"[^\"]*\"|'[^']*')\\s*(?=:))",
+      "captures": {
+        "1": { "name": "entity.name.tag.yaml" }
+      }
+    },
+    "constant": {
+      "match": "\\b(?:true|false|yes|no|on|off|null|~)\\b",
+      "name": "constant.language.yaml"
+    },
+    "number": {
+      "match": "\\b-?[0-9]+(?:\\.[0-9]+)?\\b",
+      "name": "constant.numeric.yaml"
+    },
+    "list-marker": {
+      "match": "^- ",
+      "name": "keyword.operator.yaml"
+    },
+    "anchor": {
+      "match": "[&\\*][\\w\\-]+",
+      "name": "variable.other.yaml"
+    },
+    "colon-operator": {
+      "match": ":",
+      "name": "keyword.operator.yaml"
+    }
+  }
+}

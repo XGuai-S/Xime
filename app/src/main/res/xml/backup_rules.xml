@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Sample backup rules file; uncomment and customize as necessary.
+   See https://developer.android.com/guide/topics/data/autobackup
+   for details.
+   Note: This file is ignored for devices older than API 31
+   See https://developer.android.com/about/versions/12/backup-restore
+-->
+<full-backup-content>
+    <!-- 剪贴板图片目录（files/clipboard_images，上限 100MB）必须排除：
+         云备份配额仅 25MB，纳入会挤掉其它数据；图片属可重建的本机临时数据，
+         跨设备迁移走剪贴板同步插件而非 Auto Backup。 -->
+    <exclude domain="file" path="clipboard_images/" />
+</full-backup-content>

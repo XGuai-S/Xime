@@ -1,0 +1,8 @@
+# 内置插件 xipk 由 scripts/build-plugins.sh 从 ./plugins/<name> 编译而来。
+#
+# 这里**必须让产物入库**：xipk 是 release APK 的内置插件来源，不入库的话
+# 换台机器 clone 下来构建，装出来的 release 里就没有内置插件
+# （BuiltinPluginAssetsTest 正是在守这个坑）。
+*
+!.gitignore
+!*.xipk

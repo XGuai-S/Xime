@@ -1,0 +1,5 @@
+# 格式：字符串简写
+# 所有手势都用字符串
+keyboard:
+  keys:
+    q: { tap: "q", swipe_up: "1", swipe_down: "Q" }

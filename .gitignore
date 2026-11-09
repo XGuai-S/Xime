@@ -1,0 +1,77 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/deploymentTargetSelector.xml
+/.idea/misc.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+signing-key-base64.txt
+# APK签名密钥文件（不要提交到Git）
+*.keystore
+node_modules
+*.jks
+keystore-base64.txt
+# 签名配置含明文密码，绝不入库
+keystore.properties
+app/keystore.properties
+PROGRESS.md
+DECISIONS.md
+# librime and its dependencies
+app/src/main/jni/librime/
+app/src/main/jni/snappy/
+app/src/main/jni/librime-lua/
+app/src/main/jni/librime-lua-deps/
+app/src/main/jni/librime-octagram/
+app/src/main/jni/librime-predict/
+app/src/main/jni/boost*
+app/src/main/jni/onnxruntime/
+app/src/main/jniLibs/
+app/src/main/jni/librime-t9/build_test/
+app/release
+# Large archives
+*.tar.xz
+*.tar.gz
+*.zip
+/.agents
+# Association model weights (large files, manually placed)
+app/src/main/assets/association_model
+/.sisyphus
+/.kilo
+/.kotlin
+
+# Plugin toolchain (Rust CLI build artifacts)
+tools/xime-plugin/target/
+tools/xime-plugin/build/
+# Plugin module builds（历史残留目录）
+plugin-api/build
+
+# Plugin APKs (development only, not packaged in main app)
+app/src/main/assets/plugins/*.apk
+app/src/main/assets/plugins/*.xipk
+/.zcodeignore
+/.skills
+fix_encoding.py
+perf.data
+xime_heap.hprof
+app/src/main/jni/ncnn-build
+app/src/main/jni/ncnn
+# Downloaded at build time by gradle task downloadKnf
+app/src/main/jni/third_party/
+/.zcode
+
+# Agent 工作数据（记忆/备份，非项目源码）
+/.workbuddy
+# 本地发布产物（APK 与设备配置备份，不入库）
+/release
+# 本地发布产物（APK 与设备配置备份，不入库）
+/dist/

@@ -1,0 +1,6 @@
+# 格式：对象 + 纯 label
+keyboard:
+  keys:
+    a:
+      tap: { label: "a" }
+      swipe_up: { label: "!" }

@@ -1,0 +1,23 @@
+[submodule "librime"]
+	path = app/src/main/jni/librime
+	url = git@github.com:ximeiorg/librime.git
+	ignore = untracked
+[submodule "app/src/main/jni/snappy"]
+	path = app/src/main/jni/snappy
+	url = https://github.com/google/snappy.git
+[submodule "app/src/main/jni/librime-lua"]
+	path = app/src/main/jni/librime-lua
+	url = https://github.com/hchunhui/librime-lua.git
+[submodule "app/src/main/jni/librime-lua-deps"]
+	path = app/src/main/jni/librime-lua-deps
+	url = https://github.com/hchunhui/librime-lua.git
+	branch = thirdparty
+[submodule "app/src/main/jni/librime-octagram"]
+	path = app/src/main/jni/librime-octagram
+	url = https://github.com/lotem/librime-octagram.git
+[submodule "app/src/main/jni/librime-predict"]
+	path = app/src/main/jni/librime-predict
+	url = https://github.com/rime/librime-predict.git
+[submodule "app/src/main/assets/rime"]
+	path = app/src/main/assets/rime
+	url = https://github.com/kingzcheung/rime-wubi.git

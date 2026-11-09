@@ -1,0 +1,37 @@
+android:
+  - changed-files:
+      - any-glob-to-any-file:
+          - app/**/*
+
+plugin:
+  - changed-files:
+      - any-glob-to-any-file:
+          - plugins/**/*
+          - plugin-core/**/*
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**/*
+          - gradle/**/*
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**/*
+          - '**/*.md'
+
+jni:
+  - changed-files:
+      - any-glob-to-any-file:
+          - app/src/main/jni/**/*
+
+theme:
+  - changed-files:
+      - any-glob-to-any-file:
+          - app/src/main/assets/themes/**/*
+
+schema:
+  - changed-files:
+      - any-glob-to-any-file:
+          - app/src/main/assets/schemas/**/*

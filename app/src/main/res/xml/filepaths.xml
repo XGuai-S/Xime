@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="emoji_cache" path="emoji_cache/" />
+    <files-path name="files" path="." />
+    <!--
+      公开 rime 根目录 /storage/emulated/0/rime/ 的深链锚点。
+
+      「用其他应用打开」先把私有 rime 工作目录同步到该公开目录，再用它的
+      default.yaml 当 MT 深链锚点——没有这条声明时 getUriForFile 会抛
+      IllegalArgumentException（Failed to find configured root），锚点 URI 生成失败，
+      MT 深链整条被跳过，只剩标准目录 URI（MT 一概拒绝）→ 表现为「打开了 MT 但没进目录」。
+
+      声明放在 rime/xime/ 之后：两者都包含时 FileProvider 取第一个匹配，
+      配置目录（xime）的文件走 xime_config，其余 rime 文件走 rime_root。
+    -->
+    <external-path name="xime_config" path="rime/xime/" />
+    <external-path name="rime_root" path="rime/" />
+    <!--
+      日志导出汇总文件：必须显式声明，否则 FileProvider.getUriForFile 会抛
+      IllegalArgumentException（Failed to find configured root），导致「导出全部日志」
+      永远走不到系统分享面板。放在 cache 下而非 files：汇总文件是一次性产物，
+      cache 可被系统在空间紧张时回收，不必长期占用用户数据区。
+    -->
+    <cache-path name="log_export" path="log_export/" />
+</paths>

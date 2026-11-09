@@ -1,0 +1,5 @@
+# 格式：对象 + label + action
+keyboard:
+  keys:
+    c:
+      swipe_up: { label: "复制", action: "copy" }

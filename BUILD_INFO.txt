@@ -1,0 +1,27 @@
+Xime v3.2.61 精简完整源码包（可直接构建 arm64-v8a APK）
+=========================================================
+版本        : v3.2.61
+versionCode : 20261146
+Commit      : fa420d47b7c03079fd5c81751850e11689ffbd84
+Commit 摘要 : feat: 剪贴板图片链路简化 + 清理死代码 (v3.2.61)
+导出时间    : 2026-11-07 11:34:51
+目标 ABI    : arm64-v8a
+
+包含
+----
+1. git 全量源码（Kotlin/CMake/rime 词库/资源等 948 文件）
+2. jniLibs/arm64-v8a/libonnxruntime.so（27 MB，构建必需）
+
+未包含
+------
+- 其他 ABI 的 jniLibs（本机只用 arm64-v8a）
+- jni/ 下 native 源码（boost/librime/onnxruntime 等，无需重编 native，
+  直接用上面 jniLibs 里的已编译 so）
+- keystore.properties 与 *.keystore（需另行搬迁，否则回退 debug 签名）
+
+构建
+----
+环境：JDK 17~21、Android SDK compileSdk 37、NDK、CMake 3.22.1
+命令：./gradlew :app:assembleRelease
+
+产物路径：app/build/outputs/apk/release/

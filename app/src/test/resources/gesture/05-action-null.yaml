@@ -1,0 +1,5 @@
+# 格式：action = null（无动作）
+keyboard:
+  keys:
+    space:
+      swipe_down: { label: "", action: null }

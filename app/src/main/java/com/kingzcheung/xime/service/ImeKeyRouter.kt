@@ -1,0 +1,2330 @@
+package com.kingzcheung.xime.service
+
+import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
+import com.kingzcheung.xime.association.AssociationManager
+import com.kingzcheung.xime.keyboard.OverlayRoute
+import com.kingzcheung.xime.rime.RimeCandidate
+import com.kingzcheung.xime.rime.RimeKeyCodes
+import com.kingzcheung.xime.rime.resolveRimeCandidateIndex
+import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.ui.keyboard.CapitalAmountKeys
+import com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState
+import com.kingzcheung.xime.ui.keyboard.isT9Schema
+import com.kingzcheung.xime.util.FileLogger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+
+
+/** 热路径预编译：避免每键重复编译正则与分配常量集合。 */
+private val DIGIT_REGEX = Regex("[0-9]")
+private val LETTER_REGEX = Regex("[a-zA-Z]")
+private val CALC_OP_KEYS: Set<String> = setOf("+", "-", "*", "/", ".")
+/**
+ * 按键输入路由。
+ *
+ * 承载按键派发（handleKeyPress）、长按退格合并、候选选择/翻页、计算器候选等逻辑。
+ * 所有共享状态通过 service 引用访问（同模块 internal 成员）。
+ */
+internal class ImeKeyRouter(private val service: XimeInputMethodService) {
+
+    private companion object {
+        /** 纠错插件产出候选的标注（correction_translator 的 SimpleCandidate comment）。 */
+        const val CORRECTION_COMMENT = "纠错"
+
+        /** 左滑整段回删的上限：超过这个长度（粘贴的长文本）不猜，手势直接无效。 */
+        const val MAX_SWIPE_DELETE_CHARS = 200
+    }
+
+    /** 上一次「删除键按下」的时刻（uptimeMillis）；用于区分单击与连按，见 [isContinuousDeletePress]。 */
+    private var lastDeleteDownAtMs = 0L
+
+    /**
+     * 候选词变换（hotPath 插件能力）+ 发送 UI 更新。
+     * 必须在 key-processing 线程调用：同步等插件至多 15ms；
+     * 超时/失败/插件不干预（null）均回退原始候选（actions 为空 = 纯引擎语义）。
+     */
+    private fun sendTransformedResult(
+        result: com.kingzcheung.xime.rime.RimeProcessResult,
+        afterUpdate: (suspend () -> Unit)? = null,
+    ) {
+        val transformed = service.candidateTransform.transformFor(result)
+        // 会话日志：记录本键处理后的组合快照（输入串/候选/上屏增量），供离线重建纠错标签
+        com.kingzcheung.xime.correction.KeyTapLogger.recordComposition(
+            result.inputText, result.preeditText, result.committedText, result.isAsciiMode,
+            result.candidates.map { it.text to it.comment }
+        )
+
+        // 邻键误触纠错：把按键几何先验与当前组合编码对齐后送入 librime 插件
+        // （候选生成/打分/出词/排序都在插件内完成，用同一份词典与用户词典）。
+        // 编码为空/不一致时清空先验，插件拿不到对齐先验会直接返回空 → 结构性不误纠。
+        com.kingzcheung.xime.correction.CorrectionPriors.syncWithComposition(result.inputText)
+
+        // 纠错候选升位：引擎把纠错候选排在末尾（插件 quality=-1000），展示层把它提到
+        // 首选之后（二选起）。语义：首选必须留给正常候选（无法确认用户真的按错了），
+        // 但纠错埋到几十名开外就失去了意义。
+        val baseCandidates = transformed?.candidates ?: result.candidates.toList()
+        val baseActions = transformed?.actions ?: emptyList()
+        val promoted = promoteCorrectionCandidates(baseCandidates, baseActions)
+
+        service.uiEventChannel.trySend {
+            service.sessionController.updateUIWithResult(
+                result.copy(candidates = (promoted?.first?.toList() ?: baseCandidates).toTypedArray()),
+                promoted?.second ?: baseActions
+            )
+            if (afterUpdate != null) afterUpdate()
+        }
+    }
+
+    /**
+     * 把带「纠错」标注的候选整体插到首个正常候选之后；其余正常候选顺延。
+     * 动作列表逐位映射回引擎原始索引（actions 为空 = 引擎语义即位置索引）。
+     * 仅当正常候选与纠错候选同时存在时才重排；空码救回（只有纠错候选）保持原样。
+     */
+    private fun promoteCorrectionCandidates(
+        candidates: List<RimeCandidate>,
+        actions: List<CandidateAction>,
+    ): Pair<Array<RimeCandidate>, List<CandidateAction>>? {
+        val correctionIdx = candidates.indices.filter { candidates[it].comment == CORRECTION_COMMENT }
+        if (correctionIdx.isEmpty()) return null
+        val normalIdx = candidates.indices.filter { candidates[it].comment != CORRECTION_COMMENT }
+        if (normalIdx.isEmpty()) return null
+        val order = listOf(normalIdx.first()) + correctionIdx + normalIdx.drop(1)
+        val newCandidates = order.map { candidates[it] }.toTypedArray()
+        val newActions = order.map { if (actions.isEmpty()) CandidateAction.engine(it) else actions[it] }
+        return newCandidates to newActions
+    }
+
+    /**
+     * 换输入框时复位「连按删除」判定的时间戳。
+     *
+     * 否则在 A 应用删完 250ms 内切到 B 应用按第一下删除会被判成连按，
+     * 白开一次删除会话（多一次跨进程读文本）。
+     */
+    internal fun forgetDeleteContinuity() {
+        lastDeleteDownAtMs = 0L
+    }
+
+    internal fun handleKeyPress(key: String, isShifted: Boolean) {
+        // 空键无任何按键语义，且下游 Rime 路由按 key[0] 取码（key.lowercase()[0]），
+        // 空串会越界崩溃（2026-09-14 真机实证：滑动手势 commit 值为空时触发）。
+        if (key.isEmpty()) return
+        // 键盘任意按键点击 → 此前收到的验证码立即从候选栏撤下，且此后不再被注入
+        // （用户 2026-11 规则）。快照必须早于标记与撤下：空格上屏验证码用的是
+        // 「点击前」的待用列表与联想序列，否则第一次按空格就被自己的规则挡掉。
+        val otpBeforeKeyPress = runCatching {
+            com.kingzcheung.xime.service.otp.OtpCollector.displayList()
+        }.getOrDefault(emptyList())
+        val otpTextForSpace = if (key == "space" && otpBeforeKeyPress.isNotEmpty()) {
+            service.candidateState.value.associationCandidates.firstOrNull { it in otpBeforeKeyPress }
+        } else {
+            null
+        }
+        // 摘除范围比「按键前还该显示的」更宽：取全部未过期文本。上一条键若走了不经过
+        // handleKeyPress 的路径（滑动输入、手势上屏）或晚到一帧，候选栏可能仍挂着旧码，
+        // 只按 displayList 摘会漏掉它。用户 2026-11 规则：按键后一条都不能留。
+        val otpTextsToDismiss = runCatching {
+            com.kingzcheung.xime.service.otp.OtpCollector.allDisplayTexts()
+        }.getOrDefault(otpBeforeKeyPress)
+        runCatching { com.kingzcheung.xime.service.otp.OtpCollector.onKeyboardKeyPress() }
+        if (otpTextsToDismiss.isNotEmpty()) {
+            service.dismissOtpCandidates(otpTextsToDismiss)
+        }
+        if (handleToolPanelKey(key, isShifted)) return
+        if (handleQuickSendFormKey(key)) return
+        // 常驻语音模式下开始打字：先结束语音会话（提交已识别文本），再处理按键
+        val current = service.uiState.value
+        if (current.isVoiceMode && current.voiceSticky) {
+            // 回车/换行会立即触发宿主动作（聊天应用里回车即"发送"）：必须先封口，
+            // 否则收尾等待中的最终结果在发送之后才落进输入框，内容重复/错位。
+            if (key == "enter" || key == "newline") {
+                service.sealVoiceSessionForSend()
+            } else {
+                service.endVoiceSession()
+            }
+        }
+        // 长按退格以固定频率重复派发，走合并路径，避免 keyJobs 堆积导致候选栏抖动
+        if (key == "delete") {
+            // 删除会话（下滑撤回删除的记账）按需开启：它要跨进程读一次光标前文本，
+            // 单击一次就为撤回读屏不划算（用户 2026-11 要求：只优化点击态）。
+            // 单击 = 纯删除、不读屏；检测到连按/长按（间隔 ≤ DELETE_CONTINUOUS_WINDOW_MS）
+            // 才开账，此后本次连删仍可下滑撤回（连删的第一个字不在账内）。
+            val now = android.os.SystemClock.uptimeMillis()
+            val continuous = isContinuousDeletePress(lastDeleteDownAtMs, now)
+            lastDeleteDownAtMs = now
+            if (continuous) {
+                service.beginDeleteSession()
+            }
+            handleDeleteKey()
+            return
+        }
+        // 按了别的键 → 上一段删除会话立即结算，避免"删除 → 打字 → 删除"被并成一段。
+        // 无活动会话时是一次布尔判断，热路径零开销。
+        service.finishDeleteSession()
+        // 删除后的「编码显示窗口」到此为止：继续敲编码时输入框立刻恢复显示首候选词
+        // （用户 2026-11 要求：点删除后按下一个编码键，马上变成嵌入首选）。
+        service.endForceCodeWindow()
+        // 用户按键盘产生了输入 → 候选栏里的剪贴板条目到此为止：标记消费，
+        // 之后换应用重进输入框不再显示（用户规则：点键盘才消失）。
+        //
+        // 空格键例外：快照必须在 markShowingClipboardConsumed() **之前**取，否则候选栏
+        // 先被清空，空格就退化成输入一个空格字符（用户反馈：候选栏里的复制内容点空格上不了屏）。
+        val clipboardItemForSpace = if (key == "space") service.firstVisibleClipboardItem() else null
+        service.markShowingClipboardConsumed()
+        val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
+            val state = service.uiState.value
+            val candState = service.candidateState.value
+            var needsUIUpdate = false
+            var committedText: String? = null
+            
+            when (key) {
+                "clear_composition", "clear_all", "undo_clear" -> {
+                    needsUIUpdate = handleClearKey(key, candState)
+                }
+                // command: show_ime_picker 的值同样走按键路由；弹选择器要在主线程
+                "show_ime_picker" -> withContext(Dispatchers.Main) {
+                    service.executeCommand("show_ime_picker")
+                }
+                "enter" -> needsUIUpdate = handleEnterKey(candState, state.currentSchemaId)
+                "newline" -> needsUIUpdate = handleNewlineKey(candState, state.currentSchemaId)
+                "space" -> needsUIUpdate = handleSpaceKey(
+                    candState, state.currentSchemaId, state.isAsciiMode,
+                    clipboardItemForSpace, otpTextForSpace
+                )
+                // 删除键左滑 / 右滑（用户 2026-11）：整段回删上一次上屏的内容，右滑恢复
+                "delete_last_commit" -> needsUIUpdate = handleDeleteLastCommitKey()
+                "restore_last_commit" -> needsUIUpdate = handleRestoreLastCommitKey()
+                "word_separator" -> needsUIUpdate = handleWordSeparatorKey(candState)
+                "shift", "mode_change", "ime_switch", "ime_switch_panel",
+                "abc", "number", "common_symbol", "emoji" -> handleKeyboardSwitchKey(key)
+                else -> {
+                    val result = handleMainKey(key, candState, state.isAsciiMode, isShifted)
+                    needsUIUpdate = result.needsUIUpdate
+                    committedText = result.committedText
+                    // 原先分支里的 return@launch 会跳过末尾的候选栏刷新，用 consumed 显式保留该语义。
+                    if (result.consumed) return@launch
+                }
+            }
+            
+            if (needsUIUpdate) {
+                refreshAfterKey(committedText)
+            }
+        }
+        service.keyJobs.trySend(job)
+    }
+
+    /**
+     * 主键（字母/数字/符号等）派发结果。
+     *
+     * `consumed` 对应原先分支里的 `return@launch`：它会跳过 handleKeyPress 末尾的候选栏刷新，
+     * 因此必须显式保留（例如计算器已自行刷新、数字选词已直接上屏）。
+     */
+    private class MainKeyResult(
+        val needsUIUpdate: Boolean = false,
+        val committedText: String? = null,
+        val consumed: Boolean = false,
+    )
+
+    /**
+     * 主键路径（字母/数字/符号/计算器…）：handleKeyPress 的 else 分支整体抽出。
+     *
+     * 正文与抽出前逐字一致，仅做两处机械替换：
+     * - `state.isAsciiMode` → 参数 `isAsciiMode`（收窄依赖）
+     * - `return@launch` → `return MainKeyResult(..., consumed = true)`（保留跳过末尾刷新的语义）
+     *
+     * @return 派发结果；`consumed` 为 true 时调用方应立即 `return@launch`
+     */
+    private suspend fun handleMainKey(
+        key: String,
+        candState: CandidateState,
+        isAsciiMode: Boolean,
+        isShifted: Boolean,
+    ): MainKeyResult {
+        var needsUIUpdate = false
+        var committedText: String? = null
+        val isNumberKeyboard = service.keyboardViewModel.keyboardState.value is com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState.Number
+        val isCommonSymbolKeyboard = service.keyboardViewModel.keyboardState.value is com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState.CommonSymbol
+
+        val routeResult = com.kingzcheung.xime.calculator.routeCalculatorKey(
+            key = key,
+            isNumberKeyboard = isNumberKeyboard,
+            isCommonSymbolKeyboard = isCommonSymbolKeyboard,
+            calculatorEngine = service.calculatorEngine,
+        )
+        if (routeResult is com.kingzcheung.xime.calculator.CalculatorRouteResult.Handled) {
+            withContext(Dispatchers.Main) { service.commitText(routeResult.commitText) }
+            if (isNumberKeyboard) updateCalculatorCandidates()
+            needsUIUpdate = true
+            return MainKeyResult(needsUIUpdate, committedText, consumed = true)
+        }
+
+        val pendingEnglish = candState.pendingEnglishText
+
+        // 非计算器键清除计算器状态
+        if (!key.matches(DIGIT_REGEX) && key !in CALC_OP_KEYS) {
+            if (service.calculatorEngine.isActive() || service.calculatorEngine.getCandidate() != null) {
+                service.calculatorEngine.clear()
+                updateCalculatorCandidates()
+            }
+        }
+
+        // 计算器模式：追踪数字、运算符和小数点
+        if (key.matches(DIGIT_REGEX) || key in CALC_OP_KEYS) {
+            if (key.matches(DIGIT_REGEX) || key == ".") {
+                service.calculatorEngine.handleDigit(key)
+            } else {
+                service.calculatorEngine.handleOperator(key)
+            }
+            updateCalculatorCandidates()
+        }
+
+        // 数字选词拦截（插件候选变换存在时）：数字键不进入引擎——rime 会自行选
+        // 引擎候选并返回 committedText，绕过插件候选；映射为对应位置显示候选的
+        // 点击（selectCandidateAsync 按 candidateActions 分流上屏）。
+        // actions 为空（无变换）时保持原生数字选词行为不变。
+        if (!isAsciiMode && candState.isComposing &&
+            key.length == 1 && key[0] in '1'..'9'
+        ) {
+            val actions = service.candidateState.value.candidateActions
+            val digitIndex = key[0] - '1'
+            if (actions.isNotEmpty() && digitIndex < service.candidateState.value.candidates.size) {
+                selectCandidateAsync(digitIndex)
+                return MainKeyResult(needsUIUpdate, committedText, consumed = true)
+            }
+        }
+
+        // 所有按键统一经过 Rime 引擎
+        // 字母键不进入此分支（即使 pendingEnglish 非空），需要继续积累编码
+        // 英文模式（isAsciiMode）下非字母键（QWERTY 上滑的数字/符号、数字/符号面板）
+        // 直接上屏，不进入 Rime 引擎与 pendingEnglish 累积（上滑字符即输即上）。
+        if ((isAsciiMode || pendingEnglish.isNotEmpty()) && !key.matches(LETTER_REGEX)) {
+            val finalKey = key
+            withContext(Dispatchers.Main) {
+                // 直接上屏模式：pendingEnglish 对应字符已逐字落盘，只提交增量键值。
+                service.commitText(finalKey)
+                service.candidateState.value = service.candidateState.value.copy(
+                    pendingEnglishText = "",
+                    associationCandidates = emptyList()
+                )
+            }
+        } else {
+            return handleEngineKey(key, candState, isAsciiMode, isShifted, pendingEnglish)
+        }
+        return MainKeyResult(needsUIUpdate, committedText)
+    }
+    /**
+     * 引擎路径：把按键交给 Rime 处理（[handleMainKey] 的 else 分支）。
+     *
+     * 从 [handleMainKey] 抽出，正文逐字一致，仅整体缩进减 4 空格。原先直接改写外层的
+     * needsUIUpdate / committedText 两个局部量，改为函数内自持并随 [MainKeyResult] 返回。
+     */
+    private suspend fun handleEngineKey(
+        key: String,
+        candState: CandidateState,
+        isAsciiMode: Boolean,
+        isShifted: Boolean,
+        pendingEnglish: String,
+    ): MainKeyResult {
+        var needsUIUpdate = false
+        var committedText: String? = null
+
+        val isChinese = !isAsciiMode
+        val char = key
+        val keyCode = key.lowercase()[0].code
+        val mask = if (isShifted) KeyEvent.META_SHIFT_ON else 0
+        val isLetter = key.matches(LETTER_REGEX)
+        val isShiftedChinese = isShifted && isChinese && isLetter
+
+        // 非 ASCII 可打印字符（全角符号/中文标点）：直接上屏，不进入 Rime 引擎。
+        // Rime processKey 只接受标准键码，全角键码（如 U+FF0F）无法识别会被静默
+        // 丢弃，导致中文模式下符号面板点击全角字符无输出（与 Trime onText 行为一致）。
+        if (char.isNotEmpty() && char.any { it.code > 0x7E }) {
+            committedText = char
+            needsUIUpdate = true
+        } else if (isShifted && !isLetter) {
+            if (char.length == 1) {
+                val charCode = char[0].code
+                val processed = service.rimeEngine.processKey(charCode, 0)
+                if (processed) {
+                val result = service.rimeEngine.getProcessResult(processed)
+                // commitText 不走 CONFLATED channel：channel 会覆盖丢弃未消费事件，
+                // 快速打字时中间的 commitText 会被吞（吃键）。
+                if (result.committedText.isNotEmpty()) {
+                    service.markCandidateSelection(result.committedText)
+                    withContext(Dispatchers.Main) { service.commitText(result.committedText) }
+                }
+                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                } else {
+                    committedText = char
+                    needsUIUpdate = true
+                }
+            } else {
+                committedText = char
+                needsUIUpdate = true
+            }
+        } else {
+            return handleNormalEngineKey(
+                key, candState, isAsciiMode, isShifted, char, keyCode, mask, isShiftedChinese
+            )
+        }
+
+        return MainKeyResult(needsUIUpdate, committedText)
+    }
+    /**
+     * 普通按键路径：把键交给 Rime 引擎（[handleEngineKey] 的最后一个 else 分支）。
+     *
+     * 从 [handleEngineKey] 抽出，正文逐字一致，仅整体缩进减 4 空格。原先直接改写外层的
+     * needsUIUpdate / committedText 两个局部量，改为函数内自持并随 [MainKeyResult] 返回。
+     */
+    private suspend fun handleNormalEngineKey(
+        key: String,
+        candState: CandidateState,
+        isAsciiMode: Boolean,
+        isShifted: Boolean,
+        char: String,
+        keyCode: Int,
+        mask: Int,
+        isShiftedChinese: Boolean,
+    ): MainKeyResult {
+        var needsUIUpdate = false
+        var committedText: String? = null
+
+        // 注：T9 数字键不经过此处（T9KeyboardLayout 直接调
+        // controller.onDigitPressed → applyComposition）。
+        // 编码编辑态：宿主把字母插入光标处并 setInput 整串重建——
+        // librime caret 恒在编码末尾，候选始终针对整个编码转换。
+        val editingCaret = service.editingCaretPos
+        // 读缓存（processKey 后会同步刷新），避免每键一次 JNI + 锁争用
+        val editingInput = if (editingCaret >= 0) {
+            service.rimeEngine.getCachedInputText().ifEmpty { service.rimeEngine.getInput() }
+        } else ""
+        if (!isAsciiMode && candState.isComposing && !isShifted &&
+            editingCaret in 0..editingInput.length && editingInput.isNotEmpty()
+        ) {
+            val ch = key.lowercase()[0]
+            val newInput = editingInput.substring(0, editingCaret) + ch +
+                editingInput.substring(editingCaret)
+            service.editingCaretPos = editingCaret + 1
+            service.editingCaretInput = newInput
+            service.rimeEngine.setInput(newInput)
+            sendTransformedResult(service.rimeEngine.getProcessResult(true)) {
+                if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
+            }
+            return MainKeyResult(needsUIUpdate, committedText, consumed = true)
+        } else {
+            // 撞码保护（avoid_auto_select）：本键会使编码达到某个长度，若造词词库里有
+            // 该完整编码的词、且与小鹤等「满码唯一自动上屏」冲突，改走 setInput（只设
+            // 编码、不触发引擎 auto_select），让候选栏合并出造词词供点选。
+            val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+            val currentInput = service.rimeEngine.getCachedInputText()
+                .ifEmpty { service.rimeEngine.getInput() }
+            if (!isAsciiMode && autoWordConfig.avoidAutoSelect &&
+                currentInput.length < 4 && char.length == 1 &&
+                (char[0] in 'a'..'z' || char[0] in 'A'..'Z')
+            ) {
+                val nextCode = currentInput + key.lowercase()
+                val hasAutoWord = service.autoWordTemp[nextCode]?.isNotEmpty() == true ||
+                    service.autoWordFixed[nextCode]?.isNotEmpty() == true
+                if (hasAutoWord) {
+                    FileLogger.d(
+                        "ImeKeyRouter",
+                        "avoidAutoSelect: input='$currentInput' + '$key' -> code='$nextCode' hasAutoWord=true, 改走 setInput"
+                    )
+                    service.rimeEngine.setInput(nextCode)
+                    val result = service.rimeEngine.getProcessResult(true)
+                    sendTransformedResult(result) {
+                        if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
+                    }
+                    return MainKeyResult(needsUIUpdate, committedText, consumed = true)
+                }
+            }
+            val result = service.rimeEngine.processKeyAndGetResult(keyCode, mask)
+        if (result.processed) {
+            if (isShiftedChinese && result.committedText != char) {
+                service.rimeEngine.clearComposition()
+                committedText = char
+                needsUIUpdate = true
+            } else {
+                val committed = result.committedText
+                if (isAsciiMode && committed.isNotEmpty() && result.inputText.isEmpty() && result.candidates.isEmpty()) {
+                    val current = candState.pendingEnglishText
+                    val newPending = current + committed
+                    // 本段在 keyProcessingDispatcher 工作线程：Compose mutableStateOf 非线程安全
+                    service.updateCandidateState { it.copy(pendingEnglishText = newPending) }
+                    // 直接上屏模式：只提交 Rime 返回的增量字符（如智能引号转换结果），
+                    // 整段 pending 对应的文本已逐字上屏，不可重复提交。
+                    withContext(Dispatchers.Main) {
+                        service.commitText(committed)
+                    }
+                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                } else {
+                    if (committed.isNotEmpty()) {
+                        service.markCandidateSelection(committed)
+                        withContext(Dispatchers.Main) { service.commitText(committed) }
+                    }
+                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                }
+            }
+        } else {
+            val isAscii = isAsciiMode
+            if (!candState.isComposing || isShiftedChinese) {
+                                if (isAscii) {
+                                    val charToCommit = if (isShifted) char.uppercase() else char.lowercase()
+                                    val currentPending = candState.pendingEnglishText
+                                    val newPending = currentPending + charToCommit
+                                    // 英文直接上屏模式：字符不经 composing region，即输即落盘；
+                                    // pendingEnglishText 仅作编码记录（供联想与选中候选后回删替换校验）。
+                                    withContext(Dispatchers.Main) {
+                                        service.commitText(charToCommit)
+                                    }
+                                    service.candidateState.value = service.candidateState.value.copy(
+                                        pendingEnglishText = newPending,
+                                        associationCandidates = emptyList(),
+                                        englishReplaceSupported = service.supportsEnglishCandidateReplace()
+                                    )
+                                    needsUIUpdate = true
+                } else {
+                    committedText = char
+                    needsUIUpdate = true
+                }
+            } else {
+                val candidateText = if (service.rimeEngine.selectCandidate(0)) {
+                    service.rimeEngine.commit()
+                } else {
+                    ""
+                }
+                committedText = candidateText + char
+                needsUIUpdate = true
+            }
+        }
+        }
+
+        return MainKeyResult(needsUIUpdate, committedText)
+    }
+    /**
+     * 回车键（动态回车）：组合态提交编码；空闲态按编辑器 imeOptions 执行动作
+     * （发送 / 搜索 / 下一项…）或退化为换行。
+     *
+     * 从 handleKeyPress 的巨型 when 中抽出，正文逐字一致，仅把原先写在分支里的
+     * `needsUIUpdate` 局部变量改为函数返回值（只有组合态提交编码那一处置位）。
+     *
+     * @return 是否需要刷新候选栏
+     */
+    private suspend fun handleEnterKey(candState: CandidateState, schemaId: String): Boolean {
+        var needsUIUpdate = false
+        service.calculatorEngine.clear()
+        updateCalculatorCandidates()
+        if (candState.isComposing) {
+            commitComposingInput(candState, schemaId)
+            needsUIUpdate = true
+        } else {
+            service.rimeEngine.clearComposition()
+            withContext(Dispatchers.Main) {
+                val imeOptions = service.currentInputEditorInfo?.imeOptions ?: 0
+                val action = imeOptions and EditorInfo.IME_MASK_ACTION
+                val noEnterAction = imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION != 0
+                when {
+                    noEnterAction -> service.sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+                    action == EditorInfo.IME_ACTION_GO ||
+                    action == EditorInfo.IME_ACTION_SEARCH ||
+                    action == EditorInfo.IME_ACTION_SEND ||
+                    action == EditorInfo.IME_ACTION_NEXT ||
+                    action == EditorInfo.IME_ACTION_DONE ->
+                        service.currentInputConnection?.performEditorAction(action)
+                    else -> service.sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+                }
+            }
+        }
+        resetEnterLikeCandidates(schemaId)
+        return needsUIUpdate
+    }
+
+    /**
+     * 纯换行键：无视编辑器 imeOptions，恒定发送换行；组合态先提交编码再换行。
+     *
+     * 从 handleKeyPress 的巨型 when 中抽出，正文逐字一致，仅把 `needsUIUpdate`
+     * 局部变量改为函数返回值。
+     *
+     * @return 是否需要刷新候选栏
+     */
+    private suspend fun handleNewlineKey(candState: CandidateState, schemaId: String): Boolean {
+        var needsUIUpdate = false
+        service.calculatorEngine.clear()
+        updateCalculatorCandidates()
+        if (candState.isComposing) {
+            commitComposingInput(candState, schemaId)
+            needsUIUpdate = true
+        } else {
+            service.rimeEngine.clearComposition()
+        }
+        withContext(Dispatchers.Main) { service.sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER) }
+        resetEnterLikeCandidates(schemaId)
+        return needsUIUpdate
+    }
+
+    /**
+     * 键盘切换类按键与无副作用按键的显式消费。
+     *
+     * shift / mode_change / number / common_symbol 的内部切换由 KeyboardView 的 key handler
+     * 处理，这里只需"认领"这些键，避免它们落进 else 的字母数字主路径；ime_switch 触发中英切换。
+     * 从 handleKeyPress 的巨型 when 中抽出，正文逐字一致。
+     */
+    private suspend fun handleKeyboardSwitchKey(key: String) {
+        when (key) {
+            "ime_switch", "ime_switch_panel" -> {
+                // 面板来源（ime_switch_panel）走 PANEL_SYNC：不持久化，见 dispatchAsciiSwitch
+                dispatchAsciiSwitch(persist = key == "ime_switch")
+            }
+            "abc" -> {
+                service.calculatorEngine.clear()
+                updateCalculatorCandidates()
+            }
+            "number", "common_symbol" -> {
+                // Number/CommonSymbol 内部切换由 KeyboardView 的 key handler 处理
+            }
+            "emoji" -> {
+                withContext(Dispatchers.Main) {
+                    service.commitText("😊")
+                }
+            }
+            // shift / mode_change：由 KeyboardView 的 key handler 处理，此处仅认领
+        }
+    }
+
+    /**
+     * 空格键：直接上屏英文 / 选首选 / 上屏编码 / 上屏联想词 / 上屏空格字符。
+     *
+     * 从 handleKeyPress 的巨型 when 中抽出，正文与抽出前逐字一致，仅把原先写在分支里的
+     * `needsUIUpdate` 局部变量改为函数返回值（该标志只在"组合态且无候选但有编码"时置位）。
+     *
+     * @param schemaId 当前方案 id（T9 时需清 partialCommit 累积）
+     * @param isAsciiMode 当前是否英文模式（联想上屏仅中文生效）
+     * @return 是否需要刷新候选栏
+     */
+    private suspend fun handleSpaceKey(
+        candState: CandidateState,
+        schemaId: String,
+        isAsciiMode: Boolean,
+        clipboardItem: com.kingzcheung.xime.clipboard.ClipboardItem? = null,
+        otpText: String? = null,
+    ): Boolean {
+        var needsUIUpdate = false
+        val pendingEnglish = candState.pendingEnglishText
+        // 验证码借联想通道展示，但不是联想词：空格直接上屏，不受联想开关/英文模式限制。
+        // otpText 由 handleKeyPress 在「按键点击前」取快照（点击后候选栏里的验证码已被撤下）。
+        val firstAssociation = candState.associationCandidates.firstOrNull()
+        val associationToCommit = otpText ?: firstAssociation
+        val firstAssociationIsOtp = otpText != null
+
+        if (pendingEnglish.isNotEmpty()) {
+            // 直接上屏模式：词已逐字落盘，此处只提交空格并结束本轮英文输入。
+            withContext(Dispatchers.Main) {
+                service.commitText(" ")
+                service.candidateState.value = service.candidateState.value.copy(
+                    pendingEnglishText = "",
+                    associationCandidates = emptyList()
+                )
+            }
+        } else if (candState.isComposing) {
+            if (candState.candidates.isNotEmpty()) {
+                selectCandidateAsync(0)
+            } else {
+                val input = candState.inputText
+                if (input.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        service.commitText(input)
+                        service.candidateState.value = service.candidateState.value.copy(
+                            inputText = "",
+                            preeditText = "",
+                            isComposing = false,
+                            pendingEnglishText = "",
+                            candidates = emptyList(),
+                            candidateComments = emptyList(),
+                            associationCandidates = emptyList(),
+                            candidateActions = emptyList()
+                        )
+                    }
+                    service.rimeEngine.clearComposition()
+                    // T9模式：清空partialCommit累积文本，避免下一轮输入
+                    // preedit中残留上一轮的提交内容（如"看"→下一轮"看jihua"）
+                    if (isT9Schema(schemaId)) {
+                        withContext(Dispatchers.Main) {
+                            service.t9PartialSegments.clear()
+                            service.uiState.value = service.uiState.value.copy(
+                                t9ResetSignal = service.uiState.value.t9ResetSignal + 1,
+                                t9RightCandidateSelectedCount = 0,
+                                t9SelectedCandidatePinyin = ""
+                            )
+                        }
+                    }
+                    needsUIUpdate = true
+                }
+            }
+        } else if (clipboardItem != null) {
+            // 剪贴板候选栏：空格上屏第一条，与点选走同一条链路（文本粘贴 / 图片发送，含消费标记），
+            // 且不插入空格字符。条目在 handleKeyPress 里于 markShowingClipboardConsumed() 之前取快照
+            // （判据见 Service.firstVisibleClipboardItem → shouldSpaceCommitClipboard）。
+            // 这里只判空，不再读 candState.isShowingRecentClipboard：该快照可能已被消费流程清掉。
+            withContext(Dispatchers.Main) {
+                if (clipboardItem.isImage) {
+                    service.textCommit.selectClipboardImage(clipboardItem)
+                } else {
+                    service.textCommit.selectClipboardItem(clipboardItem.text)
+                }
+                service.candidateState.value = service.candidateState.value.copy(
+                    isShowingRecentClipboard = false,
+                    candidates = emptyList(),
+                    candidateComments = emptyList(),
+                )
+            }
+        } else if (associationToCommit != null && shouldSpaceCommitAssociation(
+                isComposing = candState.isComposing,
+                associationCount = maxOf(candState.associationCandidates.size, if (otpText != null) 1 else 0),
+                firstAssociationIsOtp = firstAssociationIsOtp,
+                isAsciiMode = isAsciiMode,
+                spaceCommitAssociationEnabled = SettingsPreferences.isSpaceCommitAssociationEnabled(service),
+            )
+        ) {
+            // 空格上屏联想候选：验证码永远可以（它不是联想词）；普通联想按用户开关（默认关）+ 中文模式。
+            // 连续联想模式：commitText 会自动触发下一轮推理（一直上屏一直推理）；
+            // 单次联想模式：先置抑制标志，上屏引发的那轮推理被跳过并清空联想候选。
+            withContext(Dispatchers.Main) {
+                if (firstAssociationIsOtp) {
+                    // 与点选一致：上屏后从待用列表移除，并把候选栏里的验证码撤下
+                    runCatching { com.kingzcheung.xime.service.otp.OtpCollector.consume(associationToCommit) }
+                } else if (SettingsPreferences.isSingleAssociationMode(service)) {
+                    service.predictionManager.suppressNextPredictionOnce()
+                }
+                service.commitText(associationToCommit)
+                if (firstAssociationIsOtp) {
+                    service.candidateState.value = service.candidateState.value.copy(
+                        associationCandidates = emptyList(),
+                    )
+                }
+            }
+        } else {
+            withContext(Dispatchers.Main) {
+                service.commitText(" ")
+            }
+        }
+        return needsUIUpdate
+    }
+
+    /**
+     * 分词键（word_separator）：组合态交给 Rime 处理，其余情况刷新候选栏。
+     *
+     * 从 handleKeyPress 的巨型 when 中抽出，正文逐字一致，仅把 `needsUIUpdate`
+     * 局部变量改为函数返回值。
+     *
+     * @return 是否需要刷新候选栏
+     */
+    private suspend fun handleWordSeparatorKey(candState: CandidateState): Boolean {
+        var needsUIUpdate = false
+        if (candState.isComposing || candState.inputText.isNotEmpty()) {
+            val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.APOSTROPHE, 0)
+            if (result.processed) {
+                sendTransformedResult(result)
+            } else {
+                needsUIUpdate = true
+            }
+        } else {
+            needsUIUpdate = true
+        }
+        return needsUIUpdate
+    }
+
+    /**
+     * 工具面板输入框聚焦时的按键拦截。
+     *
+     * 组合态下字母进 Rime 拼音组合（候选栏选词后经 commitText 重定向进面板输入框），
+     * 空格选首选，回车先提交编码再触发生成；非组合态直接操作面板 EditText。
+     *
+     * @return true 表示按键已被消费，调用方应立即返回
+     */
+    private fun handleToolPanelKey(key: String, isShifted: Boolean): Boolean {
+        if (!service.uiState.value.toolPanelInputFocused) return false
+        val candState = service.candidateState.value
+        val hasComposing = candState.isComposing || candState.inputText.isNotEmpty()
+        when (key) {
+            "enter" -> {
+                if (hasComposing) {
+                    // 组合态：先把拼音提交进面板输入框，再触发生成
+                    val input = candState.inputText
+                    service.mainHandler.post {
+                        ToolPanelEditTextHolder.editText?.let { et ->
+                            val start = et.selectionStart.coerceAtLeast(0)
+                            et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), input)
+                            try { et.setSelection(start + input.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(after-replace) ignored: ${e.message}") }
+                        }
+                        service.rimeEngine.clearComposition()
+                        service.candidateState.value = service.candidateState.value.copy(
+                            inputText = "",
+                            preeditText = "",
+                            pendingEnglishText = "",
+                            candidates = emptyList(),
+                            candidateComments = emptyList(),
+                            associationCandidates = emptyList(),
+                            isComposing = false,
+                            candidateActions = emptyList()
+                        )
+                    }
+                }
+                service.triggerToolPanelGenerate()
+                return true
+            }
+            "delete" -> {
+                if (hasComposing) {
+                    // 组合态：退格走 Rime，更新候选栏
+                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                    if (result.inputText.isEmpty()) {
+                        service.rimeEngine.clearComposition()
+                    }
+                    sendTransformedResult(result)
+                } else {
+                    ToolPanelEditTextHolder.editText?.let { et ->
+                        val start = et.selectionStart.coerceAtLeast(0)
+                        val end = et.selectionEnd.coerceAtLeast(start)
+                        if (start == end && start > 0) {
+                            et.text?.delete(start - 1, start)
+                            try { et.setSelection(start - 1) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start-1) ignored: ${e.message}") }
+                        } else if (end > start) {
+                            et.text?.delete(start, end)
+                            try { et.setSelection(start) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start) ignored: ${e.message}") }
+                        }
+                    }
+                }
+                return true
+            }
+            "space" -> {
+                if (hasComposing && candState.candidates.isNotEmpty()) {
+                    // 组合态：空格选第一个候选（keyJobs 保序）
+                    postRimeJob { selectCandidateAsync(0) }
+                } else {
+                    ToolPanelEditTextHolder.editText?.let { et ->
+                        val start = et.selectionStart.coerceAtLeast(0)
+                        et.text?.insert(start, " ")
+                        try { et.setSelection(start + 1) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start+1) ignored: ${e.message}") }
+                    }
+                }
+                return true
+            }
+            else -> {
+                if (key.length == 1) {
+                    val isLetter = key.matches(LETTER_REGEX)
+                    val isChineseMode = !service.uiState.value.isAsciiMode
+                    if (isLetter && isChineseMode) {
+                        // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进面板输入框
+                        val keyCode = key.lowercase()[0].code
+                        val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
+                        if (result.processed) {
+                            sendTransformedResult(result)
+                        }
+                        return true
+                    }
+                    val char = if (isShifted) key.uppercase() else key
+                    ToolPanelEditTextHolder.editText?.let { et ->
+                        val start = et.selectionStart.coerceAtLeast(0)
+                        et.text?.insert(start, char)
+                        try { et.setSelection(start + char.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start+len) ignored: ${e.message}") }
+                    }
+                    return true
+                }
+            }
+        }
+        // 多字符键（如 shift / mode_change 等）不归面板管，交回主流程。
+        return false
+    }
+
+    /**
+     * 快捷发送表单显示期间的按键拦截。
+     *
+     * 表单显示时**无论 EditText 是否持有焦点**都拦截：焦点可能因点击表单外区域丢失，
+     * 此时回车仍应提交并关闭表单、退格仍应作用于表单输入框，否则按键落入普通输入语义
+     * 造成"关闭无效"。
+     *
+     * @return true 表示按键已被消费，调用方应立即返回
+     */
+    private fun handleQuickSendFormKey(key: String): Boolean {
+        if (!service.uiState.value.showQuickSendForm) return false
+        when (key) {
+            "enter" -> {
+                val editText = QuickSendFormEditTextHolder.editText
+                val codeEditText = QuickSendFormCodeEditTextHolder.editText
+                val text = editText?.text?.toString() ?: ""
+                val code = codeEditText?.text?.toString()?.trim() ?: ""
+                val s = service.uiState.value
+                val editingId = s.quickSendEditingItemId
+                if (text.isNotBlank()) {
+                    if (editingId != null) {
+                        service.keyboardViewModel.updateQuickSendItem(editingId, text, code)
+                    } else {
+                        service.keyboardViewModel.addQuickSendText(text, code)
+                    }
+                }
+                service.uiState.value = s.copy(
+                    showQuickSendForm = false,
+                    quickSendFormFocused = false,
+                    quickSendCodeFocused = false,
+                    quickSendEditingItemId = null,
+                    quickSendEditingItemText = "",
+                    quickSendEditingItemCode = ""
+                )
+                QuickSendFormEditTextHolder.editText = null
+                QuickSendFormCodeEditTextHolder.editText = null
+                service.keyboardViewModel.showOverlay(OverlayRoute.Clipboard(1))
+                return true
+            }
+            "delete" -> {
+                val candState = service.candidateState.value
+                val isComposing = candState.isComposing || candState.inputText.isNotEmpty()
+                if (isComposing) {
+                    // Rime 有组合态 → 转发退格到 Rime 清空候选字母/联想词
+                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                    if (result.inputText.isEmpty()) {
+                        service.rimeEngine.clearComposition()
+                    }
+                    sendTransformedResult(result)
+                } else {
+                    // 无组合态 → 按焦点路由删除表单内（文本框/触发编码框）已上屏文字
+                    service.deleteInQuickSendForm()
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * 按键处理后的候选栏刷新：无 RimeProcessResult 的内联刷新路径。
+     *
+     * 从引擎取当前编码 / 候选 / 翻页 / ascii 状态同步进 UI，并按需回填英文联想。
+     * 原先包在外面的 `pendingResult` 分支已删除：该变量全仓无赋值点，
+     * `result != null` 恒不成立，属不可达代码（`sendTransformedResult` 路径保留给
+     * 真正拿到 RimeProcessResult 的调用点）。
+     */
+    private suspend fun refreshAfterKey(committedText: String?) {
+        // 一次锁内取完整快照（原 5 次独立 tryLock 会在锁竞争时各自静默返回默认值，
+        // 导致候选栏状态不一致/闪烁；合并后锁获取 5→1 次且快照自洽）。
+        val snapshot = service.rimeEngine.getProcessSnapshot()
+        val capturedInputText = snapshot.inputText
+        val capturedCandidates = snapshot.candidates
+        val capturedIsAscii = snapshot.isAsciiMode
+        val capturedHasNext = snapshot.hasNextPage
+        val capturedHasPrev = snapshot.hasPrevPage
+        // 候选词变换（hotPath 插件能力）：内联刷新路径（无 RimeProcessResult），
+        // key-processing 线程同步调用；ascii 场景不变换（调用点语义与 transformFor 一致）
+        // toList() 只做一次：原实现 transform 实参与 displayCandidates 的回退各调一次，
+        // 无插件（transform 返回 null）时每按键白分配一个 List。
+        val capturedCandidateList = capturedCandidates.toList()
+        val transformed = if (capturedInputText.isNotEmpty() && !capturedIsAscii) {
+            service.candidateTransform.transform(
+                capturedInputText, "", capturedCandidateList, capturedIsAscii
+            )
+        } else {
+            null
+        }
+        val displayCandidates: List<com.kingzcheung.xime.rime.RimeCandidate> =
+            transformed?.candidates ?: capturedCandidateList
+        if (committedText != null) {
+            service.markCandidateSelection(committedText)
+            withContext(Dispatchers.Main) { service.commitText(committedText) }
+        }
+        service.uiEventChannel.trySend {
+            val pendingEnglish = service.candidateState.value.pendingEnglishText
+            // 一次遍历同时填 text/comment：原 ascii 分支是 filterNot + 两次 map
+            // （3 次遍历、3 个 List），非 ascii 分支是两次 map。合并为 1 次遍历 + 2 个预分配 List。
+            val filteredTexts: List<String>
+            val filteredComments: List<String>
+            if (capturedIsAscii) {
+                val texts = ArrayList<String>(capturedCandidates.size)
+                val comments = ArrayList<String>(capturedCandidates.size)
+                for (candidate in capturedCandidates) {
+                    if (candidate.text.any { it.code in CJK_IDEOGRAPH_RANGE }) continue
+                    texts.add(candidate.text)
+                    comments.add(candidate.comment)
+                }
+                filteredTexts = texts
+                filteredComments = comments
+            } else {
+                val texts = ArrayList<String>(displayCandidates.size)
+                val comments = ArrayList<String>(displayCandidates.size)
+                for (candidate in displayCandidates) {
+                    texts.add(candidate.text)
+                    comments.add(candidate.comment)
+                }
+                filteredTexts = texts
+                filteredComments = comments
+            }
+            // 秘密输入框（密码/终端）禁英文联想：联想会泄漏输入前缀，
+            // 回删替换也会破坏受限宿主的输入。NO_SUGGESTIONS 只是宿主
+            // 不要内联补全，候选栏联想仍提供（与退格/applyComposition 路径同口径）。
+            val secret = service.isSecretEditor()
+            service.updateCandidateState { it.copy(
+                inputText = capturedInputText,
+                candidates = filteredTexts,
+                candidateComments = filteredComments,
+                isComposing = capturedInputText.isNotEmpty(),
+                associationCandidates = if (secret || ((capturedIsAscii || !service.isChineseMode) && pendingEnglish.isEmpty())) emptyList() else it.associationCandidates,
+                isShowingRecentClipboard = false,
+                hasNextPage = capturedHasNext,
+                hasPrevPage = capturedHasPrev,
+                candidateActions = transformed?.actions ?: emptyList()
+            ) }
+            // InputUIState 有 61 个字段：只有 isAsciiMode 真正变化时才 copy。
+            // 原实现每按键无条件 copy 一次 —— 内容相同的 copy 虽不会触发重组，
+            // 但会白分配一个 61 字段的大对象，长期打字累积 GC 压力。
+            val prevAsciiMode = service.uiState.value.isAsciiMode
+            if (capturedIsAscii != prevAsciiMode) {
+                FileLogger.i(XimeInputMethodService.TAG, "keyRouter UI refresh: ascii $prevAsciiMode->$capturedIsAscii")
+                service.updateUiState { it.copy(isAsciiMode = capturedIsAscii) }
+            }
+            if (pendingEnglish.isNotEmpty() && !secret && service.supportsEnglishCandidateReplace()) {
+                service.serviceScope.launch {
+                    val candidates = service.predictionManager.getEnglishAssociations(pendingEnglish, PredictionManager.MAX_ASSOCIATION_COUNT)
+                    withContext(Dispatchers.Main) {
+                        val current = service.candidateState.value
+                        // 在途联想过期校验：pendingEnglish 已变/已清 → 丢弃迟到回填
+                        if (current.pendingEnglishText == pendingEnglish) {
+                            service.candidateState.value = current.copy(associationCandidates = candidates)
+                        }
+                    }
+                }
+            }
+            if (service.calculatorEngine.isActive()) {
+                updateCalculatorCandidates()
+            }
+        }
+    }
+
+    /**
+     * 清除类按键：clear_composition（只清输入态）/ clear_all（上滑清空）/ undo_clear（下滑撤回）。
+     *
+     * 三者共用 [hasInputState] 判定输入态与 [clearInputStateForKeys] 清理逻辑，
+     * 从 handleKeyPress 的巨型 when 中抽出，避免三处语义各自漂移。
+     *
+     * @return 是否需要刷新候选栏（三个分支均需要，故恒为 true）
+     */
+    private suspend fun handleClearKey(key: String, candState: CandidateState): Boolean {
+        when (key) {
+            "clear_composition" -> {
+                // 只清输入态（预编辑/候选/联想/partial 累积/计算器/左栏），不动已上屏文本。
+                // 清理逻辑见 clearInputStateForKeys()（与 clear_all 输入态分支共用）。
+                clearInputStateForKeys()
+            }
+            "clear_all" -> {
+                // 上滑清空 = 多次退格快捷方式（对标主流输入法）：输入态只清输入态，空闲态清空全部已上屏。
+                // 输入态判定见 hasInputState()——不能用 RIME getInput()，tryLocked 锁竞争时静默返回空。
+                if (hasInputState(candState)) {
+                    // 输入态：只清输入态（等价于 clear_composition），并记录 lastClearedText 供下滑撤回。
+                    // 需在 clearInputStateForKeys() 之前记录（该函数会清空 preeditText/inputText）。
+                    val pendingEnglish = candState.pendingEnglishText
+                    if (pendingEnglish.isNotEmpty()) {
+                        // 直接上屏模式：英文编码已逐字落盘，"清输入态"需回删屏上对应字符；
+                        // 校验光标前文本一致才删除并记录撤回，否则只清状态不动已上屏文本。
+                        val removed = withContext(Dispatchers.Main) {
+                            val ic = service.currentInputConnection ?: return@withContext false
+                            val before = runCatching {
+                                ic.getTextBeforeCursor(pendingEnglish.length, 0)?.toString()
+                            }.getOrNull()
+                            before == pendingEnglish && ic.deleteSurroundingText(pendingEnglish.length, 0)
+                        }
+                        if (removed) service.lastClearedText = pendingEnglish
+                    } else {
+                        // 撤回重放用 inputText（原始键入串）：preeditText 现为带回显分隔符的
+                        // 展示串（如 ni'hao），上屏必须无分隔符版本。T9 时 inputText 为合成显示态，
+                        // 与 preeditText 同值，行为不变。
+                        service.lastClearedText = candState.inputText
+                    }
+                    clearInputStateForKeys()
+                } else {
+                    // 空闲态：清空输入框全部已上屏文本。
+                    service.calculatorEngine.clear()
+                    updateCalculatorCandidates()
+                    // 记录撤回内容：输入框里是编码时 getTextBeforeCursor 已含 composing 区（与 inputText
+                    // 同源，避免重复拼接）；否则输入框只有已上屏文本，需补候选栏编码 inputText。
+                    // 英文输入态已被 hasInputState() 拦截，此处 pendingEnglishText 恒为空，拼接仅作防御。
+                    val codeInInputBox = SettingsPreferences.isCodeInInputBox(service)
+                    // 候选首词模式下 composing 区里是候选词而非编码：它既不该被当成正文撤回，也不该
+                    // 计入下面的删除长度（会把正文多删一截），先清掉 composing 区再取光标前文本。
+                    if (!codeInInputBox && SettingsPreferences.isInputBoxComposing(service)) {
+                        withContext(Dispatchers.Main) { service.endComposingInputBox() }
+                    }
+                    val inputFieldText = withContext(Dispatchers.Main) {
+                        service.currentInputConnection?.getTextBeforeCursor(XimeInputMethodService.SAFE_TEXT_LIMIT, 0)?.toString() ?: ""
+                    }
+                    service.lastClearedText = when {
+                        codeInInputBox -> inputFieldText + candState.pendingEnglishText
+                        else -> inputFieldText + candState.inputText + candState.pendingEnglishText
+                    }
+                    // 清空 partial 累积，避免残留词被 buildT9DisplayState 拼进下一轮 preedit。
+                    service.t9PartialSegments.clear()
+                    service.rimeEngine.clearComposition()
+                    service.updateCandidateState { it.copy(
+                        candidates = emptyList(),
+                        candidateComments = emptyList(),
+                        associationCandidates = emptyList(),
+                        pendingEnglishText = "",
+                        inputText = "",
+                        isComposing = false,
+                        isShowingRecentClipboard = false,
+                        candidateActions = emptyList()
+                    ) }
+                    withContext(Dispatchers.Main) {
+                        service.currentInputConnection?.let {
+                            service.endComposingInputBox()
+                            // 删除输入框中所有文字
+                            val textLen = inputFieldText.length
+                            if (textLen > 0) {
+                                it.deleteSurroundingText(textLen, 0)
+                            }
+                        }
+                    }
+                }
+                // 本次入账来自"清空"：不做落点校验（撤回语义与改动前逐字节一致）。
+                // 置空锚同时防止上一段删除会话留下的锚误伤本次撤回。
+                service.lastUndoAnchorText = null
+            }
+            "undo_clear" -> {
+                // 下滑撤回 = 撤销"上滑清空 / 删除"，仅空闲态有效（输入态恢复会插入错误位置），
+                // 判定与 clear_all 共用 hasInputState()。
+                if (!hasInputState(candState)) {
+                    withContext(Dispatchers.Main) {
+                        // 长按连删后直接下滑撤回时，删除会话可能尚未结算（抬手事件与
+                        // 下滑手势同一帧）→ 先结账再读撤销槽。
+                        service.finishDeleteSession()
+                        val text = service.lastClearedText
+                        // 落点校验：删除会话入账时记录了光标前文本，若此后用户又打过字 /
+                        // 移过光标则位置已变，放弃本次撤回，避免把旧内容插错地方。
+                        val anchorOk = text.isNotEmpty() && service.isUndoAnchorValid()
+                        service.lastClearedText = ""
+                        service.lastUndoAnchorText = null
+                        val ic = service.currentInputConnection
+                        if (anchorOk && ic != null) {
+                            // newCursorPosition=1：光标停在撤回内容末尾；
+                            // 传 text.length 会被 clamp 到整段文本末尾。
+                            ic.commitText(text, 1)
+                        } else {
+                            // 落点已变（用户中途打过字/移过光标）：本次撤回作废，明确告知，
+                            // 否则用户滑了没反应会以为手势坏了。
+                            withContext(Dispatchers.Main) {
+                                android.widget.Toast.makeText(
+                                    service,
+                                    "撤回失败：光标位置已变",
+                                    android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    /**
+     * 提交当前组合态编码（enter / newline 组合态共用）。
+     *
+     * T9 模式提交完整预编辑（含 partial commit 累积），非 T9 模式用 RIME input；
+     * 提交后清除组合态并结束输入框 composing。
+     */
+    private suspend fun commitComposingInput(candState: CandidateState, schemaId: String) {
+        val isT9 = isT9Schema(schemaId)
+        val input = if (isT9 && candState.preeditText.isNotEmpty()) {
+            candState.preeditText
+        } else {
+            service.rimeEngine.getInput()
+        }
+        if (input.isNotEmpty()) {
+            withContext(Dispatchers.Main) { service.commitText(input) }
+        }
+        if (isT9) {
+            // 同步清空，避免异步 postRimeJob 延迟导致后续 backspace 拿到旧状态。
+            service.t9PartialSegments.clear()
+            service.rimeEngine.setInput("")
+            service.rimeEngine.clearComposition()
+        } else {
+            service.rimeEngine.clearComposition()
+        }
+        withContext(Dispatchers.Main) { service.endComposingInputBox() }
+    }
+
+    /** 回车类按键收尾：清空候选态（enter / newline 共用），T9 方案额外复位分段选择状态。 */
+    private suspend fun resetEnterLikeCandidates(schemaId: String) {
+        withContext(Dispatchers.Main) {
+            service.candidateState.value = service.candidateState.value.copy(
+                inputText = "",
+                preeditText = "",
+                pendingEnglishText = "",
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                associationCandidates = emptyList(),
+                isComposing = false
+            )
+            if (isT9Schema(schemaId)) {
+                service.uiState.value = service.uiState.value.copy(
+                    t9ResetSignal = service.uiState.value.t9ResetSignal + 1,
+                    t9RightCandidateSelectedCount = 0,
+                    t9SelectedCandidatePinyin = ""
+                )
+            }
+        }
+    }
+
+    /**
+     * ascii 切换统一分发（key-processing 协程内执行）。
+     *
+     * 乐观更新：立即按目标模式切换 UI（主键盘布局/面板字符），不等引擎异步切换，
+     * 消除"进入面板/切键盘后才闪变"的可见延迟（引擎切换完成后权威同步，一致则无感）。
+     * [persist] 仅决定日志溯源原因（USER_TOGGLE / PANEL_SYNC）；ascii 为会话级
+     * 状态，两种来源均不写 user.yaml，收起键盘后回到默认中文。
+     */
+    private suspend fun dispatchAsciiSwitch(persist: Boolean) {
+        val original = service.uiState.value.isAsciiMode
+        val optimisticTarget = !original
+        val schemaId = service.rimeEngine.getCurrentSchema()
+        withContext(Dispatchers.Main) {
+            service.uiState.value = service.uiState.value.copy(isAsciiMode = optimisticTarget)
+            service.keyboardViewModel.dispatch(
+                com.kingzcheung.xime.ui.keyboard.KeyboardDispatchAction.AsciiModeChanged(optimisticTarget, schemaId)
+            )
+        }
+        // 在 key-processing 线程上执行切换：toggleAsciiMode 阻塞等待 rimeLock
+        // （部署/维护持锁时排队，完成后自动切换），不在主线程阻塞避免 ANR。
+        val t0 = System.nanoTime()
+        FileLogger.i(XimeInputMethodService.TAG, "dispatchAsciiSwitch(persist=$persist): ui ascii=${service.uiState.value.isAsciiMode}, thread=${Thread.currentThread().name}")
+        val reason = if (persist) AsciiModeController.Reason.USER_TOGGLE else AsciiModeController.Reason.PANEL_SYNC
+        if (!service.asciiModeController.switchAscii(reason)) {
+            // 引擎不可用：回滚乐观状态到切换前的原值
+            withContext(Dispatchers.Main) {
+                service.uiState.value = service.uiState.value.copy(isAsciiMode = original)
+                service.keyboardViewModel.dispatch(
+                    com.kingzcheung.xime.ui.keyboard.KeyboardDispatchAction.AsciiModeChanged(original, schemaId)
+                )
+            }
+        }
+        FileLogger.i(XimeInputMethodService.TAG, "dispatchAsciiSwitch handled, total ${(System.nanoTime() - t0) / 1_000_000}ms (queue+rimeLock+main)")
+    }
+
+    /**
+     * 退格键合并入口（主线程调用）。
+     *
+     * 无退格任务在执行时启动一个；已有任务在执行/排队时只累加 [service.pendingDeleteCount]，
+     * 由执行中的任务完成后顺带排空。这样长按退格不会让 keyJobs 无限堆积，
+     * 候选栏 UI 更新保持平滑，抬手后最多多删 1~2 个字符。
+     */
+    /**
+     * 删除键左滑：把「上一次上屏」的整段内容删掉（用户 2026-11 需求）。
+     *
+     * 只删「光标紧邻、且内容确实是上次上屏片段」的情形：先读光标前文本做后缀校验，
+     * 不匹配就不动手——宁可手势无效，也不误删正文。
+     * 删完把片段与落点锚记进服务，供右滑恢复（见 [handleRestoreLastCommitKey]）。
+     *
+     * @return true 表示确实删掉了内容
+     */
+    internal suspend fun handleDeleteLastCommitKey(): Boolean {
+        val chunk = service.predictionManager.lastCommitChunk
+        if (chunk.isEmpty()) {
+            FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] no last commit chunk")
+            return false
+        }
+        // 一次性回删整段只适合短片段：长文本（粘贴）不猜，直接不处理
+        if (chunk.length > MAX_SWIPE_DELETE_CHARS) {
+            FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] chunk too long (${chunk.length}), skip")
+            return false
+        }
+        val ic = service.currentInputConnection
+        if (ic == null) {
+            FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] no input connection")
+            return false
+        }
+        // 组合态先收干净，否则删的是宿主正文、候选栏却还挂着旧编码
+        endCompositionForSwipeGesture()
+        val before = runCatching {
+            ic.getTextBeforeCursor(chunk.length + 4, 0)?.toString().orEmpty()
+        }.getOrDefault("")
+        if (!before.endsWith(chunk)) {
+            FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] prefix mismatch (chunkLen=${chunk.length}), skip")
+            return false
+        }
+        withContext(Dispatchers.Main) {
+            service.currentInputConnection?.deleteSurroundingText(chunk.length, 0)
+        }
+        service.swipeDeletedChunk = chunk
+        service.swipeDeletedAnchor = before.dropLast(chunk.length)
+        // 上下文变了：在途联想结果作废，避免候选栏闪动
+        service.predictionManager.invalidatePendingPredictions()
+        service.candidateState.value = service.candidateState.value.copy(
+            candidates = emptyList(),
+            candidateComments = emptyList(),
+            associationCandidates = emptyList(),
+            candidateActions = emptyList(),
+        )
+        FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] deleted chunk len=${chunk.length}")
+        return true
+    }
+
+    /**
+     * 删除键右滑：恢复刚被左滑整段回删的内容。
+     *
+     * 恢复前用落点锚校验：用户中途打过字/移过光标就作废，避免把旧内容插到错误位置。
+     *
+     * @return true 表示确实恢复了内容
+     */
+    internal suspend fun handleRestoreLastCommitKey(): Boolean {
+        val chunk = service.swipeDeletedChunk
+        val anchor = service.swipeDeletedAnchor
+        if (chunk.isNullOrEmpty()) {
+            FileLogger.d("ImeKeyRouter", "[SWIPE-UNDEL] nothing to restore")
+            return false
+        }
+        val ic = service.currentInputConnection
+        if (ic == null) {
+            service.swipeDeletedChunk = null
+            service.swipeDeletedAnchor = null
+            return false
+        }
+        if (anchor != null) {
+            val now = runCatching {
+                ic.getTextBeforeCursor(anchor.length + 4, 0)?.toString().orEmpty()
+            }.getOrDefault("")
+            if (!now.endsWith(anchor)) {
+                FileLogger.d("ImeKeyRouter", "[SWIPE-UNDEL] anchor mismatch, drop slot")
+                service.swipeDeletedChunk = null
+                service.swipeDeletedAnchor = null
+                return false
+            }
+        }
+        service.swipeDeletedChunk = null
+        service.swipeDeletedAnchor = null
+        // 走服务上屏：同时刷新上屏记录与联想上下文
+        withContext(Dispatchers.Main) { service.commitText(chunk) }
+        FileLogger.d("ImeKeyRouter", "[SWIPE-UNDEL] restored len=${chunk.length}")
+        return true
+    }
+
+    /**
+     * 横向滑动删除前把 Rime 组合收干净。
+     *
+     * 编码/候选只属于键盘：留着组合时去删宿主正文，候选栏会与正文不一致。
+     */
+    private suspend fun endCompositionForSwipeGesture() {
+        if (service.rimeEngine.getInput().isEmpty()) return
+        service.rimeEngine.clearComposition()
+        service.candidateState.value = service.candidateState.value.copy(
+            inputText = "",
+            preeditText = "",
+            candidates = emptyList(),
+            candidateComments = emptyList(),
+            candidateActions = emptyList(),
+            isComposing = false,
+        )
+        withContext(Dispatchers.Main) {
+            if (SettingsPreferences.isInputBoxComposing(service)) {
+                service.endComposingInputBox()
+            }
+        }
+    }
+
+    internal fun handleDeleteKey() {
+        // ★ 退格窗口在**入口**开启：覆盖删除本身 + 后续 refreshAfterKey 的 UI 同步链。
+        //   之前只在 deleteRimeComposition 里开启，但删除完成后 needsUIUpdate=true
+        //   还会走 refreshAfterKey → updateUIWithResult → syncInputBoxComposition，
+        //   那条链写入候选词（如「就」「继续」），覆盖掉刚写入的编码——日志实证
+        //   [BOX] write text='就' ... inWindow=false。
+        service.beginForceCodeWindow()
+        val shouldLaunch = synchronized(service.deleteCoalesceLock) {
+            if (service.deleteJobActive) {
+                service.pendingDeleteCount++
+                false
+            } else {
+                service.deleteJobActive = true
+                true
+            }
+        }
+        if (!shouldLaunch) return
+        launchDeleteJob()
+    }
+
+    /**
+     * 启动一个退格 job（keyJobs FIFO 保序）。完成后若仍有累积的退格请求，
+     * 通过 [maybeScheduleFollowUp] 排入下一个 job。这样 keyJobs 中至多有一个
+     * 退格 job 在执行/排队：既避免长按退格（~80ms 重复）超过 rime 退格吞吐时
+     * 把 keyJobs 堆满、导致候选栏 UI 以"迟到的跳帧"方式刷新（一闪一闪），
+     * 也保持与其它按键的相对顺序——合并的退格会在夹在中间的字母键之后执行。
+     */
+    internal fun launchDeleteJob() {
+        // 世代快照：输入框切换时 [XimeInputMethodService.deleteGeneration] 自增，
+        // 排队中的退格据此整体作废，不再把上一个输入框的删除动作重放到新框上
+        // （用户 2026-11 修复：长按删除时切应用/切输入框会多删字）。
+        val generation = service.deleteGeneration
+        val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
+            try {
+                if (generation == service.deleteGeneration) processDeleteKey()
+            } catch (t: Throwable) {
+                FileLogger.e(XimeInputMethodService.TAG, "processDeleteKey failed", t)
+            } finally {
+                maybeScheduleFollowUp(generation)
+            }
+        }
+        service.keyJobs.trySend(job)
+    }
+
+    /** 若长按退格期间有累积的请求，排入下一个退格 job；否则结束合并状态。 */
+    internal fun maybeScheduleFollowUp(generation: Int = service.deleteGeneration) {
+        if (generation != service.deleteGeneration) {
+            // 输入框已换：丢弃全部累积请求，合并状态归零
+            synchronized(service.deleteCoalesceLock) {
+                service.pendingDeleteCount = 0
+                service.deleteJobActive = false
+            }
+            return
+        }
+        val shouldLaunch = synchronized(service.deleteCoalesceLock) {
+            if (service.pendingDeleteCount == 0) {
+                service.deleteJobActive = false
+                false
+            } else {
+                service.pendingDeleteCount--
+                true
+            }
+        }
+        if (shouldLaunch) {
+            launchDeleteJob()
+        }
+    }
+
+    /** 单次退格处理（service.keyProcessingDispatcher 上执行）。 */
+    internal suspend fun processDeleteKey() {
+        // 快捷发送表单显示：退格按焦点路由到表单内 EditText（与单击退格同一路径），不进入 Rime
+        val candState = service.candidateState.value
+        // 退格改变输入上下文：使在途的联想预测结果失效，防止过期结果迟到回填
+        // associationCandidates，导致长按退格删除时候选栏在"联想词↔空"之间闪动。
+        service.predictionManager.invalidatePendingPredictions()
+        // 计算器模式：追踪退格
+        service.calculatorEngine.handleDelete()
+        updateCalculatorCandidates()
+
+        // 数字/符号键盘：直接发送系统退格，不经过 Rime
+        // 防止 T9 残留状态被 Rime 退格修改导致 UI 不一致
+        val layoutState = service.keyboardViewModel.keyboardState.value
+        // 【诊断】只在 DEBUG 级日志下采集（用户 2026-11 修复）。
+        //   删除是 30-80ms 级热路径：原来每次按键都无条件做一次跨进程
+        //   `getTextBeforeCursor(20)`，长按删除等于每秒白付几十次 Binder IPC；
+        //   而且它把光标前 20 个字符写进日志文件（密码框里那段就是密码）。
+        //   现在只在需要排查时才付这份开销，且**只记长度、不记内容**。
+        if (FileLogger.isDebugEnabled()) {
+            FileLogger.d(
+                "ImeKeyRouter",
+                "[DEL] enter layout=" + layoutState::class.simpleName +
+                    " composing=" + candState.isComposing +
+                    " inputLen=" + candState.inputText.length +
+                    " pendingEnLen=" + candState.pendingEnglishText.length +
+                    " preeditLen=" + candState.preeditText.length +
+                    " assoc=" + candState.associationCandidates.size +
+                    " clipboard=" + candState.isShowingRecentClipboard +
+                    " editCaret=" + service.editingCaretPos +
+                    " rimeInputLen=" + service.rimeEngine.getInput().length,
+            )
+            runCatching {
+                val beforeLen = service.currentInputConnection?.getTextBeforeCursor(20, 0)?.length ?: 0
+                FileLogger.d("ImeKeyRouter", "[DEL] screenBeforeLen=" + beforeLen)
+            }
+        }
+        if (layoutState is KeyboardLayoutState.Number || layoutState is KeyboardLayoutState.Symbol) {
+            FileLogger.d("ImeKeyRouter", "[DEL] -> 数字/符号键盘：sendDownUpKeyEvents")
+            withContext(Dispatchers.Main) {
+                service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            }
+        } else when {
+            // 1. 英文待处理文本：逐个删除字符，重新加载联想
+            candState.pendingEnglishText.isNotEmpty() -> {
+                FileLogger.d("ImeKeyRouter", "[DEL] -> 分支1 英文待处理")
+                deletePendingEnglish(candState.pendingEnglishText)
+            }
+
+            // 2. Rime 编码中：让 Rime 处理退格，更新候选
+            // ★ 关键：candidateState 的两个字段在「首候选显示在输入框」模式下可能**全空**
+            //   （编码只存在于 Rime 引擎，candidateState 被 endComposingInputBox 清过）。
+            //   真机日志实证：composing=false inputLen=0 preedit='' 但 rimeInput='yyg'。
+            //   若不查引擎真值，就会落到分支4走系统退格 → 一次删光。
+            candState.isComposing || candState.inputText.isNotEmpty() ||
+                candState.preeditText.isNotEmpty() || service.rimeEngine.getInput().isNotEmpty() -> {
+                FileLogger.d("ImeKeyRouter", "[DEL] -> 分支2 Rime编码中")
+                deleteRimeComposition()
+            }
+
+            // 3. 联想词或剪贴板：仅清空候选栏，不回删已上屏字符
+            candState.associationCandidates.isNotEmpty() || candState.isShowingRecentClipboard -> {
+                FileLogger.d("ImeKeyRouter", "[DEL] -> 分支3 清候选栏(不回删字符)")
+                clearAssociationCandidates()
+            }
+
+            // 4. 无候选也无编码：直接回删已上屏文本
+            else -> {
+                FileLogger.d("ImeKeyRouter", "[DEL] -> 分支4 删已上屏字符")
+                deleteCommittedChar()
+            }
+        }
+    }
+
+    /**
+     * 退格分支 1：英文待处理文本逐个删除，并在删空前/后重新加载联想。
+     *
+     * 从 [processDeleteKey] 的 `when` 分支抽出，正文逐字一致。
+     */
+    private suspend fun deletePendingEnglish(pendingEnglishText: String) {
+        val newPending = pendingEnglishText.dropLast(1)
+        if (newPending.isNotEmpty()) {
+            withContext(Dispatchers.Main) {
+                service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+                service.candidateState.value = service.candidateState.value.copy(
+                    pendingEnglishText = newPending,
+                    candidates = emptyList(),
+                    candidateComments = emptyList(),
+                    associationCandidates = emptyList(),
+                    candidateActions = emptyList()
+                )
+            }
+            if (!service.isSecretEditor() && service.supportsEnglishCandidateReplace()) {
+                service.serviceScope.launch {
+                    val candidates = service.predictionManager.getEnglishAssociations(newPending, PredictionManager.MAX_ASSOCIATION_COUNT)
+                    withContext(Dispatchers.Main) {
+                        service.candidateState.value = service.candidateState.value.copy(associationCandidates = candidates)
+                    }
+                }
+            }
+        } else {
+            withContext(Dispatchers.Main) {
+                service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+                service.candidateState.value = service.candidateState.value.copy(
+                    pendingEnglishText = "",
+                    candidates = emptyList(),
+                    candidateComments = emptyList(),
+                    associationCandidates = emptyList(),
+                    isShowingRecentClipboard = false,
+                    candidateActions = emptyList()
+                )
+            }
+            // 待确认英文已删空：候选展开页若开着则收起（无内容可展示）
+            service.maybeCollapseCandidatePage()
+        }
+    }
+
+    /**
+     * 退格分支 2：Rime 编码中，让 Rime 处理退格并更新候选。
+     *
+     * 从 [processDeleteKey] 的 `when` 分支抽出，正文逐字一致。
+     */
+    private suspend fun deleteRimeComposition() {
+        val editingCaret = service.editingCaretPos
+        val editingInput = if (editingCaret > 0) service.rimeEngine.getInput() else ""
+        FileLogger.d("ImeKeyRouter", "[DEL] deleteRimeComposition: editCaret=" + editingCaret + " rimeInput=" + editingInput)
+        if (editingCaret > 0 && editingInput.length >= editingCaret) {
+            // 编码编辑态：宿主删除光标前字符并 setInput 整串重建——librime caret
+            // 恒在编码末尾，候选始终针对整个编码转换（光标只是编辑位置）
+            val newInput = editingInput.removeRange(editingCaret - 1, editingCaret)
+            service.editingCaretPos = if (newInput.isEmpty()) -1 else editingCaret - 1
+            service.editingCaretInput = newInput
+            val result = service.rimeEngine.setInputAndGetResult(newInput)
+            if (result.inputText.isEmpty()) {
+                service.rimeEngine.clearComposition()
+                service.editingCaretPos = -1
+            }
+            sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+        } else {
+            // ── 逐字符回退（不依赖 Rime 的 BackSpace 行为）──
+            //
+            // 编码来源按可靠性排序：
+            //   1. candidateState.inputText —— 用户实际敲的编码，最可靠；
+            //   2. rimeEngine.getInput()   —— 引擎真值，但锁竞争时 tryLocked 会静默返回 ""；
+            //   3. **绝不用 preeditText** —— candidate_first_in_input_box 模式下它装的是
+            //      「首候选词」（中文），拿它 dropLast 会得到乱码并清空编码。
+            val fromState = service.candidateState.value.inputText
+            val fromEngine = service.rimeEngine.getInput()
+            val code = when {
+                fromState.isNotEmpty() -> fromState
+                fromEngine.isNotEmpty() -> fromEngine
+                else -> ""
+            }
+            FileLogger.d(
+                "ImeKeyRouter",
+                "[DEL] code source: state='" + fromState + "' engine='" + fromEngine +
+                    "' -> using='" + code + "'",
+            )
+            // 编码必须是纯 ASCII 字母/数字，否则说明取错了源（例如中文候选词）
+            val isPlainCode = code.isNotEmpty() && code.all { it.code in 0x21..0x7E }
+            if (!isPlainCode) {
+                // 没有可靠编码：用 Rime 退格（它在真正无组合时是无害的）
+                val r = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                if (r.processed) {
+                    sendTransformedResult(r) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                } else {
+                    deleteCommittedChar()
+                }
+                return
+            }
+
+            val newCode = code.dropLast(1)
+            if (newCode.isEmpty()) {
+                // 退到只剩 1 个字符 → 退完即空：清组合与候选
+                service.rimeEngine.clearComposition()
+                service.editingCaretPos = -1
+                service.editingCaretInput = ""
+                service.candidateState.value = service.candidateState.value.copy(
+                    inputText = "",
+                    preeditText = "",
+                    candidates = emptyList(),
+                    candidateComments = emptyList(),
+                    candidateActions = emptyList(),
+                    isComposing = false,
+                    // 与其它清空路径（clearInputStateForKeys / resetEnterLikeCandidates）对齐：
+                    // 漏清这两个字段会让英文待处理/联想残影留到下一次输入（用户 2026-11 修复）。
+                    pendingEnglishText = "",
+                    associationCandidates = emptyList(),
+                )
+                withContext(Dispatchers.Main) {
+                    if (SettingsPreferences.isInputBoxComposing(service)) {
+                        service.endComposingInputBox()
+                    }
+                }
+                if (service.t9PartialSegments.isNotEmpty()) {
+                    val len = service.t9PartialSegments.last().text.length
+                    withContext(Dispatchers.Main) {
+                        if (SettingsPreferences.isInputBoxComposing(service)) {
+                            service.endComposingInputBox()
+                        } else {
+                            service.deleteBeforeCursor(len)
+                        }
+                    }
+                    val undone = service.t9PartialSegments.removeLastOrNull()
+                    if (undone != null) {
+                        service.rimeEngine.t9Forget(undone.text, undone.pinyin)
+                    }
+                }
+                return
+            }
+
+            val result = service.rimeEngine.setInputAndGetResult(newCode)
+            FileLogger.d(
+                "ImeKeyRouter",
+                "[DEL] setInput '" + code + "'->'" + newCode + "' processed=" + result.processed +
+                    " resultInput='" + result.inputText + "'",
+            )
+            if (!result.processed || result.inputText.isEmpty()) {
+                // setInput 不被接受：**回退用 Rime 退格**，绝不清空编码。
+                FileLogger.w(
+                    "ImeKeyRouter",
+                    "[DEL] setInput ineffective, fallback to Rime BACKSPACE (keep code)",
+                )
+                val r = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                if (r.processed) {
+                    sendTransformedResult(r) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                } else {
+                    // 引擎既不认 setInput 也不认退格（会话重建/部署后残留）：
+                    // 必须落到删已上屏字符，否则这一下删除完全没反应（用户 2026-11 修复）。
+                    FileLogger.w("ImeKeyRouter", "[DEL] engine rejected both setInput and BACKSPACE, delete committed char")
+                    deleteCommittedChar()
+                }
+                return
+            }
+            sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+        }
+        // 退格后确保 candidateState 与引擎同步（编码可能只在引擎里），
+        // 否则候选栏看不到编码在减少
+        runCatching {
+            val engineInput = service.rimeEngine.getInput()
+            val cs = service.candidateState.value
+            if (engineInput != cs.inputText || engineInput != cs.preeditText) {
+                // Compose 的 mutableStateOf 不是线程安全的：删除发生在 key-processing 线程，
+                // 直接赋值可能丢更新或触发快照冲突，统一走 updateCandidateState（自动切主线程）。
+                service.updateCandidateState {
+                    it.copy(
+                        inputText = engineInput,
+                        preeditText = engineInput,
+                        isComposing = engineInput.isNotEmpty(),
+                    )
+                }
+                FileLogger.d("ImeKeyRouter", "[DEL] state synced: inputText='" + engineInput + "'")
+            }
+        }
+    }
+
+    /**
+     * 退格分支 3：联想词或剪贴板显示中，仅清空候选栏，不回删已上屏字符。
+     *
+     * 从 [processDeleteKey] 的 `when` 分支抽出，正文逐字一致。
+     */
+    private fun clearAssociationCandidates() {
+        service.updateCandidateState {
+            it.copy(
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                associationCandidates = emptyList(),
+                isShowingRecentClipboard = false,
+            )
+        }
+        // 候选展开页：联想/剪贴板候选清空后无内容，收起
+        service.maybeCollapseCandidatePage()
+    }
+
+    /**
+     * 退格分支 4：无候选也无编码，直接回删已上屏文本。
+     *
+     * 从 [processDeleteKey] 的 `when` 分支抽出，正文逐字一致。
+     */
+    private suspend fun deleteCommittedChar() {
+        service.predictionManager.deleteLastChar()
+
+        // 恢复到原始行为：直接发系统退格删已上屏字符。
+        // （曾尝试"先清 composing 再删"，但 inputBoxComposingActive 标记残留时
+        //   会走 endComposingInputBox 把输入框清空，反而造成"一下全没"，已回滚。）
+        withContext(Dispatchers.Main) {
+            service.sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+        }
+
+        service.updateCandidateState {
+            it.copy(
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                associationCandidates = emptyList(),
+                isShowingRecentClipboard = false,
+            )
+        }
+        // 候选展开页：无候选无编码，收起
+        service.maybeCollapseCandidatePage()
+    }
+
+    /**
+     * Posts a rime operation to [keyJobs] for sequential execution.
+     * Ensures no interleaving with key processing.
+     */
+    internal fun postRimeJob(block: suspend CoroutineScope.() -> Unit) {
+        val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
+            // serviceScope 是 SupervisorJob() + Dispatchers.Main，**没有** CoroutineExceptionHandler：
+            // 这里不兜住，block 内任何 Rime/JNI 异常都会走进程默认处理器直接崩掉输入法。
+            // 记日志后继续消费队列，避免一个异常把整条按键通道打死。
+            try {
+                block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                FileLogger.e("ImeKeyRouter", "postRimeJob block failed", e)
+            }
+        }
+        service.keyJobs.trySend(job)
+    }
+
+    suspend fun selectCandidateAsync(index: Int, expandedCandidate: RimeCandidate? = null) {
+        // 展开页点选（expandedCandidate 非空）：取词/注释以展开页显示的同一份
+        // 全量列表为准（所见即所得）。index 是全量索引，不得用于索引引擎当前页的
+        // candidates/candidateComments——部分选拼音（SELECTION 态）或候选超页时
+        // 两列表错位，全局索引套在当前页上会取错词（如点长词只上屏另一短词）。
+        // 插件候选 actions 按页内索引记录，展开页索引同样不适用，直接跳过检测。
+        val pendingAction = if (expandedCandidate == null) {
+            service.candidateState.value.candidateActions.getOrNull(index)
+        } else {
+            null
+        }
+        if (pendingAction != null && pendingAction.isPluginCandidate) {
+            // 组合键的文本候选：触发码可能完全不在词库里（引擎无组合），
+            // 因此直接上屏求值结果，不走「引擎有组合才上屏」那条插件候选防御。
+            if (pendingAction.fromCombo && !pendingAction.isCommand) {
+                service.markCandidateSelection(pendingAction.commitText)
+                commitPluginCandidate(pendingAction.commitText)
+                return
+            }
+            // 命令候选（组合键的「重新部署」）：执行命令，不上屏文本。
+            if (pendingAction.isCommand) {
+                withContext(Dispatchers.Main) {
+                    service.executeCommand(pendingAction.command.orEmpty())
+                }
+                clearComboState()
+                return
+            }
+            // 防御：中英/方案切换后引擎组合已清空但 candidateState 残留旧候选+actions，
+            // 此时点选必须回落原生路径（引擎侧 selectCandidate 失败自动防呆，与旧行为一致），
+            // 否则残留插件候选会绕过引擎校验直接上屏。
+            val engineHasComposition = service.rimeEngine.getInput().isNotEmpty() ||
+                service.rimeEngine.getCandidates().isNotEmpty()
+            if (engineHasComposition) {
+                service.markCandidateSelection(pendingAction.commitText)
+                commitPluginCandidate(pendingAction.commitText)
+                return
+            }
+        }
+
+        val selectedCandidate = expandedCandidate?.text
+            ?: if (index < service.candidateState.value.candidates.size) {
+                service.candidateState.value.candidates[index]
+            } else null
+
+        // 兜底：造词候选的 actions 若未同步（防御），按“词在造词表”直接上屏，
+        // 避免「候选栏看得到却点不动」（selectRimeOk=false 静默失败）。
+        if (selectedCandidate != null &&
+            service.isAutoWordCandidate(selectedCandidate, service.candidateState.value.inputText)
+        ) {
+            service.markCandidateSelection(selectedCandidate)
+            commitPluginCandidate(selectedCandidate)
+            return
+        }
+
+        val isT9 = isT9Schema(service.uiState.value.currentSchemaId)
+        val candidatePinyin = if (isT9) {
+            expandedCandidate?.comment?.takeIf { it.isNotEmpty() }
+                ?: if (index < service.candidateState.value.candidateComments.size) {
+                    service.candidateState.value.candidateComments[index]
+                } else {
+                    null
+                }
+        } else {
+            null
+        }
+
+        // 在 RIME 真正 select/commit 之前，先同步通知 T9 控制器消费数字。
+        // 控制器返回 true 表示输入序列已被该候选词完整消费，服务层应视为 full commit。
+        // 传入候选文本用于 C++ (comment, text) 双条件精确定位（注释歧义防错码）。
+        val candidateTextLength = selectedCandidate?.length ?: 0
+        val fullyConsumed = if (isT9) {
+            service.keyboardCallbacks?.onT9RightCandidateWillBeSelected?.invoke(candidatePinyin, selectedCandidate, candidateTextLength) ?: false
+        } else {
+            false
+        }
+
+        // T9：跳过 service.rimeEngine.selectCandidate，消费已由 T9 处理器（t9_processor）
+        // 独立完成。selectCandidate 会遗留 [confirmed, phony] 残留 composition 状态，
+        // 导致后续 forceSendToRime 的 setInput 无法正常重建候选项（对齐 main 分支）。
+        // 非 T9 才调用 selectCandidate，并用 resolveRimeCandidateIndex 修正候选 index，
+        // 避免 UI 候选被过滤/重排后上屏错词。
+        val selectRimeOk = if (isT9) {
+            true
+        } else {
+            val rimeIndex = if (pendingAction != null && pendingAction.engineIndex >= 0) {
+                // 变换映射记录的引擎候选索引（比按显示文本回查更准）
+                pendingAction.engineIndex
+            } else if (selectedCandidate != null) {
+                resolveRimeCandidateIndex(index, selectedCandidate, service.rimeEngine.getCandidates().toList())
+            } else {
+                index
+            }
+            service.rimeEngine.selectCandidate(rimeIndex)
+        }
+        if (!selectRimeOk) return
+
+        // T9：跳过 service.rimeEngine.commit()，用用户点选的 selectedCandidate 作为权威上屏文本。
+        val committedText = if (isT9) "" else service.rimeEngine.commit()
+        // T9 模式下 fullyConsumed 是判断 full/partial commit 的唯一权威：
+        // 当控制器明确 partial commit 时，即使 RIME commit() 返回非空文本
+        // （RIME 内部做了 partial commit），也不应走 full commit 路径。
+        val isFullCommit = if (isT9) {
+            fullyConsumed && selectedCandidate != null
+        } else {
+            committedText.isNotEmpty()
+        }
+        if (isFullCommit) {
+            commitFullSelection(isT9, selectedCandidate, candidatePinyin, committedText)
+        } else {
+            commitPartialSelection(isT9, selectedCandidate, candidatePinyin)
+        }
+    }
+
+    /**
+     * 选词分支 A：整串上屏（确认段已覆盖全部输入）。
+     *
+     * 从 [selectCandidateAsync] 抽出，正文逐字一致，仅把外层局部量改为参数。
+     * 含 T9 partial 累积文本的拼接与调频拼音构造。
+     */
+    private suspend fun commitFullSelection(
+        isT9: Boolean,
+        selectedCandidate: String?,
+        candidatePinyin: String?,
+        committedText: String,
+    ) {
+        if (SettingsPreferences.isSmartPredictionEnabled(service) && selectedCandidate != null && AssociationManager.isInitialized()) {
+            if (service.predictionManager.lastCommittedText.isNotEmpty()) {
+                val lastChar = service.predictionManager.lastCommittedText.last().toString()
+                service.predictionManager.recordInputPair(lastChar, selectedCandidate)
+            }
+        }
+        // T9 full commit：以用户点选的候选词文本为权威上屏文本；
+        // 非 T9 仍用 RIME committedText（可能含简繁转换等处理）。
+        val textToMerge = if (isT9 && selectedCandidate != null) {
+            selectedCandidate
+        } else if (committedText.isNotEmpty()) {
+            committedText
+        } else {
+            // 无候选也没有 RIME 提交文本：无事可做，不能强解（否则空候选栏点选即崩）
+            selectedCandidate ?: return
+        }
+        // T9 full commit：partial commit 累积文本（未单独上屏，只存在于
+        // service.t9PartialSegments 的 composing 区）与本次上屏文本是独立词，必须拼接，
+        // 不能去重（mergePartialCommitText 仅用于显示，会吞掉重复的词）。
+        // 但若点击的是 partial 词本身（RIME 无菜单、候选栏显示的就是 partial 词，
+        // 无拼音注释 candidatePinyin==null），则只提交累积的 partial 文本，避免重复。
+        val partialTexts = service.t9PartialSegments.map { it.text }
+        val fullCommitText = if (isT9 && partialTexts.isNotEmpty()) {
+            if (candidatePinyin == null) {
+                partialTexts.joinToString("")
+            } else {
+                partialTexts.joinToString("") + textToMerge
+            }
+        } else {
+            textToMerge
+        }
+        // 调频拼音与上屏文本同源：partial 累积拼音 + 当前候选拼音（如 "ji hu a"）。
+        val fullCommitPinyin = buildString {
+            service.t9PartialSegments.forEachIndexed { i, seg ->
+                if (i > 0) append(' ')
+                append(seg.pinyin)
+            }
+            if (candidatePinyin != null) {
+                if (isNotEmpty()) append(' ')
+                append(candidatePinyin)
+            }
+        }
+        withContext(Dispatchers.Main) {
+            service.markCandidateSelection(fullCommitText)
+            service.commitText(fullCommitText)
+            service.t9PartialSegments.clear()
+            // 编码已随候选整串上屏：退出编码编辑态（光标复位到末尾语义）
+            service.editingCaretPos = -1
+            service.editingCaretInput = ""
+            service.candidateState.value = service.candidateState.value.copy(
+                inputText = "",
+                preeditText = "",
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                isComposing = false,
+                hasNextPage = false,
+                hasPrevPage = false,
+                isShowingRecentClipboard = false
+            )
+            service.uiState.value = service.uiState.value.copy(
+                t9ResetSignal = service.uiState.value.t9ResetSignal + 1,
+                t9RightCandidateSelectedCount = 0,
+                t9SelectedCandidatePinyin = ""
+            )
+        }
+        // 用户词典调频：记忆实际上屏文本（后台线程，rimeLock 保护）。
+        if (isT9 && fullCommitText.isNotEmpty() && fullCommitPinyin.isNotEmpty()) {
+            service.rimeEngine.t9Memorize(fullCommitText, fullCommitPinyin)
+        }
+        // T9 跳过了 service.rimeEngine.commit()，需显式清除 RIME composition，
+        // 防止残留状态影响后续输入（在 service.keyProcessingDispatcher 上执行）。
+        if (isT9) service.rimeEngine.clearComposition()
+    }
+
+    /**
+     * 选词分支 B：部分上屏（确认段未覆盖全部输入）。
+     *
+     * 从 [selectCandidateAsync] 抽出，正文逐字一致，仅把外层局部量改为参数。
+     */
+    private suspend fun commitPartialSelection(
+        isT9: Boolean,
+        selectedCandidate: String?,
+        candidatePinyin: String?,
+    ) {
+        withContext(Dispatchers.Main) {
+            if (isT9) {
+                // partial commit：累积候选文本与拼音，供合并显示与 full commit 调频拼接。
+                if (selectedCandidate != null) {
+                    service.t9PartialSegments.add(T9PartialSegment(selectedCandidate, candidatePinyin ?: ""))
+                }
+                // 保留状态字段，供 UI 层感知右侧选词事件
+                service.uiState.value = service.uiState.value.copy(
+                    t9RightCandidateSelectedCount = service.uiState.value.t9RightCandidateSelectedCount + 1,
+                    t9SelectedCandidatePinyin = candidatePinyin ?: ""
+                )
+                // RIME composition 未被 selectCandidate 修改（已跳过），
+                // 直接发送剩余数字到 RIME 重建 composition。
+                // 候选栏由 forceSendToRime 异步 post 刷新；此处不可同步调 updateUI，
+                // 否则与 refreshOnBackground 竞争 rimeLock，空数据覆盖候选栏。
+                service.keyboardCallbacks?.onT9ForceSendToRime?.invoke()
+            } else {
+                // 非 T9 非 full commit（确认段未覆盖全部输入）：选词动作已结束
+                // 编辑会话，复位编码编辑态（displayCaretOffset 亦会失同步自愈兜底）
+                service.editingCaretPos = -1
+                service.editingCaretInput = ""
+                service.updateUI()
+            }
+        }
+    }
+
+    /**
+     * 插件候选直接上屏（所见即所得）：不经引擎 select/commit。
+     * 先上屏并清空候选状态（与 enter 提交分支同序），再清引擎组合态。
+     */
+    private suspend fun commitPluginCandidate(text: String) {
+        withContext(Dispatchers.Main) {
+            service.commitText(text)
+            service.candidateState.value = service.candidateState.value.copy(
+                inputText = "",
+                preeditText = "",
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                associationCandidates = emptyList(),
+                pendingEnglishText = "",
+                isComposing = false,
+                isShowingRecentClipboard = false,
+                hasNextPage = false,
+                hasPrevPage = false,
+                candidateActions = emptyList()
+            )
+            // T9：清 partial 累积与左栏状态（与引擎候选 full commit 同款清理，
+            // 防残留 partial 混入下一轮 preedit / 左侧面板残留）
+            service.t9PartialSegments.clear()
+            service.uiState.value = service.uiState.value.copy(
+                t9ResetSignal = service.uiState.value.t9ResetSignal + 1,
+                t9RightCandidateSelectedCount = 0,
+                t9SelectedCandidatePinyin = ""
+            )
+        }
+        service.rimeEngine.clearComposition()
+    }
+    
+    /**
+     * 清空组合键触发后的输入态（触发码 + 组合候选）。
+     *
+     * 命令候选（如重新部署）不会上屏文本，但触发码已经进了 Rime 组合，必须一并清掉；
+     * 否则编码残留在输入框/候选栏，用户还得手动退格。
+     */
+    private suspend fun clearComboState() {
+        withContext(Dispatchers.Main) {
+            service.candidateState.value = service.candidateState.value.copy(
+                inputText = "",
+                preeditText = "",
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                candidateActions = emptyList(),
+                isComposing = false,
+                hasNextPage = false,
+                hasPrevPage = false,
+            )
+        }
+        service.rimeEngine.clearComposition()
+        // 「候选首词显示在输入框」开启时，首候选（即命令标签「重新部署」）已被写进
+        // 输入框 composing 区：命令不上屏，必须一并清掉，否则标签残留在输入框里。
+        //
+        // 用 forceClear = true：endComposingInputBox 默认只在 inputBoxComposingActive 标记
+        // 为 true 时才 setComposingText("")（该标记是为防「误删选中文字」而设）。但命令候选
+        // 路径下标记可能不准（写入被容错吞掉 / onWindowHidden 抢先重置），导致只 finish，
+        // 标签被提交成普通文本残留 —— 真机表现为「有的输入框留下"重新部署"字样」。
+        // 此路径用户刚打完触发码、光标处无选中文字，强制清空 composing 区是安全的。
+        if (SettingsPreferences.isInputBoxComposing(service)) {
+            withContext(Dispatchers.Main) { service.endComposingInputBox(forceClear = true) }
+        }
+    }
+
+    /**
+     * 输入态判定（clear_all 与 undo_clear 共用）。
+     *
+     * 输入态 = 存在未上屏内容：RIME 组合（candidateState 派生字段）或英文输入
+     *（pendingEnglishText 非空——英文按键不经 RIME，故 inputText/preeditText/isComposing 恒空，
+     * 漏判会让 clear_all 把 composing 区文本与 pendingEnglishText 重复拼接）
+     * 或 T9 partial 累积。
+     * 不能用 RIME getInput()——tryLocked 锁竞争时静默返回空，会误判空闲态。
+     */
+    private fun hasInputState(candState: CandidateState): Boolean =
+        candState.isComposing ||
+            candState.inputText.isNotEmpty() ||
+            candState.preeditText.isNotEmpty() ||
+            candState.pendingEnglishText.isNotEmpty() ||
+            service.t9PartialSegments.isNotEmpty()
+
+    /**
+     * 清空输入态（预编辑/候选/联想/partial 累积/计算器），不动已上屏文本。
+     * 供 clear_composition 与 clear_all 输入态分支共用。
+     *
+     * 显式清 preeditText（与提交路径"残留根治"一致），不依赖 updateUI 自愈；
+     * 输入框模式清 composing 区；T9 方案重置左侧候选区（其他键盘无左栏，跳过）。
+     */
+    private suspend fun clearInputStateForKeys() {
+        service.calculatorEngine.clear()
+        updateCalculatorCandidates()
+        service.t9PartialSegments.clear()
+        service.rimeEngine.clearComposition()
+        service.candidateState.value = service.candidateState.value.copy(
+            candidates = emptyList(),
+            candidateComments = emptyList(),
+            associationCandidates = emptyList(),
+            pendingEnglishText = "",
+            inputText = "",
+            preeditText = "",
+            isComposing = false,
+            isShowingRecentClipboard = false
+        )
+        if (SettingsPreferences.isInputBoxComposing(service)) {
+            withContext(Dispatchers.Main) { service.endComposingInputBox() }
+        }
+        if (isT9Schema(service.uiState.value.currentSchemaId)) {
+            service.uiState.value = service.uiState.value.copy(
+                t9ResetSignal = service.uiState.value.t9ResetSignal + 1,
+                t9RightCandidateSelectedCount = 0,
+                t9SelectedCandidatePinyin = ""
+            )
+        }
+    }
+
+    /**
+     * 更新计算器候选栏显示
+     * 显示两个候选：
+     * - index 0: 计算结果（如 "2"），点击直接替换为结果
+     * - index 1: 带公式的结果（如 "1+1=2"），点击显示公式和结果
+     */
+    internal fun updateCalculatorCandidates() {
+        val candidate = service.calculatorEngine.getCandidate()
+        val result = service.calculatorEngine.getResult()
+        service.candidateState.value = if (candidate != null && result.isNotEmpty()) {
+            service.candidateState.value.copy(
+                candidates = listOf(result, candidate),
+                candidateComments = emptyList()
+            )
+        } else {
+            // 如果计算器之前有显示但现在已清除，也要清空候选栏
+            if (service.candidateState.value.candidates.isNotEmpty() && !service.calculatorEngine.isActive()) {
+                service.candidateState.value.copy(
+                    candidates = emptyList(),
+                    candidateComments = emptyList()
+                )
+            } else {
+                service.candidateState.value
+            }
+        }
+    }
+
+    /**
+     * 清除大写金额模式的候选栏回显（不清候选本体，也不动已上屏文本）。
+     *
+     * 候选栏点选、或键盘侧上报空算式时调用：金额已上屏，回显留着会与实际状态脱节。
+     */
+    internal fun clearCapitalAmountDisplay() {
+        val cs = service.candidateState.value
+        if (cs.capitalAmountExpression.isEmpty() && cs.capitalAmountAmount.isEmpty()) return
+        service.candidateState.value = cs.copy(
+            capitalAmountExpression = "",
+            capitalAmountAmount = "",
+        )
+    }
+
+    internal fun selectCandidate(index: Int) {
+        service.composeViewRef?.let { service.feedbackManager.performKeyPressEffect(view = it) }
+
+        val layoutState = service.keyboardViewModel.keyboardState.value
+        val isCalculatorKeyboard = layoutState is com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState.Number
+                || layoutState is com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState.CommonSymbol
+
+        // 大写金额模式必须**先于**计算器判断：此刻候选栏展示的是这两个候选，
+        // 若被上一笔普通模式残留的计算器状态先接走，点选会按算式长度删文本并提交过期结果，
+        // 反而把屏幕上那笔金额删掉。候选栏显示谁，点选就必须归谁。
+        val capitalState = service.candidateState.value
+        if (capitalState.capitalAmountAmount.isNotEmpty() &&
+            layoutState is com.kingzcheung.xime.ui.keyboard.KeyboardLayoutState.Number
+        ) {
+            val capitalExpression = capitalState.capitalAmountExpression
+            val capitalAmount = capitalState.capitalAmountAmount
+            // index 0: 纯金额（已在输入框里，无需再改）；index 1: 「算式 = 金额」
+            val formula = CapitalAmountKeys.candidates(capitalExpression, capitalAmount).getOrNull(1)
+            service.serviceScope.launch(Dispatchers.Main) {
+                // 金额已经随按键上屏，所以 index 1 是**替换**那笔金额，而不是再提交一次；
+                // index 0 则完全不动文本（它本来就等于屏幕上的内容）
+                if (index == 1 && formula != null) {
+                    service.replaceBeforeCursor(capitalAmount, formula)
+                }
+                clearCapitalAmountDisplay()
+                // 通知键盘退出模式并作废累积：这笔金额输完了，
+                // 否则下一个数字会接在旧算式上继续算
+                service.uiState.value = service.uiState.value.copy(
+                    capitalAmountExitSignal = service.uiState.value.capitalAmountExitSignal + 1,
+                )
+            }
+            return
+        }
+
+        // 计算器模式（仅在数字/常用符号键盘下生效，防止状态残留导致其他键盘候选词点击异常）
+        if (service.calculatorEngine.isActive() && isCalculatorKeyboard) {
+            val result = service.calculatorEngine.getResult()
+            val expression = service.calculatorEngine.getExpression()
+            val formulaResult = service.calculatorEngine.getFormulaResult()
+            if (result.isNotEmpty() && expression.isNotEmpty()) {
+                val textToCommit: String
+                // index 0: 纯结果（如 "2"）
+                // index 1: 公式结果（如 "1+1=2"）
+                textToCommit = when (index) {
+                    0 -> result
+                    1 -> formulaResult
+                    else -> ""
+                }
+                if (textToCommit.isNotEmpty()) {
+                    service.calculatorEngine.clear()
+                    service.serviceScope.launch(Dispatchers.Main) {
+                        val ic = service.currentInputConnection
+                        if (ic != null) {
+                            // 删除输入框中已键入的表达式
+                            ic.deleteSurroundingText(expression.length, 0)
+                            // 提交选中的文本
+                            ic.commitText(textToCommit, textToCommit.length)
+                        }
+                        service.candidateState.value = CandidateState()
+                    }
+                }
+            }
+            return
+        }
+        
+        // 大写金额模式的点选已在上方（必须先于计算器）处理完毕，这里承接原有候选逻辑
+        if (service.candidateState.value.isShowingRecentClipboard && index >= 0 && index < service.recentClipboardItemsState.value.size) {
+            // 文本与图片共用同一候选索引空间：图片走"commitContent 直插 → 失败落系统剪贴板"链路
+            val item = service.recentClipboardItemsState.value[index]
+            if (item.isImage) {
+                service.textCommit.selectClipboardImage(item)
+            } else {
+                service.textCommit.selectClipboardItem(item.text)
+            }
+            service.candidateState.value = service.candidateState.value.copy(
+                isShowingRecentClipboard = false,
+                candidates = emptyList(),
+                candidateComments = emptyList()
+            )
+        } else {
+            postRimeJob {
+                selectCandidateAsync(index)
+            }
+        }
+    }
+
+    /**
+     * 长按候选删除自造词（键盘无关，T9/全键盘通用）。
+     * 标准 C API delete_candidate_on_current_page：librime 对 userdb 词条
+     * 做 tombstone 标记（UpdateEntry -1），对非用户词由 rime 侧自行判定。
+     * 显示索引经 resolveRimeCandidateIndex 映射回引擎原始索引（插件候选
+     * 注入会使两者错位，与 selectCandidateAsync 同口径），删除后刷新候选。
+     */
+    internal fun deleteCandidate(displayIndex: Int) {
+        postRimeJob {
+            val text = service.candidateState.value.candidates.getOrNull(displayIndex)
+            if (text.isNullOrEmpty()) return@postRimeJob
+            val engineIndex = resolveRimeCandidateIndex(
+                displayIndex, text, service.rimeEngine.getCandidates().toList()
+            )
+            val ok = service.rimeEngine.deleteCandidateOnCurrentPage(engineIndex)
+            // 引擎删不动的词（方案词典里的固定词条）也要进黑名单：显示层统一屏蔽，
+            // 保证用户「长按删除」之后它不再出现在候选栏。带当前输入编码记录，
+            // 只屏蔽该编码下的这个词，不影响同一词在其它编码下的候选。
+            val code = service.candidateState.value.inputText
+                .ifEmpty { service.candidateState.value.preeditText }
+            service.addWordBlacklist(text, code)
+            FileLogger.i(
+                XimeInputMethodService.TAG,
+                "DeleteCandidate: text='$text' code='$code' display=$displayIndex engine=$engineIndex ok=$ok blacklisted"
+            )
+            withContext(Dispatchers.Main) {
+                service.updateUI()
+            }
+        }
+    }
+    
+    internal fun pageDown() {
+        postRimeJob {
+            service.rimeEngine.pageDown()
+            withContext(Dispatchers.Main) {
+                service.updateUI()
+            }
+        }
+    }
+    
+    internal fun pageUp() {
+        postRimeJob {
+            service.rimeEngine.pageUp()
+            withContext(Dispatchers.Main) {
+                service.updateUI()
+            }
+        }
+    }
+
+    /**
+     * 候选展开页点选：按跨页全局索引选词（select_candidate，区别于候选栏的
+     * 当前页内索引 select_candidate_on_current_page）。
+     *
+     * 关键：rime 的 select 只是把候选放进内部 commit 缓冲，宿主必须再调
+     * [RimeEngine.commit]（get_commit）拉取文本并自行上屏——只刷新 composition
+     * 拿不到上屏内容（编码已消费、字却丢失，即此前"展开页点选无法上屏"的根因）。
+     */
+    internal fun selectCandidateGlobal(globalIndex: Int) {
+        // 点选震动反馈与候选栏同源（performKeyPressEffect），保证手感一致
+        service.composeViewRef?.let { service.feedbackManager.performKeyPressEffect(view = it) }
+        // 入队前先按全局索引取全量候选：调用线程读到的 expandedCandidates 正是
+        // UI 渲染的同一份列表；入队后再取可能被编码刷新清空/重建而扑空
+        val expandedCandidate = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)
+        postRimeJob {
+            // T9 方案的选词消费由 t9_processor 独立完成，直接调引擎 select 会
+            // 遗留 [confirmed, phony] 残留组合态（见 selectCandidateAsync 注释），
+            // 降级走候选栏同款路径；取词/注释必须用展开页同一份全量候选——
+            // 全局索引与引擎当前页列表错位时会取错词/丢字
+            if (isT9Schema(service.uiState.value.currentSchemaId)) {
+                selectCandidateAsync(globalIndex, expandedCandidate)
+                return@postRimeJob
+            }
+            val ok = service.rimeEngine.selectCandidateByGlobalIndex(globalIndex)
+            FileLogger.i(
+                "ImeKeyRouter",
+                "selectCandidateGlobal: index=$globalIndex ok=$ok"
+            )
+            if (!ok) return@postRimeJob
+
+            val committedText = service.rimeEngine.commit()
+            if (committedText.isNotEmpty()) {
+                // 智能联想记录（对齐候选栏点选路径，以引擎实际返回文本为准）
+                if (SettingsPreferences.isSmartPredictionEnabled(service) && AssociationManager.isInitialized()) {
+                    if (service.predictionManager.lastCommittedText.isNotEmpty()) {
+                        val lastChar = service.predictionManager.lastCommittedText.last().toString()
+                        service.predictionManager.recordInputPair(lastChar, committedText)
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    service.markCandidateSelection(committedText)
+                    service.commitText(committedText)
+                    service.candidateState.value = service.candidateState.value.copy(
+                        inputText = "",
+                        preeditText = "",
+                        candidates = emptyList(),
+                        candidateComments = emptyList(),
+                        isComposing = false,
+                        hasNextPage = false,
+                        hasPrevPage = false,
+                        isShowingRecentClipboard = false,
+                        expandedCandidates = emptyList()
+                    )
+                }
+            } else {
+                // 引擎未产生 commit（选中后继续组句的多段场景）：刷新组合态
+                withContext(Dispatchers.Main) {
+                    service.updateUI()
+                }
+            }
+        }
+    }
+
+    /** 候选展开页长按删除自造词：按跨页全局索引删除，删除后重拉全量候选 */
+    internal fun deleteCandidateGlobal(globalIndex: Int) {
+        postRimeJob {
+            val text = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)?.text
+            if (text.isNullOrEmpty()) return@postRimeJob
+            val ok = service.rimeEngine.deleteCandidateByGlobalIndex(globalIndex)
+            // 与候选栏同口径：引擎删不动的词也进黑名单（带当前编码），保证删了就不再出现
+            val code = service.candidateState.value.inputText
+                .ifEmpty { service.candidateState.value.preeditText }
+            service.addWordBlacklist(text, code)
+            FileLogger.i(
+                "ImeKeyRouter",
+                "deleteCandidateGlobal: text='$text' code='$code' index=$globalIndex ok=$ok blacklisted"
+            )
+            withContext(Dispatchers.Main) {
+                service.updateUI()
+            }
+        }
+    }
+
+}
