@@ -4417,7 +4417,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val shownCandidates = candidateState.value.candidates
         val committedWholeWordFromCandidates =
             text in shownCandidates || (shownCandidates.isEmpty() && text == selectedWord)
-        if (committedWholeWordFromCandidates && text !in schemeDictWords) {
+        // 判据用 schemeRootWords（**当前活动方案**能打出的词，排除派生库），
+        // 与组合生词收录查重（recordComboWord 的 comboText in schemeRootWords）同口径。
+        // 不能用 schemeDictWords（所有启用方案的并集）：用户同时启用五笔等方案时，
+        // 五笔词典里有、当前方案打不出的词会被误判「词典已有」而永不计数晋升
+        // （用户实测 2026-11-10：有的词进阶不了，像已知词汇一样）。
+        if (committedWholeWordFromCandidates && text !in schemeRootWords) {
             // 该词在方案里能打出的全部编码（满四码基底 + 三个总规则）；
             // 任一字没有满四码时就编不出来，此时回退实际输入码（保证仍能学）。
             val codes = schemeCodes.ifEmpty { listOf(effectiveCode) }
