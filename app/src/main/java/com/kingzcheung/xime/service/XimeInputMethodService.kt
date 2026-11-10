@@ -4536,12 +4536,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val shownCandidates = candidateState.value.candidates
         val committedWholeWordFromCandidates =
             text in shownCandidates || (shownCandidates.isEmpty() && text == selectedWord)
-        // 判据用 schemeRootWords（**当前活动方案**能打出的词，排除派生库），
-        // 与组合生词收录查重（recordComboWord 的 comboText in schemeRootWords）同口径。
-        // 不能用 schemeDictWords（所有启用方案的并集）：用户同时启用五笔等方案时，
-        // 五笔词典里有、当前方案打不出的词会被误判「词典已有」而永不计数晋升
-        // （用户实测 2026-11-10：有的词进阶不了，像已知词汇一样）。
-        if (committedWholeWordFromCandidates && text !in schemeRootWords) {
+        // 计数判据与组合生词去重**同口径（编码级）**（用户 2026-11-10）：
+        // - 词典没有该词 → 学；
+        // - 词典有该词、且词典编码已含本次上屏编码（用户打的就是词典码）→ 不学（能打出来，无需造）；
+        // - 词典有该词、但本次编码不是词典编码（按造词规则打造词码，如「置顶」的词典码
+        //   是 vdd、本次是造词码）→ **学**，否则造词进了 temp 却永远计不上数、晋升不了
+        //   （与 recordComboWord 编码级去重配套的闭环）；
+        // - 词典有该词但无编码映射（单字/>4字词，映射只建 2~4 字）→ 保守不学（同原行为）。
+        val inRootDict = text in schemeRootWords
+        val dictCodeStr = schemeRootWordCodes[text]
+        val dictAlreadyHasThisCode = when {
+            !inRootDict -> false
+            dictCodeStr == null -> true
+            else -> freqCode.isNotEmpty() && " $dictCodeStr ".contains(" $freqCode ")
+        }
+        if (committedWholeWordFromCandidates && !dictAlreadyHasThisCode) {
             // 该词在方案里能打出的全部编码（满四码基底 + 三个总规则）；
             // 任一字没有满四码时就编不出来，此时回退实际输入码（保证仍能学）。
             val codes = schemeCodes.ifEmpty { listOf(effectiveCode) }
