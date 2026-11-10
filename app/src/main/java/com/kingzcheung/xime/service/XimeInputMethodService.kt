@@ -4102,7 +4102,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             },
             onEntry = { name, word, code ->
                 if (word.isEmpty()) return@collectEntriesStreaming
-                words.add(word)
+                // 排除 app 派生库（word_freq / auto_word / candidate_order）：这些是本功能
+                // 自身生成/统计的库。若把它们的词条计入 words（=schemeDictWords），组合生词
+                // 一进库就会命中下方的「词典已有」判据（recordWordFrequencyLocked 的
+                // text !in schemeDictWords），count 永远停在 0、无法晋升固定词库
+                // （实测 bug：组合词被选满设定次数仍不进阶，根因即此）。
+                // 这里需要的语义是「用户在启用方案主词典里本来就能打出的词」，派生库不算。
+                // 与下方 rootWords 的排除口径一致（3.3.22 已对 rootWords 修，此处补齐）。
+                if (name !in DERIVED_DICT_NAMES) words.add(word)
                 // 排除集按词典级别判定：该词典声明了 nofreq / no_auto_word 才排除其词条。
                 if (noFreqByDict[name] == true) noFreq.add(word)
                 if (noAutoWordByDict[name] == true) noAutoWord.add(word)
