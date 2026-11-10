@@ -4100,6 +4100,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     private var schemeRootWords: Set<String> = emptySet()
 
+    /** 当前方案词典「词 → 编码串」（多码空格分隔，仅 2~4 字词），组合生词编码级去重用。 */
+    @Volatile
+    private var schemeRootWordCodes: Map<String, String> = emptyMap()
+
     /** App 自己生成的派生词库名：它们由词频/造词/排序表生成，不算"真词库"。 */
     private val DERIVED_DICT_NAMES = setOf(
         "word_freq", "auto_word", "candidate_order",
@@ -4148,6 +4152,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val rootWords: Set<String> = emptySet(),
         /** 当前方案 translator.dictionary；切换方案时必须重建 rootWords。 */
         val rootSchema: String = "",
+        /**
+         * 当前方案词典的「词 → 词典编码串」（多码空格分隔，仅 2~4 字词）。
+         *
+         * 用于组合生词的**编码级**去重：词典里有该词、但词典编码不含造词规则
+         * 生成的编码时（如「置顶」词典码 vdd，造词规则码是「置前2码+顶前2码」），
+         * 仍应允许造词码——否则用户按造词规则打码永远搜不到该词（2026-11-10 反馈）。
+         */
+        val rootWordCodes: Map<String, String> = emptyMap(),
     )
 
     /** 解析成功的词库文件快照：(绝对路径, 最后修改时间, 字节数)。 */
@@ -4278,6 +4290,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
         // 单独收集当前活动方案的真词条闭包，用作组合生词去重判据。
         // 仅查当前方案；排除 app 派生词典 word_freq / auto_word / candidate_order。
+        val rootWordCodes = HashMap<String, String>()
         if (activeRootDict.isNotEmpty()) {
             com.kingzcheung.xime.settings.DictionaryHelper.collectEntriesStreaming(
                 rootDicts = listOf(activeRootDict),
@@ -4285,14 +4298,23 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     val f = java.io.File(rimeDir, "$name.dict.yaml")
                     if (!f.isFile) null else f.readText(Charsets.UTF_8)
                 },
-                onEntry = { name, word, _ ->
-                    if (word.isNotEmpty() && name !in DERIVED_DICT_NAMES) rootWords.add(word)
+                onEntry = { name, word, code ->
+                    if (word.isNotEmpty() && name !in DERIVED_DICT_NAMES) {
+                        rootWords.add(word)
+                        // 词 → 词典编码（多码空格追加）：仅组合生词可能产出的 2~4 字词
+                        val len = word.codePointCount(0, word.length)
+                        if (len in 2..4 && code.isNotEmpty()) {
+                            rootWordCodes[word] = rootWordCodes[word]?.let { "$it $code" } ?: code
+                        }
+                    }
                 },
             )
         }
 
         val charCodes = SchemeCodeIndex.buildCharCodes(loadCharDictEntries(cfg.charDict, snapshot))
-        val result = SchemeDictCache(words, noFreq, noAutoWord, charCodes, rootWords, activeRootDict)
+        val result = SchemeDictCache(
+            words, noFreq, noAutoWord, charCodes, rootWords, activeRootDict, rootWordCodes,
+        )
         dictSnapshot = snapshot.toList()
         schemeDictCache = result
         applySchemeDictCache(result)
@@ -4361,6 +4383,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private fun applySchemeDictCache(c: SchemeDictCache) {
         schemeDictWords = c.words
         schemeRootWords = c.rootWords
+        schemeRootWordCodes = c.rootWordCodes
         noFreqWords = c.noFreq
         noAutoWordWords = c.noAutoWord
         schemeCharCodes = c.charCodes
@@ -4581,14 +4604,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             dictWordFilterEnabled = cfg.comboDictFilter,
         )
         for (comboText in comboWords) {
-            // 方案主词典里已有的词不再造：造词的意义是补引擎没有的词。
-            // 3.3.22 收窄判据：只比 schemeRootWords（主词典，如 Flypy/XGuai_user），
-            // 不再用 schemeDictWords（含 word_freq/auto_word/candidate_order 派生库）——
-            // 实测踩坑：从派生库删掉「制式」后，schemeDictWords 内存旧快照仍含它，
-            // 组合生词被误判「词典已有」跳过，用户逐字打永远学不回来（3.3.21 日志实锤）。
-            if (comboText in schemeRootWords) {
-                continue
-            }
             // 该词按方案单字规则能打出的**全部**编码，一条不落收录：
             // 2 字词 = 各字前 2 码（多音字会得到多个组合）；
             // 3 字词 = 两种形态（各字首码 / 前两字首码 + 第三字前 2 码）。
@@ -4597,6 +4612,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 表现为「3 字两种编码只有一种生效」。
             val comboCodes = SchemeCodeIndex.composeCodes(comboText, schemeCharCodes)
             if (comboCodes.isEmpty()) continue
+            // 词典去重改为**编码级**（用户 2026-11-10）：只在「词典已有该词、
+            // 且词典编码里已含某个造词规则编码」时跳过（避免同一词同一码重复候选）；
+            // 词典有该词但编码不同（如「置顶」词典码 vdd，造词规则码是置前2码+顶前2码）
+            // → 仍造词，让用户按造词规则打码也能搜到（否则两头堵：词典码打不出造词码、
+            // 造词又因「词典已有」被跳过）。编码串空格分隔，两端加空格做边界匹配防前缀误判。
+            val dictCodesStr = schemeRootWordCodes[comboText]
+            if (dictCodesStr != null && comboCodes.any { " $dictCodesStr ".contains(" $it ") }) {
+                continue
+            }
             recordAutoWord(comboText, comboCodes, cfg, initialCount = 0)
         }
     }
