@@ -4366,21 +4366,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         schemeCharCodes = c.charCodes
     }
     /**
-     * 文本是否全为简体（GB2312 可编码）。
+     * 文本是否全为**主方案单字码表能打出**的简体字。
      *
-     * GB2312 收录全部常用简体字形、不含繁体字形，编码往返测试即可判定：
-     * 不可映射的字符（繁体/罕用）编码后变 '?'，解码回来与原文不等。
-     * GBK 简体生僻字（如「镕」）不在 GB2312，会被一并过滤——属可接受取舍
-     * （造词场景下用户打得出的字基本都在 GB2312 常用集）。
+     * 简繁切换上屏的繁体词不进词库：主方案是简体音形，繁体词（如「樣」「說」「麼」）
+     * 不在 Flypy_char 单字码表里（编不出码），记进词库只会产出打不出来的组合
+     * （实测收录过「怎麼樣」「怎麼說」）。
+     *
+     * 判据：用内存里的主方案单字码索引（schemeCharCodes，源 Flypy_char 8842 简体字）
+     * 而非 GB2312 编码测试——Android 的 GB2312 实现把繁体也算可编码，判定失效；
+     * 且 GB2312 会误滤 GBK 简体生僻字（囧/腌臜 等用户实际打得出的字）。
+     *
+     * 非 CJK 字符（ASCII/拉丁/常见标点）不参与判定；码表未加载时空判据通过。
      */
     private fun isSimplifiedText(text: String): Boolean {
         if (text.isEmpty()) return true
-        return try {
-            val cs = java.nio.charset.Charset.forName("GB2312")
-            String(text.toByteArray(cs), cs) == text
-        } catch (e: Exception) {
-            false
+        if (schemeCharCodes.isEmpty()) return true
+        for (ch in text) {
+            val cp = ch.code
+            if (cp < 0x2E80) continue  // ASCII / 拉丁 / CJK 符号区不判
+            if (!schemeCharCodes.containsKey(ch.toString())) return false
         }
+        return true
     }
 
     /**
