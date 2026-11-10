@@ -2858,6 +2858,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onStartInputView(info, restarting)
         FileLogger.i(TAG, "onStartInputView: restarting=$restarting")
         info?.let { updateEnterKeyText(it) }
+        // 发送后残留清理：宿主已把输入框清空（聊天「发送」把嵌入的词发出去并清空输入框），
+        // 但上一轮的引擎组合态/候选栏还挂着（QQ 等应用发送时不回调光标归零，
+        // onWindowHidden 的清理与键盘再弹出的时序对不上）时，在键盘弹出这一刻补一次清理。
+        clearResidualCandidatesIfHostEmpty()
         // 验证码自动填充（方案 B 兜底）：MIUI 等国内 ROM 会过滤 SMS_RECEIVED 广播，
         // 这里在键盘弹出时主动查一次最近短信。IO 线程执行，不阻塞键盘首帧。
         hasHardwareKeyboard = SettingsPreferences.isHardwareKeyboardDetectionEnabled(this) &&
@@ -2867,6 +2871,44 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         updateCursorUpdateMonitoring()
         // 验证码自动填充：点进「验证码输入框」（数字类）时，把刚收到的验证码直接填入
         maybeAutoFillOtp(info)
+    }
+
+    /**
+     * 宿主输入框为空但 Xime 仍残留组合态/候选时的兜底清理。
+     *
+     * 场景：聊天应用「发送」把输入框里嵌入的候选词发出去并清空输入框——部分应用
+     * （如 QQ）此过程不回调 onUpdateSelection 光标归零，键盘收起清理与再弹出
+     * 的时序也可能错开，上一轮的引擎编码与候选栏就这样残留到下一次弹出。
+     * 这里在键盘弹出时检测「宿主输入框前后都取不到字符 + Xime 有残留」补一次全清。
+     *
+     * 保守条件（不误伤）：宿主文本非空（正常会话）或查询失败（null）时不动；
+     * 组合键输入态（orq/oiz 触发码累积中/组合结果占据候选栏）豁免。
+     */
+    private fun clearResidualCandidatesIfHostEmpty() {
+        val st = candidateState.value
+        val hasResidue = st.candidates.isNotEmpty() || st.associationCandidates.isNotEmpty() ||
+            st.candidateComments.isNotEmpty() || st.inputText.isNotEmpty() ||
+            st.preeditText.isNotEmpty() || st.isComposing ||
+            rimeEngine.getInput().isNotEmpty() || t9PartialSegments.isNotEmpty()
+        if (!hasResidue) return
+        if (shouldExemptComboState(rimeEngine.getInput(), st.candidates, st.candidateComments)) return
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(1, 0)
+        val after = ic.getTextAfterCursor(1, 0)
+        // 宿主不支持查询（null）或文本非空时保守不清
+        if (before == null || after == null) return
+        if (before.isNotEmpty() || after.isNotEmpty()) return
+        FileLogger.d(TAG, "onStartInputView: 宿主输入框为空但存在残留组合态/候选，兜底全清")
+        rimeEngine.clearComposition()
+        t9PartialSegments.clear()
+        inputBoxComposingActive = false
+        candidateState.value = st.copy(
+            inputText = "", preeditText = "",
+            candidates = emptyList(), candidateComments = emptyList(),
+            associationCandidates = emptyList(), pendingEnglishText = "",
+            isComposing = false, hasNextPage = false, hasPrevPage = false,
+            candidateActions = emptyList(),
+        )
     }
 
     /**
@@ -3004,6 +3046,47 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 自身写入 InputConnection 会同步触发本回调，处理中直接忽略，避免递归
         if (!selectionUpdateGate.tryEnter()) return
         try {
+            // 输入框内容被清空（聊天「发送」把文字发出去、全选删除等）时光标回到开头：
+            // 此时组合态往往已结束（词已上屏、hasPendingComposition()=false），原有逻辑
+            // 在下方直接 return，但候选栏可能还挂着上屏后的联想/残留候选——
+            // 跟随输入框一起清空，避免「消息已发出去，候选栏还挂着词」。
+            // 仅在无待上屏组合态时清（有组合态时交由下方原有光标丢弃逻辑处理）。
+            if (oldSelEnd > 0 && newSelStart == 0 && newSelEnd == 0) {
+                val st = candidateState.value
+                // 组合键输入态（orq/oiz 等触发码累积中、或候选栏已被组合结果占据）
+                // 豁免清空：否则触发码永远凑不齐、组合候选被误清
+                // （与下方原有 shouldExemptComboState 豁免口径一致）。
+                if (shouldExemptComboState(rimeEngine.getInput(), st.candidates, st.candidateComments)) {
+                    return
+                }
+                // 精确判定「发送/清空」而非「用户把光标点到开头」：光标前后都取不到字符
+                // 才说明输入框确实被清空（点开头时光标后仍有文本）。宿主不支持查询
+                // （返回 null）时保守不清，避免误伤正常输入。
+                val ic = currentInputConnection
+                val beforeEmpty = ic?.getTextBeforeCursor(1, 0)?.isEmpty() ?: false
+                val afterEmpty = ic?.getTextAfterCursor(1, 0)?.isEmpty() ?: false
+                if (!(beforeEmpty && afterEmpty)) {
+                    return
+                }
+                if (st.candidates.isNotEmpty() || st.associationCandidates.isNotEmpty() ||
+                    st.candidateComments.isNotEmpty() || st.inputText.isNotEmpty() ||
+                    st.preeditText.isNotEmpty() || st.isComposing
+                ) {
+                    FileLogger.d(TAG, "onUpdateSelection: 输入框清空（发送/全删），清空候选栏残留+组合态")
+                    // 引擎组合态一并丢弃：否则残留编码会让候选栏在下次刷新时重新填回
+                    rimeEngine.clearComposition()
+                    t9PartialSegments.clear()
+                    inputBoxComposingActive = false
+                    candidateState.value = st.copy(
+                        inputText = "", preeditText = "",
+                        candidates = emptyList(), candidateComments = emptyList(),
+                        associationCandidates = emptyList(), pendingEnglishText = "",
+                        isComposing = false, hasNextPage = false, hasPrevPage = false,
+                        candidateActions = emptyList(),
+                    )
+                }
+                return
+            }
             // 仅在输入框承载编码/候选词（input-box 模式）时才处理光标移动丢弃组合态：
             // 此时 setComposingText 写入编辑器的 composing 区，宿主回调的 candidatesStart/End
             // 覆盖该区域，可据此区分「输入引起的光标回调」与「用户移动光标」。
