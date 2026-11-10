@@ -3632,6 +3632,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
         // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
         mainHandler.removeCallbacks(wordFreqSaveRunnable)
+        mainHandler.removeCallbacks(autoWordDeployRunnable)
         wordFreqSavePending = false
         saveWordData()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -3950,6 +3951,70 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private val wordFreqSaveDebounceMs: Long = 1500
 
     private var wordFreqSavePending = false
+
+    /**
+     * 晋升自动部署（2026-11-10 用户规则 A）：晋升进固定词库的词只有编译进
+     * table.bin 才会**按码表顺序**出现在引擎候选里（而非被 mergeAutoWordCandidates
+     * 追加到候选尾部）。晋升发生 → 置标志 → 落盘后触发一次静默增量部署+重载。
+     */
+    @Volatile
+    private var autoWordDeployPending = false
+
+    /** 上次晋升自动部署的时间戳（节流用：60s 内只部署一次，重载会重建 session）。 */
+    @Volatile
+    private var lastAutoWordDeployAt = 0L
+
+    /** 晋升部署的重试计数（最多 ~60s，等用户停手/无组合态的窗口再部署）。 */
+    private var autoWordDeployRetryCount = 0
+
+    /**
+     * 晋升自动部署的重试任务：每 3 秒检查一次「无组合态 + 节流窗口已过」，
+     * 命中就把 auto_word 编译进 table 并重载 session。
+     *
+     * 为什么不只在 saveWordData（防抖落盘）里判断：上屏后用户往往立刻继续打字，
+     * 落盘时几乎总是有组合态，部署被无限推迟（实测隔了近 30 分钟才触发一次）。
+     * 主动轮询空闲窗口才能真正「晋升后很快生效」。
+     */
+    private val autoWordDeployRunnable: Runnable = Runnable {
+        if (!autoWordDeployPending) {
+            autoWordDeployRetryCount = 0
+            return@Runnable
+        }
+        val now = System.currentTimeMillis()
+        val composing = candidateState.value.isComposing ||
+            candidateState.value.preeditText.isNotEmpty()
+        if (composing || now - lastAutoWordDeployAt < 60_000L) {
+            // 有组合态 / 节流窗口内：稍后重试（最多 20 次 ≈ 60s；超了就留给下次晋升/落盘）
+            if (autoWordDeployRetryCount < 20) {
+                autoWordDeployRetryCount++
+                // lambda 里的 this 是外层 Service，重排自身要用字段引用
+                mainHandler.postDelayed(autoWordDeployRunnable, 3_000L)
+            } else {
+                autoWordDeployRetryCount = 0
+            }
+            return@Runnable
+        }
+        autoWordDeployRetryCount = 0
+        autoWordDeployPending = false
+        lastAutoWordDeployAt = now
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                FileLogger.i(TAG, "auto_word: 晋升触发静默增量部署（词进 table，按码表顺序）")
+                val ok = RimeConfigHelper.ensureDeployment(this@XimeInputMethodService)
+                if (ok) {
+                    keyRouter.postRimeJob {
+                        val schema = rimeEngine.getCurrentSchema()
+                        if (schema.isNotEmpty()) rimeEngine.switchSchema(schema)
+                        withContext(Dispatchers.Main) { updateUI() }
+                    }
+                } else {
+                    FileLogger.w(TAG, "auto_word: 晋升自动部署失败，下次晋升/重载再试")
+                }
+            } catch (t: Throwable) {
+                FileLogger.e(TAG, "auto_word: 晋升自动部署异常", t)
+            }
+        }
+    }
 
     /**
      * 组合生词的**累积窗口**：最近若干次上屏的汉字段（按上屏顺序）。
@@ -4301,6 +4366,24 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         schemeCharCodes = c.charCodes
     }
     /**
+     * 文本是否全为简体（GB2312 可编码）。
+     *
+     * GB2312 收录全部常用简体字形、不含繁体字形，编码往返测试即可判定：
+     * 不可映射的字符（繁体/罕用）编码后变 '?'，解码回来与原文不等。
+     * GBK 简体生僻字（如「镕」）不在 GB2312，会被一并过滤——属可接受取舍
+     * （造词场景下用户打得出的字基本都在 GB2312 常用集）。
+     */
+    private fun isSimplifiedText(text: String): Boolean {
+        if (text.isEmpty()) return true
+        return try {
+            val cs = java.nio.charset.Charset.forName("GB2312")
+            String(text.toByteArray(cs), cs) == text
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * 记录一次上屏词频：以上屏瞬间的编码（inputText/preeditText）为键，
      * 上屏文本为词，计数 +1。
      *
@@ -4337,6 +4420,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // XGuai_user.dict.yaml）：不参与上屏词频统计（word_freq.txt/yaml 不收录），
         // 但仍走自动造词链（能正常学习/组合）。只在词频层面跳过。
         if (text in noFreqWords) return
+        // 繁体上屏（简繁切换后）不进词库：主方案是简体音形，繁体词的编码映射
+        // 无意义，记进词库只会产出打不出来的组合（实测收录过「怎麼樣」「覺得」）。
+        // 组合链一并清空，避免繁体词混入后续拼接。
+        if (!isSimplifiedText(text)) {
+            comboHistory.clear()
+            return
+        }
         // 自动造词开关（xime.yaml auto_word.enabled）：关闭时不做任何收录/统计
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         if (!autoWordConfig.enabled) return
@@ -4577,6 +4667,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
             autoWordTemp = promotion.temp
             autoWordFixed = promotion.fixed
+            if (promotion.promoted.isNotEmpty()) {
+                // 有词晋升：标记待部署并启动重试链（等组合态空闲窗口执行静默增量部署，
+                // 让晋升词尽快进 table.bin、按码表顺序出现在候选里）
+                autoWordDeployPending = true
+                mainHandler.removeCallbacks(autoWordDeployRunnable)
+                autoWordDeployRetryCount = 0
+                mainHandler.postDelayed(autoWordDeployRunnable, 3_000L)
+            }
         }
     }
 
@@ -4763,6 +4861,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         //
         // 这里仍保留 word_freq.dict.yaml 的生成（供用户查看/备份、以及手动重载时的
         // 兜底排序），只是不再因为它的变化去触发部署。
+
+        // 晋升自动部署（2026-11-10 用户规则 A）：固定词库刚落盘（auto_word.dict.yaml
+        // 是 import_tables 引用的），触发一次**静默增量部署 + 重载**让晋升词进
+        // table.bin——此后它由引擎按码表顺序提供（mergeAutoWordCandidates 的 seen
+        // 会跳过引擎已有词，不再追加尾部）。节流 60s：部署+重载会短暂重建 session。
+        // 晋升落盘后顺手推一次重试链（真正执行由 autoWordDeployRunnable 等空闲窗口），
+        // 保证「只有落盘成功后才部署」也能被覆盖到。
+        if (autoWordDeployPending) {
+            mainHandler.removeCallbacks(autoWordDeployRunnable)
+            autoWordDeployRetryCount = 0
+            mainHandler.postDelayed(autoWordDeployRunnable, 1_000L)
+        }
     }
 
     /**
