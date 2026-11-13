@@ -2884,6 +2884,32 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onStartInputView(info, restarting)
         FileLogger.i(TAG, "onStartInputView: restarting=$restarting")
         info?.let { updateEnterKeyText(it) }
+        // 兜底：晋升部署恰好跨越「键盘重新弹出」时，部署期间引擎会话处于编译态，
+        // 此刻打字会拿到空候选。等部署结束后补一次会话重建，消除这个窗口期。
+        if (autoWordDeploying) {
+            FileLogger.i(TAG, "onStartInputView: 晋升部署进行中，待其结束后重建会话")
+            serviceScope.launch(Dispatchers.IO) {
+                var waited = 0L
+                while (autoWordDeploying && waited < 60_000L) {
+                    kotlinx.coroutines.delay(200)
+                    waited += 200
+                }
+                if (waited >= 60_000L) {
+                    FileLogger.w(TAG, "onStartInputView: 等待部署超时，放弃会话重建")
+                    return@launch
+                }
+                keyRouter.postRimeJob {
+                    RimeEngine.getInstance().ensureSession()
+                    val saved = com.kingzcheung.xime.settings.SettingsPreferences
+                        .getCurrentSchema(this@XimeInputMethodService)
+                    val avail = rimeEngine.getAvailableSchemas()
+                    if (saved.isNotEmpty() && saved in avail) {
+                        rimeEngine.switchSchema(saved)
+                        withContext(Dispatchers.Main) { updateUI() }
+                    }
+                }
+            }
+        }
         // 发送后残留清理：宿主已把输入框清空（聊天「发送」把嵌入的词发出去并清空输入框），
         // 但上一轮的引擎组合态/候选栏还挂着（QQ 等应用发送时不回调光标归零，
         // onWindowHidden 的清理与键盘再弹出的时序对不上）时，在键盘弹出这一刻补一次清理。
@@ -3992,6 +4018,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var lastAutoWordDeployAt = 0L
 
     /**
+     * 晋升部署是否仍在进行中。
+     *
+     * 用于兜底：部署若恰好跨越「键盘重新弹出」的时刻，onStartInputView 会在部署
+     * 结束后再补一次会话重建，避免用户遇到「刚切回来打不了字」的窗口期。
+     */
+    @Volatile
+    private var autoWordDeploying = false
+
+    /**
      * 晋升自动部署的重试任务：每 3 秒检查一次「无组合态 + 节流窗口已过」，
      * 命中就把 auto_word 编译进 table 并重载 session。
      *
@@ -4013,27 +4048,52 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (!autoWordDeployPending) return
         autoWordDeployPending = false
         lastAutoWordDeployAt = System.currentTimeMillis()
+        autoWordDeploying = true
         serviceScope.launch(Dispatchers.IO) {
             try {
                 FileLogger.i(TAG, "auto_word: 键盘收起，执行晋升增量部署（词进 table，按码表顺序）")
                 val ok = RimeConfigHelper.ensureDeployment(this@XimeInputMethodService)
                 if (ok) {
+                    // 部署后**必须重建 native 会话**：部署会销毁/重建 rime 引擎内部状态，
+                    // 不重新 switchSchema 的话下次弹键盘时引擎会话处于无效态，
+                    // 表现为「打不了字、出不了候选」（用户 2026-11-14 反馈）。
+                    // 与 ImeSchemaController.reloadConfig 的部署后处理保持一致。
                     keyRouter.postRimeJob {
-                        // 部署后重建会话：新 table 从下次弹出键盘起生效，用户无感知
-                        candidateState.value = candidateState.value.copy(
-                            inputText = "", preeditText = "",
-                            candidates = emptyList(), candidateComments = emptyList(),
-                            associationCandidates = emptyList(), pendingEnglishText = "",
-                            isComposing = false, hasNextPage = false, hasPrevPage = false,
-                            candidateActions = emptyList(),
-                        )
-                        rimeEngine.clearComposition()
+                        // 部署后 rime 引擎内部会话可能已失效：先确保会话存在，
+                        // 再切回当前方案让新 table 生效。两步都不可省——只 switchSchema
+                        // 而 session 已销毁时会直接失败，下次弹键盘就打不了字。
+                        RimeEngine.getInstance().ensureSession()
+                        val savedSchema = com.kingzcheung.xime.settings.SettingsPreferences
+                            .getCurrentSchema(this@XimeInputMethodService)
+                        val available = rimeEngine.getAvailableSchemas()
+                        if (savedSchema.isNotEmpty() && savedSchema in available) {
+                            val switched = rimeEngine.switchSchema(savedSchema)
+                            FileLogger.i(TAG, "auto_word: 部署后会话重建 schema=$savedSchema switched=$switched")
+                        } else {
+                            FileLogger.w(TAG, "auto_word: 部署后当前方案 $savedSchema 不可用，跳过会话重建")
+                        }
+                        val currentId = rimeEngine.getCurrentSchema()
+                        withContext(Dispatchers.Main) {
+                            if (currentId.isNotEmpty()) {
+                                uiState.value = uiState.value.copy(currentSchemaId = currentId)
+                            }
+                            candidateState.value = candidateState.value.copy(
+                                inputText = "", preeditText = "",
+                                candidates = emptyList(), candidateComments = emptyList(),
+                                associationCandidates = emptyList(), pendingEnglishText = "",
+                                isComposing = false, hasNextPage = false, hasPrevPage = false,
+                                candidateActions = emptyList(),
+                            )
+                            updateUI()
+                        }
                     }
                 } else {
                     FileLogger.w(TAG, "auto_word: 晋升部署失败，下次键盘收起再试")
                 }
             } catch (t: Throwable) {
                 FileLogger.e(TAG, "auto_word: 晋升部署异常", t)
+            } finally {
+                autoWordDeploying = false
             }
         }
     }
