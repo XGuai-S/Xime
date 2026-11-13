@@ -110,6 +110,7 @@ import com.kingzcheung.xime.plugin.core.api.PluginResultItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -823,8 +824,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 注意保持「读 + 收敛 + 写回 + prune」的顺序完整执行：这些操作之间共享
         // 内存态与磁盘基线，拆开并发会互相覆盖。
         serviceScope.launch(Dispatchers.IO) {
+            // 先等引擎初始化完成再读词库（用户 2026-11-14 优化）：
+            // 冷启动瞬间引擎 libStartup + loadConfig + 方案部署会抢满 CPU/IO，
+            // 此时并行读词库会让两边都慢（实测 loadConfig 953ms / 词库 1063ms 同时出现）。
+            // 词库只是候选排序/造词的增强项，空表时全链路照常工作，等引擎就绪再读完全
+            // 不影响可用性，却能让引擎更快就绪（键盘出字更早）。
+            var waited = 0L
+            while (!RimeEngine.isInitialized() && waited < 15_000L) {
+                kotlinx.coroutines.delay(50)
+                waited += 50
+            }
+            if (waited > 0) {
+                FileLogger.i(TAG, "词库加载：等引擎就绪 ${waited}ms 后开始读取")
+            }
             var ok = false
-            // 加载失败重试（指数退避，共 3 次）；仍失败交给 onStartInput 兜底重试
+            // 加载失败重试（指数退避，共 3 次）
             for (attempt in 0 until 3) {
                 ok = loadWordTablesOnce()
                 if (ok) break
@@ -2740,49 +2754,71 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 磁盘基线，拆开并发会互相覆盖。
      */
     private suspend fun loadWordTablesOnce(): Boolean = withContext(Dispatchers.IO) {
+        val loadStartNs = System.nanoTime()
         try {
-            val orderTable = CandidateOrderStore.load(this@XimeInputMethodService)
-            // 3.3.15「yaml 单源」：candidate_order.dict.yaml 由 load/save 直接读写，
-            // 不再需要额外 ensureRimeDict（那份中间层 txt 已不存在）。
-            val freqTable = WordFreqStore.load(this@XimeInputMethodService)
-            val tempTable = AutoWordStore.loadTemp(this@XimeInputMethodService)
-            // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
-            // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
-            // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
-            val rawFixed = AutoWordStore.loadFixedRaw(this@XimeInputMethodService)
-            val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
-            var fixedTable = cleanFixed
-            if (cleanFixed !== rawFixed) {
-                // 确实发生了收敛：立即写盘，下次启动读到干净表
-                fixedTable = AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
-                FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
-                    "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
+            // ── 第一段：并行读取四个词库（互不依赖，串行读等于白白排队）────────
+            // 每个 Store.load 内部要 stat 私有+可见两份文件再读较新者，串行 4 次
+            // 在冷启动（同时跑引擎初始化/部署）时会被 IO 竞争放大到上百毫秒。
+            val orderDeferred = async(Dispatchers.IO) {
+                CandidateOrderStore.load(this@XimeInputMethodService)
             }
-            val blacklistTable = WordBlacklistStore.load(this@XimeInputMethodService)
-            // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 3 天）
-            // 没再上屏的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
+            val freqDeferred = async(Dispatchers.IO) {
+                WordFreqStore.load(this@XimeInputMethodService)
+            }
+            val tempDeferred = async(Dispatchers.IO) {
+                AutoWordStore.loadTemp(this@XimeInputMethodService)
+            }
+            val fixedDeferred = async(Dispatchers.IO) {
+                AutoWordStore.loadFixedRaw(this@XimeInputMethodService)
+            }
+            val blacklistDeferred = async(Dispatchers.IO) {
+                WordBlacklistStore.load(this@XimeInputMethodService)
+            }
+            val orderTable = orderDeferred.await()
+            val freqTable = freqDeferred.await()
+            val tempTable = tempDeferred.await()
+            val rawFixed = fixedDeferred.await()
+            val blacklistTable = blacklistDeferred.await()
+
+            // ── 第二段：内存收敛（不写盘，纯 CPU，快）──────────────────────────
+            val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
             val prunedTemp = AutoWordStore.prune(
                 tempTable,
                 System.currentTimeMillis(),
                 com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
             )
-            val needSave = prunedTemp !== tempTable
-            // 一次性在主线程发布，避免候选链路读到「一半新一半旧」的中间态
+
+            // ── 第三段：发布到内存（用户从这一刻起就能正常打字/排序/造词）────────
             withContext(Dispatchers.Main) {
                 wordTablesLoaded = true
                 candidateOrderTable = orderTable
                 wordFreqTable = freqTable
                 autoWordTemp = prunedTemp
-                autoWordFixed = fixedTable
+                autoWordFixed = cleanFixed
                 wordBlacklist = blacklistTable
-                if (needSave) scheduleWordFreqSave()
-                FileLogger.d(
+                FileLogger.i(
                     TAG,
-                    "Word tables ready: temp=${autoWordTemp.size} entries, " +
+                    "Word tables ready in ${(System.nanoTime() - loadStartNs) / 1_000_000}ms: " +
+                        "temp=${autoWordTemp.size} entries, " +
                         "fixed=${autoWordFixed.size} entries, " +
                         "tempTotal=${autoWordTemp.values.sumOf { it.size }}, " +
                         "fixedTotal=${autoWordFixed.values.sumOf { it.size }}",
                 )
+            }
+
+            // ── 第四段：慢的落盘操作挪到发布之后（不阻塞词库可用）────────────────
+            // 以前这三件事都在发布之前串行执行，冷启动时若恰好撞上引擎编译/部署抢 IO，
+            // 会把「词库可用」推迟到 1.8s（实测波动 69ms~1793ms）。用户可见的只是
+            // 内存表，收敛/清理结果落盘晚几百毫秒完全无感。
+            if (cleanFixed !== rawFixed) {
+                runCatching {
+                    AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
+                    FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
+                        "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
+                }.onFailure { FileLogger.w(TAG, "固定词库收敛落盘失败（不影响本次使用）", it) }
+            }
+            if (prunedTemp !== tempTable) {
+                scheduleWordFreqSave()
             }
             true
         } catch (t: Throwable) {
