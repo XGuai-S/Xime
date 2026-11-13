@@ -2920,6 +2920,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onStartInputView(info, restarting)
         FileLogger.i(TAG, "onStartInputView: restarting=$restarting")
         info?.let { updateEnterKeyText(it) }
+        // 引擎 ascii 状态与 UI 对齐（用户 2026-11-14：换应用后前几个按键直出字母）：
+        // 会话重建/部署后引擎的 ascii_mode 可能与当前键盘显示的中文态不一致，
+        // 这里以 UI 为准校正一次，避免「看着是中文键盘、打的却是字母」。
+        runCatching {
+            if (RimeEngine.isInitialized()) {
+                val uiAscii = uiState.value.isAsciiMode
+                if (rimeEngine.isAsciiMode() != uiAscii) {
+                    rimeEngine.setOption("ascii_mode", uiAscii)
+                    FileLogger.i(TAG, "onStartInputView: ascii 校正 ui=$uiAscii")
+                }
+            }
+        }
         // 兜底：晋升部署恰好跨越「键盘重新弹出」时，部署期间引擎会话处于编译态，
         // 此刻打字会拿到空候选。等部署结束后补一次会话重建，消除这个窗口期。
         if (autoWordDeploying) {
@@ -2940,7 +2952,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         .getCurrentSchema(this@XimeInputMethodService)
                     val avail = rimeEngine.getAvailableSchemas()
                     if (saved.isNotEmpty() && saved in avail) {
-                        rimeEngine.switchSchema(saved)
+                        val switched = rimeEngine.switchSchema(saved)
+                        // 同上：恢复中文标点，避免切换后首键被当成 ASCII 直通
+                        if (switched && !rimeEngine.isAsciiMode()) {
+                            rimeEngine.setOption("ascii_punct", false)
+                        }
                         withContext(Dispatchers.Main) { updateUI() }
                     }
                 }
@@ -3470,6 +3486,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     override fun onWindowHidden() {
         super.onWindowHidden()
         FileLogger.i(TAG, "onWindowHidden: cleanup scheduled in ${WINDOW_HIDDEN_CLEANUP_DELAY_MS}ms")
+        // 切换应用时往往不触发 onFinishInput（只走 onWindowHidden），引擎的 ascii_mode
+        // 会残留下来：切回中文界面后前几个按键被当成 ASCII 直通，出现「字谜/字母」上屏
+        // （用户 2026-11-14 反馈）。这里在键盘收起时一并归位，与 onFinishInput 同口径。
+        asciiModeController.restoreDefaultChoice()
         // 收起键盘立即清空候选栏：不等 3 秒延迟清理，否则下次弹出的一瞬间
         // 仍会看到上一次的候选/编码残留。只清显示层与 native 组合态；
         // 面板、语音等重状态仍交给下面的延迟清理，宿主 restartInput 造成的
@@ -4104,6 +4124,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         val available = rimeEngine.getAvailableSchemas()
                         if (savedSchema.isNotEmpty() && savedSchema in available) {
                             val switched = rimeEngine.switchSchema(savedSchema)
+                            // 与 ImeSchemaController.switchSchema 保持一致：切方案后恢复中文标点，
+                            // 否则引擎默认 ascii_punct 可能为 true，导致上屏变英文标点/直通字母
+                            if (switched && !rimeEngine.isAsciiMode()) {
+                                rimeEngine.setOption("ascii_punct", false)
+                            }
                             FileLogger.i(TAG, "auto_word: 部署后会话重建 schema=$savedSchema switched=$switched")
                         } else {
                             FileLogger.w(TAG, "auto_word: 部署后当前方案 $savedSchema 不可用，跳过会话重建")
