@@ -520,7 +520,12 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 合并后整体再排一次：手动表/词频表里若有这些词，就按表的顺序插到应有的位置；
         // 没有记录的仍保持相对顺序（reorder 对未记录词维持原序、排在已记录词之后）。
         val withAutoWords = withAutoWordsRaw?.let { merged ->
-            if (!shouldApplyCandidateOrder(display.isT9, isAsciiMode, merged.actions)) {
+            // ⚠️ 这里不能复用 shouldApplyCandidateOrder：它要求 candidateActions 为空，
+            // 而合并造词后 actions 必然含 plugin(word)，条件恒为 false，排序会被跳过
+            // （用户 2026-11-14 实测「浩清」16 次仍排最后，根因即此）。
+            // 合并后的再排序只需排除 T9 / ASCII（索引映射不可靠），
+            // actions 我们自己按新顺序重建，不受影响。
+            if (display.isT9 || isAsciiMode) {
                 merged
             } else {
                 val resort = if (autoWordConfig.sortByManual) {
