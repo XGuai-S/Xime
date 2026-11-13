@@ -366,6 +366,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     @Volatile
     private var wordTablesLoaded = false
 
+    /** 词库是否正在加载（防 onStartInput 兜底重试与 onCreate 加载并发）。 */
+    @Volatile
+    private var wordTablesLoading = false
+
     /**
      * 词库表互斥锁：保护 [candidateOrderTable] / [wordFreqTable] / [autoWordTemp] /
      * [autoWordFixed] / [wordBlacklist] 的**读-改-写**。
@@ -823,53 +827,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 注意保持「读 + 收敛 + 写回 + prune」的顺序完整执行：这些操作之间共享
         // 内存态与磁盘基线，拆开并发会互相覆盖。
         serviceScope.launch(Dispatchers.IO) {
-            try {
-                val orderTable = CandidateOrderStore.load(this@XimeInputMethodService)
-                // 3.3.15「yaml 单源」：candidate_order.dict.yaml 由 load/save 直接读写，
-                // 不再需要额外 ensureRimeDict（那份中间层 txt 已不存在）。
-                val freqTable = WordFreqStore.load(this@XimeInputMethodService)
-                val tempTable = AutoWordStore.loadTemp(this@XimeInputMethodService)
-                // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
-                // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
-                // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
-                val rawFixed = AutoWordStore.loadFixedRaw(this@XimeInputMethodService)
-                val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
-                var fixedTable = cleanFixed
-                if (cleanFixed !== rawFixed) {
-                    // 确实发生了收敛：立即写盘，下次启动读到干净表
-                    fixedTable = AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
-                    FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
-                        "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
-                }
-                val blacklistTable = WordBlacklistStore.load(this@XimeInputMethodService)
-                // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 3 天）
-                // 没再上屏的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
-                val prunedTemp = AutoWordStore.prune(
-                    tempTable,
-                    System.currentTimeMillis(),
-                    com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
-                )
-                val needSave = prunedTemp !== tempTable
-                // 一次性在主线程发布，避免候选链路读到「一半新一半旧」的中间态
-                withContext(Dispatchers.Main) {
-                    wordTablesLoaded = true
-                    candidateOrderTable = orderTable
-                    wordFreqTable = freqTable
-                    autoWordTemp = prunedTemp
-                    autoWordFixed = fixedTable
-                    wordBlacklist = blacklistTable
-                    if (needSave) scheduleWordFreqSave()
-                    FileLogger.d(
-                        TAG,
-                        "Word tables ready: temp=${autoWordTemp.size} entries, " +
-                            "fixed=${autoWordFixed.size} entries, " +
-                            "tempTotal=${autoWordTemp.values.sumOf { it.size }}, " +
-                            "fixedTotal=${autoWordFixed.values.sumOf { it.size }}",
-                    )
-                }
-            } catch (t: Throwable) {
-                // 词库加载失败不应拖垮输入法：记日志后保持空表继续工作
-                FileLogger.e(TAG, "词库加载失败，候选排序/造词降级为空表", t)
+            wordTablesLoading = true
+            var ok = false
+            // 加载失败重试（指数退避，共 3 次）；仍失败交给 onStartInput 兜底重试
+            for (attempt in 0 until 3) {
+                ok = loadWordTablesOnce()
+                if (ok) break
+                if (attempt < 2) kotlinx.coroutines.delay(500L * (1L shl attempt))
+            }
+            wordTablesLoading = false
+            if (!ok) {
+                FileLogger.e(TAG, "词库加载 3 次均失败，本次保持空表；下次 onStartInput 兜底重试")
             }
         }
         FileLogger.i(
@@ -2766,8 +2734,86 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /** 同一编辑框快速重启的判定窗口。 */
     private val SAME_EDITOR_RESTART_WINDOW_MS = 3000L
 
+    /**
+     * 从磁盘加载四张词库表（候选排序 / 词频 / 造词、固定、黑名单）并在主线程原子发布。
+     *
+     * 返回是否成功。抽成独立函数的原因：
+     * - onCreate 加载失败要能重试（见调用点）；
+     * - onStartInput 在 `wordTablesLoaded=false` 时可兜底再试一次，避免整轮服务
+     *   生命周期都停留在空表降级（排序/造词/词频全失效）。
+     *
+     * 必须保持「读 + 收敛 + 写回 + prune」的顺序完整执行——这些操作共享内存态与
+     * 磁盘基线，拆开并发会互相覆盖。
+     */
+    private suspend fun loadWordTablesOnce(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val orderTable = CandidateOrderStore.load(this@XimeInputMethodService)
+            // 3.3.15「yaml 单源」：candidate_order.dict.yaml 由 load/save 直接读写，
+            // 不再需要额外 ensureRimeDict（那份中间层 txt 已不存在）。
+            val freqTable = WordFreqStore.load(this@XimeInputMethodService)
+            val tempTable = AutoWordStore.loadTemp(this@XimeInputMethodService)
+            // 一词一码：读入即收敛并落盘。历史版本把组合生词的全部编码一起晋升，
+            // 文件里同一个词挂着 2-4 个编码（「阿红」挂 4 条）。只在读取时收敛内存
+            // 不会自愈磁盘，这里把收敛结果写回，旧数据一次性修干净。
+            val rawFixed = AutoWordStore.loadFixedRaw(this@XimeInputMethodService)
+            val cleanFixed = AutoWordStore.dedupeFixed(rawFixed)
+            var fixedTable = cleanFixed
+            if (cleanFixed !== rawFixed) {
+                // 确实发生了收敛：立即写盘，下次启动读到干净表
+                fixedTable = AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
+                FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
+                    "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
+            }
+            val blacklistTable = WordBlacklistStore.load(this@XimeInputMethodService)
+            // 启动即清理临时词库：超过观察窗口（auto_word.promote_days，默认 3 天）
+            // 没再上屏的词直接删除，不必等到下次上屏——用户可能长时间不开输入法。
+            val prunedTemp = AutoWordStore.prune(
+                tempTable,
+                System.currentTimeMillis(),
+                com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig().promoteDays,
+            )
+            val needSave = prunedTemp !== tempTable
+            // 一次性在主线程发布，避免候选链路读到「一半新一半旧」的中间态
+            withContext(Dispatchers.Main) {
+                wordTablesLoaded = true
+                candidateOrderTable = orderTable
+                wordFreqTable = freqTable
+                autoWordTemp = prunedTemp
+                autoWordFixed = fixedTable
+                wordBlacklist = blacklistTable
+                if (needSave) scheduleWordFreqSave()
+                FileLogger.d(
+                    TAG,
+                    "Word tables ready: temp=${autoWordTemp.size} entries, " +
+                        "fixed=${autoWordFixed.size} entries, " +
+                        "tempTotal=${autoWordTemp.values.sumOf { it.size }}, " +
+                        "fixedTotal=${autoWordFixed.values.sumOf { it.size }}",
+                )
+            }
+            true
+        } catch (t: Throwable) {
+            // 词库加载失败不应拖垮输入法：记日志，调用方决定是否重试
+            FileLogger.e(TAG, "词库加载失败，候选排序/造词降级", t)
+            false
+        }
+    }
+
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        // 词库兜底重试：onCreate 时若加载失败（3 次重试都挂），这里在每次进入输入框时
+        // 再补一次，避免整轮服务生命周期都处于空表降级（排序/造词/词频全失效）。
+        if (!wordTablesLoaded && !wordTablesLoading) {
+            FileLogger.i(TAG, "onStartInput: 词库未就绪，触发兜底重试加载")
+            wordTablesLoading = true
+            serviceScope.launch(Dispatchers.IO) {
+                // finally 必须复位：否则 wordTablesLoading 永久 true，后续兜底永不触发
+                try {
+                    loadWordTablesOnce()
+                } finally {
+                    wordTablesLoading = false
+                }
+            }
+        }
         // QQ 撤回/发送消息时会把输入框重建一遍：系统给出的是 restarting=false 的"新会话"，
         // 但实际还是同一个编辑框（同样的包名/fieldId/inputType，且间隔很短）。
         // 这种重启不该换 sessionId、不该清候选栏——否则键盘会闪一下再弹出。
@@ -4438,6 +4484,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /** [recordWordFrequency] 的实际实现；调用方必须已持有 [wordTablesLock]。 */
     private fun recordWordFrequencyLocked(text: String, isPaste: Boolean) {
         if (isPaste || editorSecret) return
+        // 词库尚未从磁盘装载完成（见 onCreate 的异步加载）：此时 wordFreqTable /
+        // autoWordTemp / schemeCharCodes 都是空表占位，记录进去会被加载完成后的
+        // 整体替换**静默覆盖**（词频丢计数、造词丢收录）。直接跳过，等下一轮上屏。
+        if (!wordTablesLoaded) {
+            FileLogger.d(TAG, "recordWordFrequency skipped: 词库尚未装载完成 text=\"$text\"")
+            return
+        }
         if (isT9Schema(uiState.value.currentSchemaId)) return
         if (uiState.value.isAsciiMode) return
         // 大写金额 / 计算器：候选栏展示的是程序生成的结果，和输入编码没有任何关系，
