@@ -981,7 +981,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 原来紧跟着的那段内联 withContext(Main) 代码才是真正干活的地方，两者重复执行两遍）。
                 withContext(Dispatchers.Main) { applyInitialSchemaAfterInit() }
                 // 引擎可用后加载用户词库词集合，供组合生词查重（异步，失败静默）
-                refreshSchemeDictWords(force = true)
+                refreshSchemeDictWords()
                 // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）
                 cleanupAutoWordFromCustomPhrase()
             } catch (e: Exception) {
@@ -4210,11 +4210,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var dictSnapshot: List<Triple<String, Long, Long>>? = null
     /** 最近一次解析结果（文件未变时直接复用）。 */
     private var schemeDictCache: SchemeDictCache? = null
-    /** 上次触发刷新的时间戳（节流：输入框切换频繁，不必每次都读）。 */
-    private var lastSchemeDictRefreshAt = 0L
-    /** 词库最短刷新间隔（ms）：文件未变会直接跳过解析，这里只兜住同次运行内反复触发。 */
-    private val schemeDictRefreshIntervalMs = 300_000L
-    /** 刷新协程是否在跑：并发触发（引擎就绪 force + onStartInput）时避免重复解析。 */
+    /** 刷新协程是否在跑：并发触发（引擎就绪 + onStartInput）时避免重复解析。 */
     @Volatile
     private var schemeDictRefreshRunning = false
 
@@ -4230,14 +4226,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *
      * 引擎未就绪或解析失败保持原缓存（收录退化为不查重）。
      *
-     * @param force 方案切换/引擎就绪时强制刷新，忽略 [schemeDictRefreshIntervalMs] 节流
+     * 不做时间节流：[dictSnapshot] 的 (mtime, size) 比对已能跳过未变更的词典，
+     * 每次调用只是十几个 stat，换来词库文件一经改动立即生效。
      */
-    private fun refreshSchemeDictWords(force: Boolean = false) {
+    private fun refreshSchemeDictWords() {
         if (!com.kingzcheung.xime.rime.RimeEngine.isInitialized()) return
-        val now = System.currentTimeMillis()
-        if (!force && now - lastSchemeDictRefreshAt < schemeDictRefreshIntervalMs) return
         if (schemeDictRefreshRunning) return
-        lastSchemeDictRefreshAt = now
         schemeDictRefreshRunning = true
         serviceScope.launch(Dispatchers.IO) {
             try {
