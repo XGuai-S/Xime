@@ -4925,9 +4925,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             wordFreqTable = WordFreqStore.save(this, wordFreqTable)
             autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
             autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
-            // 同步生成 rime 派生词典 auto_word.dict.yaml：方案 import_tables 引用它，
-            // 缺这一步时引擎永远编译旧快照（删掉的词照旧出现）。
-            AutoWordStore.ensureFixedRimeDict(this, autoWordFixed)
+            // 注：saveFixed 内部（UserDataMerge.saveUserDictYaml）已经把
+            // auto_word.dict.yaml 同时写到镜像 + 私有 rime 目录，此前紧跟的
+            // ensureFixedRimeDict 是同一文件的**二次重写**，纯多余 IO（用户 2026-11-14
+            // 优化）。删掉后 auto_word.dict.yaml 仍是最新的，只是不再白写一遍。
         } finally {
             wordTablesLock.unlock()
         }

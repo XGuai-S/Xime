@@ -325,6 +325,9 @@ object RimeConfigHelper {
     /** 词频编译词典名：不参与部署 hash（详见 computeDeploymentHash 里的说明）。 */
     private const val WORD_FREQ_DICT_FILE = "word_freq.dict.yaml"
 
+    /** 造词固定词库：运行期高频变化 + 不参与部署（候选由内存表合并），同 word_freq 排除。 */
+    private const val AUTO_WORD_DICT_FILE = "auto_word.dict.yaml"
+
     private fun computeDeploymentHash(context: Context): String {
         val rimeDir = File(context.filesDir, "rime")
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -357,9 +360,14 @@ object RimeConfigHelper {
         // 表现就是「打完字打不了字要等一会」。自 v3.2.57 起词频对候选顺序的影响
         // 改由 Kotlin 层实时重排（见 ImeSessionController / CandidateOrderStore），
         // 不依赖编译产物，因此它的内容变化不需要、也不应该触发部署。
+        // ⚠️ auto_word.dict.yaml 同样排除（用户 2026-11-14）：
+        // 晋升词不再走部署（候选由 AutoWordStore.hitsFor 从内存表实时合并），
+        // 但固定词库会随使用不断增删，计入 hash 会让每次晋升后的下次启动都白白
+        // 触发一次词库重编。它与 word_freq 一样属于「运行期高频变化、且不依赖
+        // 编译产物」的派生词典，不参与部署判定。
         rimeDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(".dict.yaml") }
-            ?.filter { it.name != WORD_FREQ_DICT_FILE }
+            ?.filter { it.name != WORD_FREQ_DICT_FILE && it.name != AUTO_WORD_DICT_FILE }
             ?.sortedBy { it.name }
             ?.forEach { dictFile ->
                 digest.update(dictFile.name.toByteArray())
