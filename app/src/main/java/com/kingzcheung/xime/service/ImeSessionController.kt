@@ -484,12 +484,21 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             } else {
                 null
             }
-            // 候选顺序规则（用户 2026-11-09：优先词典顺序，不看其他）：
-            // 1) 手动排序表命中该编码 → 严格按手动表（用户拖动结果）；
-            // 2) 未命中 → 原样返回 null，保持引擎顺序（= 方案词典里的行序）；
-            // 绝不退回 word_freq 词频重排——上屏次数会把词典顺序和手动排序一起盖掉
-            // （hcdo：手动 豪夺20/好多10，词频 好多121/豪夺2，一退就翻成"好多"在前）。
-            byManual
+            // 候选顺序规则（用户 2026-11-13：要词频排序，但词库/手动排序优先）：
+            // 1) 手动排序表命中该编码 → 严格按手动表（用户拖动结果，最高优先级）；
+            // 2) 未命中且开启 sort_by_freq → 按 word_freq 上屏频数降序重排
+            //    （未记录过频数的词保持引擎顺序、排在已记录词之后）；
+            // 3) 两者都不适用 → 原样 null，保持引擎顺序（= 方案词典行序）。
+            byManual ?: if (autoWordConfig.sortByFreq) {
+                CandidateOrderStore.reorder(
+                    code = rawInputText,
+                    candidates = display.candidates,
+                    comments = display.comments,
+                    table = service.wordFreqTable,
+                )
+            } else {
+                null
+            }
         } else {
             null
         }
