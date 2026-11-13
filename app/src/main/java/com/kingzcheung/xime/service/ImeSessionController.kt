@@ -506,7 +506,7 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         val engineComments = reordered?.comments ?: display.comments
         val engineActions = reordered?.actions ?: candidateActions
         // 合并自动造词候选（临时+固定词库按当前编码匹配；造词不经 rime，也不写进快捷短语）
-        val withAutoWords = service.mergeAutoWordCandidates(
+        val withAutoWordsRaw = service.mergeAutoWordCandidates(
             code = rawInputText,
             engineCandidates = engineCandidates,
             engineComments = engineComments,
@@ -514,6 +514,57 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             isT9 = display.isT9,
             isAscii = isAsciiMode,
         )
+        // 晋升/临时造词也要参与 ①手动 ②词频 排序（用户 2026-11-14）。
+        // 此前 mergeAutoWordCandidates 恒把造词追加到候选**末尾**，且排序只作用于
+        // 引擎候选——结果就是「造出来的词永远排在最后，不跟手动/词频走」。
+        // 合并后整体再排一次：手动表/词频表里若有这些词，就按表的顺序插到应有的位置；
+        // 没有记录的仍保持相对顺序（reorder 对未记录词维持原序、排在已记录词之后）。
+        val withAutoWords = withAutoWordsRaw?.let { merged ->
+            if (!shouldApplyCandidateOrder(display.isT9, isAsciiMode, merged.actions)) {
+                merged
+            } else {
+                val resort = if (autoWordConfig.sortByManual) {
+                    CandidateOrderStore.reorder(
+                        code = rawInputText,
+                        candidates = merged.candidates,
+                        comments = merged.comments,
+                        table = service.candidateOrderTable,
+                    )
+                } else {
+                    null
+                } ?: if (autoWordConfig.sortByFreq) {
+                    CandidateOrderStore.reorder(
+                        code = rawInputText,
+                        candidates = merged.candidates,
+                        comments = merged.comments,
+                        table = service.wordFreqTable,
+                    )
+                } else {
+                    null
+                }
+                if (resort == null) {
+                    merged
+                } else {
+                    // reorder 返回的 actions 是 engine(原下标)，但这里原始 actions 里
+                    // 混合了 engine(i) 与 plugin(word)，不能直接用。按新顺序重排原 actions。
+                    // 用「值→首次出现下标」映射而非 indexOf 逐个查：候选可能有重复词，
+                    // 稳定排序下同词相对顺序不变，映射取首个即可正确还原。
+                    val firstIndex = LinkedHashMap<String, Int>()
+                    merged.candidates.forEachIndexed { i, w -> firstIndex.putIfAbsent(w, i) }
+                    val newOrder = resort.candidates.map { word ->
+                        firstIndex[word] ?: 0
+                    }
+                    CandidateOrderStore.Reordered(
+                        candidates = resort.candidates,
+                        comments = resort.comments,
+                        actions = newOrder.mapNotNull { idx -> merged.actions.getOrNull(idx) },
+                        autoWordTempIndices = merged.autoWordTempIndices
+                            .mapNotNull { oldIdx -> newOrder.indexOf(oldIdx).takeIf { it >= 0 } }
+                            .toSet(),
+                    )
+                }
+            }
+        }
         // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）。
         // 按当前输入编码过滤：黑名单条目带删除时的编码，只屏蔽该编码下的词。
         // 过滤会重排下标，因此把造词临时下标一并传入，让 filter 内部做旧→新下标重映射。
