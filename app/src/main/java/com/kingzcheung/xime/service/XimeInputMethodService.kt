@@ -1206,6 +1206,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 不读引擎当前值——上次会话收起时的落点不再决定本次初始状态
         val startAscii = asciiModeController.applyStartDecision(attribute)
         FileLogger.i(TAG, "onStartInput: reset keyboard, startAscii=$startAscii")
+        // 引擎 ascii 归位（用户 2026-11-14：换应用后前几个按键直出字母）。
+        // applyStartDecision 内部已 setOption，但会话重建/部署后可能被引擎重置；
+        // 这里在 key 队列里再锁一次，确保第一键之前状态就是中文。
+        keyRouter.postRimeJob {
+            if (RimeEngine.isInitialized() && !startAscii) {
+                if (rimeEngine.isAsciiMode()) {
+                    rimeEngine.setOption("ascii_mode", false)
+                    FileLogger.i(TAG, "onStartInput: 强制归位中文（原引擎为 ascii）")
+                }
+                rimeEngine.setOption("ascii_punct", false)
+            }
+        }
         uiState.value = uiState.value.copy(isAsciiMode = startAscii)
         // currentSchemaId 为空（如引擎重建后 updateSchemaName 尚未完成）时，
         // 用持久化方案兜底，避免布局退化为 26 键全键盘
@@ -2920,15 +2932,23 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onStartInputView(info, restarting)
         FileLogger.i(TAG, "onStartInputView: restarting=$restarting")
         info?.let { updateEnterKeyText(it) }
-        // 引擎 ascii 状态与 UI 对齐（用户 2026-11-14：换应用后前几个按键直出字母）：
-        // 会话重建/部署后引擎的 ascii_mode 可能与当前键盘显示的中文态不一致，
-        // 这里以 UI 为准校正一次，避免「看着是中文键盘、打的却是字母」。
-        runCatching {
+        // 引擎 ascii 状态与 UI 对齐（用户 2026-11-14：换应用后前几个按键直出字母）。
+        //
+        // ⚠️ 必须在 key-processing 队列里做（postRimeJob），不能直接在主线程调：
+        // isAsciiMode() 走 tryLocked，部署/会话重建持锁时拿不到锁会返回默认值 false，
+        // 与 UI 的中文态「看起来一致」于是跳过校正——真正的引擎状态仍是 ascii=true，
+        // 前几键就被当 ASCII 直通上屏。postRimeJob 在按键串行队列上阻塞等锁，
+        // 保证真正的校正发生在任何按键被处理之前。
+        keyRouter.postRimeJob {
             if (RimeEngine.isInitialized()) {
                 val uiAscii = uiState.value.isAsciiMode
                 if (rimeEngine.isAsciiMode() != uiAscii) {
                     rimeEngine.setOption("ascii_mode", uiAscii)
                     FileLogger.i(TAG, "onStartInputView: ascii 校正 ui=$uiAscii")
+                }
+                // 新建会话后引擎默认可能是 ASCII：显式把中文标点也归位
+                if (!uiAscii) {
+                    rimeEngine.setOption("ascii_punct", false)
                 }
             }
         }
@@ -3506,8 +3526,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             isComposing = false,
         )
         rimeEngine.clearComposition()
-        // 键盘收起：若本轮有词晋升，此刻执行增量部署（用户不在输入，不打断按键）
-        deployPromotedWordsIfNeeded()
+        // 键盘收起：若本轮有词晋升，延迟 10s 再部署（用户 2026-11-14）。
+        // 不能在收起瞬间立刻部署：切换应用时 onWindowHidden 紧接着就是新应用的
+        // onStartInput/onStartInputView，部署若正在进行会让新会话处于编译态，
+        // 表现为「到另一个应用前几个按键只出字母」。等 10s 确认没回来再部署。
+        if (autoWordDeployPending) {
+            mainHandler.removeCallbacks(autoWordDeployRunnable)
+            mainHandler.postDelayed(autoWordDeployRunnable, 10_000L)
+        }
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         val cleanup = Runnable {
             windowHiddenCleanup = null
@@ -3537,6 +3563,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onWindowShown() {
         super.onWindowShown()
+        // 键盘重新弹出：取消待执行的延迟部署，避免打扰正在输入的用户
+        if (autoWordDeployPending) {
+            mainHandler.removeCallbacks(autoWordDeployRunnable)
+        }
         val cancelled = windowHiddenCleanup != null
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         windowHiddenCleanup = null
@@ -3742,6 +3772,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
         // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
         mainHandler.removeCallbacks(wordFreqSaveRunnable)
+        mainHandler.removeCallbacks(autoWordDeployRunnable)
         wordFreqSavePending = false
         saveWordData()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -4100,6 +4131,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *
      * 只在 [onWindowHidden] 调用；期间不轮询、不重试。
      */
+    /**
+     * 晋升部署的延迟任务：键盘收起 10s 后若仍未重新弹出，才真正部署。
+     *
+     * 延迟的目的（用户 2026-11-14）：切换应用会连续触发 onWindowHidden →
+     * 新应用 onStartInput/onStartInputView。若在收起瞬间就部署，新会话会撞上
+     * 编译锁，前几个按键被当 ASCII 直通上屏（只出字母）。10s 足够覆盖切换过程，
+     * 且用户真的停手时部署体验无感。
+     */
+    private val autoWordDeployRunnable: Runnable = Runnable {
+        deployPromotedWordsIfNeeded()
+    }
+
     private fun deployPromotedWordsIfNeeded() {
         if (!autoWordDeployPending) return
         autoWordDeployPending = false
@@ -4132,6 +4175,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                             FileLogger.i(TAG, "auto_word: 部署后会话重建 schema=$savedSchema switched=$switched")
                         } else {
                             FileLogger.w(TAG, "auto_word: 部署后当前方案 $savedSchema 不可用，跳过会话重建")
+                        }
+                        // 部署后新会话默认可能是 ASCII：显式归位中文，
+                        // 否则下次弹键盘前几键直出字母（用户 2026-11-14 实测）
+                        if (!rimeEngine.isAsciiMode()) {
+                            rimeEngine.setOption("ascii_punct", false)
+                        } else {
+                            rimeEngine.setOption("ascii_mode", false)
+                            rimeEngine.setOption("ascii_punct", false)
                         }
                         val currentId = rimeEngine.getCurrentSchema()
                         withContext(Dispatchers.Main) {
