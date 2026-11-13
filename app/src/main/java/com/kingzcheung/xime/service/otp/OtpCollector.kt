@@ -147,6 +147,15 @@ object OtpCollector {
     private val _pending = MutableStateFlow<List<OtpCandidate>>(emptyList())
 
     /**
+     * 是否有**任何**待处理验证码（不看新鲜度）。
+     *
+     * 供按键热路径做快速短路：绝大多数时间这里都是空的，`handleKeyPress` 里
+     * 三次验证码相关调用（displayList / allDisplayTexts / onKeyboardKeyPress）
+     * 都可直接跳过，省掉每键 3 次 System.currentTimeMillis() + 列表分配。
+     */
+    fun hasAnyPending(): Boolean = _pending.value.isNotEmpty()
+
+    /**
      * 所有 [_pending] 的读改写都在这把锁里。
      *
      * 写入方有两个线程：NotificationListenerService 的 binder 线程（[offer]）与主线程

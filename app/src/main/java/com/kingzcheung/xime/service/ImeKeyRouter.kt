@@ -116,23 +116,35 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 键盘任意按键点击 → 此前收到的验证码立即从候选栏撤下，且此后不再被注入
         // （用户 2026-11 规则）。快照必须早于标记与撤下：空格上屏验证码用的是
         // 「点击前」的待用列表与联想序列，否则第一次按空格就被自己的规则挡掉。
-        val otpBeforeKeyPress = runCatching {
-            com.kingzcheung.xime.service.otp.OtpCollector.displayList()
-        }.getOrDefault(emptyList())
+        // 验证码三连（displayList / allDisplayTexts / onKeyboardKeyPress）只在候选栏
+        // 真的挂着验证码时才有意义。绝大多数按键时 _pending 为空，快速短路跳过——
+        // 省掉每键 3 次 currentTimeMillis + 列表 filter/flatMap/distinct 分配
+        // （用户 2026-11-14 优化：每键热路径不该有无关开销）。
+        val otpPending = runCatching {
+            com.kingzcheung.xime.service.otp.OtpCollector.hasAnyPending()
+        }.getOrDefault(false)
+        val otpBeforeKeyPress = if (otpPending) {
+            runCatching { com.kingzcheung.xime.service.otp.OtpCollector.displayList() }
+                .getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
         val otpTextForSpace = if (key == "space" && otpBeforeKeyPress.isNotEmpty()) {
             service.candidateState.value.associationCandidates.firstOrNull { it in otpBeforeKeyPress }
         } else {
             null
         }
-        // 摘除范围比「按键前还该显示的」更宽：取全部未过期文本。上一条键若走了不经过
-        // handleKeyPress 的路径（滑动输入、手势上屏）或晚到一帧，候选栏可能仍挂着旧码，
-        // 只按 displayList 摘会漏掉它。用户 2026-11 规则：按键后一条都不能留。
-        val otpTextsToDismiss = runCatching {
-            com.kingzcheung.xime.service.otp.OtpCollector.allDisplayTexts()
-        }.getOrDefault(otpBeforeKeyPress)
-        runCatching { com.kingzcheung.xime.service.otp.OtpCollector.onKeyboardKeyPress() }
-        if (otpTextsToDismiss.isNotEmpty()) {
-            service.dismissOtpCandidates(otpTextsToDismiss)
+        if (otpPending) {
+            // 摘除范围比「按键前还该显示的」更宽：取全部未过期文本。上一条键若走了不经过
+            // handleKeyPress 的路径（滑动输入、手势上屏）或晚到一帧，候选栏可能仍挂着旧码，
+            // 只按 displayList 摘会漏掉它。用户 2026-11 规则：按键后一条都不能留。
+            val otpTextsToDismiss = runCatching {
+                com.kingzcheung.xime.service.otp.OtpCollector.allDisplayTexts()
+            }.getOrDefault(otpBeforeKeyPress)
+            runCatching { com.kingzcheung.xime.service.otp.OtpCollector.onKeyboardKeyPress() }
+            if (otpTextsToDismiss.isNotEmpty()) {
+                service.dismissOtpCandidates(otpTextsToDismiss)
+            }
         }
         if (handleToolPanelKey(key, isShifted)) return
         if (handleQuickSendFormKey(key)) return

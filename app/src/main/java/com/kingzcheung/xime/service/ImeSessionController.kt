@@ -41,10 +41,10 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             preeditText = composition.preedit,
         )
         if (display.isT9) {
-            FileLogger.d(
-                XimeInputMethodService.TAG,
+            // dLazy：默认 ERROR 级别下这些串永远不会落盘，不要在热路径先拼接
+            FileLogger.dLazy(XimeInputMethodService.TAG) {
                 "T9 display: enginePreedit='${composition.preedit}' rawPreedit='${display.t9RawPreedit}' input='$inputText' partials=${service.t9PartialSegments.size}"
-            )
+            }
         }
         // T9：插件候选按引擎锚点并入显示态，并生成与候选平行的 actions；
         // 非 T9：直接沿用显示态，actions 用调用方的插件变换结果。
