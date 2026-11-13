@@ -4288,7 +4288,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             readDict = { name ->
                 val f = java.io.File(rimeDir, "$name.dict.yaml")
                 if (!f.isFile) return@collectEntriesStreaming null
-                snapshot += Triple(f.absolutePath, f.lastModified(), f.length())
+                // 快照只跟踪**静态词典**。派生词库（word_freq / auto_word /
+                // candidate_order）由 Kotlin 内存表实时维护（词频排序、造词合并都在
+                // 内存里做），它们的文件每 1.5s 防抖就可能被重写 —— 计入快照会让缓存
+                // **必然每轮失配**，导致每 5 分钟全量重解析 13 个词典（23 万行主词典
+                // + 8MB 扩展，日志实测每 5 分钟一条 "scheme dict refreshed"）。
+                // 用户 2026-11-14 优化：这三个派生库不参与快照判定。
+                if (name !in DERIVED_DICT_NAMES) {
+                    snapshot += Triple(f.absolutePath, f.lastModified(), f.length())
+                }
                 loadedNames += name
                 f.readText(Charsets.UTF_8)
             },
@@ -4749,10 +4757,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
             autoWordTemp = promotion.temp
             autoWordFixed = promotion.fixed
+            // 晋升后**不做部署**（用户 2026-11-14）：候选由 mergeAutoWordCandidates
+            // 从内存表 autoWordFixed 实时合并（hitsFor 按权重降序），立刻可打，
+            // 无需编译进 table.bin。有词晋升时只在日志留痕，便于排查。
             if (promotion.promoted.isNotEmpty()) {
-                // 有词晋升：只标记待部署，由 onWindowHidden（键盘收起）触发，
-                // 绝不在打字过程中部署（会独占 rimeLock 导致候选栏空窗）
-                // 不做部署：候选由内存表实时合并，无需编译进 table.bin
+                FileLogger.dLazy(TAG) {
+                    "auto_word 晋升: ${promotion.promoted.joinToString { "${it.word}(${it.code})" }}"
+                }
             }
         }
     }
