@@ -160,16 +160,6 @@ internal object WordFreqStore {
      */
     private var baselineText: String? = null
 
-    /**
-     * 最近一次 [save] 中 [ensureRimeDict] 是否实际改动了 `word_freq.dict.yaml` 内容。
-     * 供调用方（saveWordData）判断是否需要触发增量部署：词频表变化 → rime 词典源文件
-     * 变化 → 必须重编受影响方案的 `.table.bin` 才生效（否则用户看到旧排序）。
-     * 注意：仅 [save] 写盘后置位，[load] 等其他入口不清零。
-     */
-    @Volatile
-    var lastRimeDictChanged: Boolean = false
-        private set
-
     /** 回退用的私有目录文件（可见目录不可用/写入失败时）。 */
     private fun privateFile(context: android.content.Context): File =
         File(context.filesDir, FILE_NAME)
@@ -341,8 +331,6 @@ internal object WordFreqStore {
             onBaseline = { baselineText = it },
         )
         // dict.yaml 已由 saveUserDictYaml 直接落盘（镜像 + 私有 rime 目录）。
-        // lastRimeDictChanged 仍保留语义：内容变过就置位，供调用方判断是否需重编。
-        lastRimeDictChanged = true
         return saved
     }
 

@@ -2757,10 +2757,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /**
      * 从磁盘加载四张词库表（候选排序 / 词频 / 造词、固定、黑名单）并在主线程原子发布。
      *
-     * 返回是否成功。抽成独立函数的原因：
-     * - onCreate 加载失败要能重试（见调用点）；
-     * - onStartInput 在 `wordTablesLoaded=false` 时可兜底再试一次，避免整轮服务
-     *   生命周期都停留在空表降级（排序/造词/词频全失效）。
+     * 返回是否成功。onCreate 加载失败时按指数退避重试 3 次（见调用点）；
+     * 全部失败则保持空表降级，下次服务重建时重新加载。
      *
      * 必须保持「读 + 收敛 + 写回 + prune」的顺序完整执行——这些操作共享内存态与
      * 磁盘基线，拆开并发会互相覆盖。
@@ -2802,12 +2800,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
             // ── 第三段：发布到内存（用户从这一刻起就能正常打字/排序/造词）────────
             withContext(Dispatchers.Main) {
-                wordTablesLoaded = true
                 candidateOrderTable = orderTable
                 wordFreqTable = freqTable
                 autoWordTemp = prunedTemp
                 autoWordFixed = cleanFixed
                 wordBlacklist = blacklistTable
+                // 置位放在所有表赋值**之后**：并发读者看到 loaded=true 时必须已经
+                // 能看到全部新表，否则「loaded=true + 旧/空表」的窗口里上屏记录
+                // 会被随后的整体替换静默覆盖（链路检查 2026-11-14）
+                wordTablesLoaded = true
                 FileLogger.i(
                     TAG,
                     "Word tables ready in ${(System.nanoTime() - loadStartNs) / 1_000_000}ms: " +
@@ -2824,7 +2825,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 内存表，收敛/清理结果落盘晚几百毫秒完全无感。
             if (cleanFixed !== rawFixed) {
                 runCatching {
-                    AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
+                    // 与 saveWordData 互斥：两者都写 auto_word.dict.yaml 并推进
+                    // fixedBaselineText，并发交错会导致基线错位（链路检查 2026-11-14）
+                    wordTablesLock.lock()
+                    try {
+                        AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
+                    } finally {
+                        wordTablesLock.unlock()
+                    }
                     FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
                         "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
                 }.onFailure { FileLogger.w(TAG, "固定词库收敛落盘失败（不影响本次使用）", it) }
@@ -4953,12 +4961,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 这里仍保留 word_freq.dict.yaml 的生成（供用户查看/备份、以及手动重载时的
         // 兜底排序），只是不再因为它的变化去触发部署。
 
-        // 晋升自动部署（2026-11-10 用户规则 A）：固定词库刚落盘（auto_word.dict.yaml
-        // 是 import_tables 引用的），触发一次**静默增量部署 + 重载**让晋升词进
-        // table.bin——此后它由引擎按码表顺序提供（mergeAutoWordCandidates 的 seen
-        // 会跳过引擎已有词，不再追加尾部）。节流 60s：部署+重载会短暂重建 session。
-        // 晋升落盘已完成；部署本身由 onWindowHidden（键盘收起）触发，
-        // 这里不再做任何调度（打字期间绝不部署）。
+        // 晋升词**不做部署**（用户 2026-11-14）：候选由 mergeAutoWordCandidates 从
+        // 内存表 autoWordFixed 实时合并（hitsFor 按权重降序 + 第二轮排序参与
+        // 手动/词频），立刻可打，无需编译进 table.bin。
     }
 
     /**

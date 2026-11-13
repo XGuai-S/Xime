@@ -519,57 +519,46 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 引擎候选——结果就是「造出来的词永远排在最后，不跟手动/词频走」。
         // 合并后整体再排一次：手动表/词频表里若有这些词，就按表的顺序插到应有的位置；
         // 没有记录的仍保持相对顺序（reorder 对未记录词维持原序、排在已记录词之后）。
+        // 晋升/临时造词也要参与 ①手动 ②词频 排序（用户 2026-11-14）。
+        // 此前 mergeAutoWordCandidates 恒把造词追加到候选**末尾**，且排序只作用于
+        // 引擎候选——结果就是「造出来的词永远排在最后，不跟手动/词频走」。
+        //
+        // ⚠️ 这里不能用 CandidateOrderStore.reorder：它返回的 actions 是 engine(原下标)，
+        // 而本次 actions 混有 engine(i) 与 plugin(word)，无法复用；且按「词文本」反查
+        // 下标在重复候选时会把两个位置映射到同一项（点选落到错误引擎下标）。
+        // 因此直接算**索引排列**，四个平行数组（candidates/comments/actions/
+        // autoWordTempIndices）用同一个排列重排，保证严格对齐。
         val withAutoWords = withAutoWordsRaw?.let { merged ->
-            // ⚠️ 这里不能复用 shouldApplyCandidateOrder：它要求 candidateActions 为空，
-            // 而合并造词后 actions 必然含 plugin(word)，条件恒为 false，排序会被跳过
-            // （用户 2026-11-14 实测「浩清」16 次仍排最后，根因即此）。
-            // 合并后的再排序只需排除 T9 / ASCII（索引映射不可靠），
-            // actions 我们自己按新顺序重建，不受影响。
             if (display.isT9 || isAsciiMode) {
                 merged
             } else {
-                val resort = if (autoWordConfig.sortByManual) {
-                    CandidateOrderStore.reorder(
-                        code = rawInputText,
-                        candidates = merged.candidates,
-                        comments = merged.comments,
-                        table = service.candidateOrderTable,
+                val permutation = when {
+                    autoWordConfig.sortByManual -> computeOrderPermutation(
+                        merged.candidates, service.candidateOrderTable, rawInputText,
                     )
-                } else {
-                    null
-                } ?: if (autoWordConfig.sortByFreq) {
-                    CandidateOrderStore.reorder(
-                        code = rawInputText,
-                        candidates = merged.candidates,
-                        comments = merged.comments,
-                        table = service.wordFreqTable,
+                    autoWordConfig.sortByFreq -> computeOrderPermutation(
+                        merged.candidates, service.wordFreqTable, rawInputText,
                     )
-                } else {
-                    null
+                    else -> null
                 }
-                if (resort == null) {
+                if (permutation == null) {
                     merged
                 } else {
-                    // reorder 返回的 actions 是 engine(原下标)，但这里原始 actions 里
-                    // 混合了 engine(i) 与 plugin(word)，不能直接用。按新顺序重排原 actions。
-                    // 用「值→首次出现下标」映射而非 indexOf 逐个查：候选可能有重复词，
-                    // 稳定排序下同词相对顺序不变，映射取首个即可正确还原。
-                    val firstIndex = LinkedHashMap<String, Int>()
-                    merged.candidates.forEachIndexed { i, w -> firstIndex.putIfAbsent(w, i) }
-                    val newOrder = resort.candidates.map { word ->
-                        firstIndex[word] ?: 0
+                    val newTempIndices = HashSet<Int>()
+                    merged.autoWordTempIndices.forEach { oldIdx ->
+                        val newIdx = permutation.indexOf(oldIdx)
+                        if (newIdx >= 0) newTempIndices += newIdx
                     }
                     CandidateOrderStore.Reordered(
-                        candidates = resort.candidates,
-                        comments = resort.comments,
-                        actions = newOrder.mapNotNull { idx -> merged.actions.getOrNull(idx) },
-                        autoWordTempIndices = merged.autoWordTempIndices
-                            .mapNotNull { oldIdx -> newOrder.indexOf(oldIdx).takeIf { it >= 0 } }
-                            .toSet(),
+                        candidates = permutation.map { merged.candidates[it] },
+                        comments = permutation.map { merged.comments.getOrElse(it) { "" } },
+                        actions = permutation.mapNotNull { merged.actions.getOrNull(it) },
+                        autoWordTempIndices = newTempIndices,
                     )
                 }
             }
         }
+
         // 黑名单词库：长按候选删除过的词不再出现（引擎候选与自造词候选一并剔除）。
         // 按当前输入编码过滤：黑名单条目带删除时的编码，只屏蔽该编码下的词。
         // 过滤会重排下标，因此把造词临时下标一并传入，让 filter 内部做旧→新下标重映射。
@@ -855,4 +844,29 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         }
     }
 
+}
+
+/**
+ * 按排序表算候选的**索引排列**（未命中/无变化返回 null）。
+ *
+ * 与 [CandidateOrderStore.reorder] 同一排序规则（频数降序、未记录的保持原位次），
+ * 但只返回排列而不构造候选数组——调用方要对 candidates/comments/actions/
+ * autoWordTempIndices 四个平行数组统一重排，用「词文本反查下标」在重复候选时
+ * 会错位（用户 2026-11-14 链路检查）。
+ */
+private fun computeOrderPermutation(
+    candidates: List<String>,
+    table: Map<String, Map<String, Int>>,
+    code: String,
+): List<Int>? {
+    if (candidates.isEmpty() || code.isEmpty()) return null
+    val freq = table[code] ?: return null
+    if (freq.isEmpty()) return null
+    val permutation = candidates.withIndex()
+        .sortedWith(
+            compareByDescending<IndexedValue<String>> { freq[it.value] ?: Int.MIN_VALUE }
+                .thenBy { it.index }
+        )
+        .map { it.index }
+    return if (permutation == candidates.indices.toList()) null else permutation
 }
