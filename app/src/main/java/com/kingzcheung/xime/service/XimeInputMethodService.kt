@@ -3424,6 +3424,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             isComposing = false,
         )
         rimeEngine.clearComposition()
+        // 键盘收起：若本轮有词晋升，此刻执行增量部署（用户不在输入，不打断按键）
+        deployPromotedWordsIfNeeded()
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         val cleanup = Runnable {
             windowHiddenCleanup = null
@@ -3658,7 +3660,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
         // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
         mainHandler.removeCallbacks(wordFreqSaveRunnable)
-        mainHandler.removeCallbacks(autoWordDeployRunnable)
         wordFreqSavePending = false
         saveWordData()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -3990,9 +3991,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     @Volatile
     private var lastAutoWordDeployAt = 0L
 
-    /** 晋升部署的重试计数（最多 ~60s，等用户停手/无组合态的窗口再部署）。 */
-    private var autoWordDeployRetryCount = 0
-
     /**
      * 晋升自动部署的重试任务：每 3 秒检查一次「无组合态 + 节流窗口已过」，
      * 命中就把 auto_word 编译进 table 并重载 session。
@@ -4001,43 +3999,41 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 落盘时几乎总是有组合态，部署被无限推迟（实测隔了近 30 分钟才触发一次）。
      * 主动轮询空闲窗口才能真正「晋升后很快生效」。
      */
-    private val autoWordDeployRunnable: Runnable = Runnable {
-        if (!autoWordDeployPending) {
-            autoWordDeployRetryCount = 0
-            return@Runnable
-        }
-        val now = System.currentTimeMillis()
-        val composing = candidateState.value.isComposing ||
-            candidateState.value.preeditText.isNotEmpty()
-        if (composing || now - lastAutoWordDeployAt < 60_000L) {
-            // 有组合态 / 节流窗口内：稍后重试（最多 20 次 ≈ 60s；超了就留给下次晋升/落盘）
-            if (autoWordDeployRetryCount < 20) {
-                autoWordDeployRetryCount++
-                // lambda 里的 this 是外层 Service，重排自身要用字段引用
-                mainHandler.postDelayed(autoWordDeployRunnable, 3_000L)
-            } else {
-                autoWordDeployRetryCount = 0
-            }
-            return@Runnable
-        }
-        autoWordDeployRetryCount = 0
+    /**
+     * 晋升自动部署（用户 2026-11-14 规则 C）：**只在键盘收起时**执行。
+     *
+     * 为什么不在打字过程中触发：部署会让 librime 维护线程独占 rimeLock（编译 table.bin
+     * 数秒），期间按键查询走 tryLocked 拿不到锁即返回空候选数组 —— preedit 仍显示编码，
+     * 表现为「打着打着候选栏突然只剩字母」（用户实测 2026-11-14，日志显示约每分钟一次
+     * 部署）。键盘收起时用户不在输入，部署不会打断任何按键。
+     *
+     * 只在 [onWindowHidden] 调用；期间不轮询、不重试。
+     */
+    private fun deployPromotedWordsIfNeeded() {
+        if (!autoWordDeployPending) return
         autoWordDeployPending = false
-        lastAutoWordDeployAt = now
+        lastAutoWordDeployAt = System.currentTimeMillis()
         serviceScope.launch(Dispatchers.IO) {
             try {
-                FileLogger.i(TAG, "auto_word: 晋升触发静默增量部署（词进 table，按码表顺序）")
+                FileLogger.i(TAG, "auto_word: 键盘收起，执行晋升增量部署（词进 table，按码表顺序）")
                 val ok = RimeConfigHelper.ensureDeployment(this@XimeInputMethodService)
                 if (ok) {
                     keyRouter.postRimeJob {
-                        val schema = rimeEngine.getCurrentSchema()
-                        if (schema.isNotEmpty()) rimeEngine.switchSchema(schema)
-                        withContext(Dispatchers.Main) { updateUI() }
+                        // 部署后重建会话：新 table 从下次弹出键盘起生效，用户无感知
+                        candidateState.value = candidateState.value.copy(
+                            inputText = "", preeditText = "",
+                            candidates = emptyList(), candidateComments = emptyList(),
+                            associationCandidates = emptyList(), pendingEnglishText = "",
+                            isComposing = false, hasNextPage = false, hasPrevPage = false,
+                            candidateActions = emptyList(),
+                        )
+                        rimeEngine.clearComposition()
                     }
                 } else {
-                    FileLogger.w(TAG, "auto_word: 晋升自动部署失败，下次晋升/重载再试")
+                    FileLogger.w(TAG, "auto_word: 晋升部署失败，下次键盘收起再试")
                 }
             } catch (t: Throwable) {
-                FileLogger.e(TAG, "auto_word: 晋升自动部署异常", t)
+                FileLogger.e(TAG, "auto_word: 晋升部署异常", t)
             }
         }
     }
@@ -4740,12 +4736,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             autoWordTemp = promotion.temp
             autoWordFixed = promotion.fixed
             if (promotion.promoted.isNotEmpty()) {
-                // 有词晋升：标记待部署并启动重试链（等组合态空闲窗口执行静默增量部署，
-                // 让晋升词尽快进 table.bin、按码表顺序出现在候选里）
+                // 有词晋升：只标记待部署，由 onWindowHidden（键盘收起）触发，
+                // 绝不在打字过程中部署（会独占 rimeLock 导致候选栏空窗）
                 autoWordDeployPending = true
-                mainHandler.removeCallbacks(autoWordDeployRunnable)
-                autoWordDeployRetryCount = 0
-                mainHandler.postDelayed(autoWordDeployRunnable, 3_000L)
             }
         }
     }
@@ -4938,13 +4931,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 是 import_tables 引用的），触发一次**静默增量部署 + 重载**让晋升词进
         // table.bin——此后它由引擎按码表顺序提供（mergeAutoWordCandidates 的 seen
         // 会跳过引擎已有词，不再追加尾部）。节流 60s：部署+重载会短暂重建 session。
-        // 晋升落盘后顺手推一次重试链（真正执行由 autoWordDeployRunnable 等空闲窗口），
-        // 保证「只有落盘成功后才部署」也能被覆盖到。
-        if (autoWordDeployPending) {
-            mainHandler.removeCallbacks(autoWordDeployRunnable)
-            autoWordDeployRetryCount = 0
-            mainHandler.postDelayed(autoWordDeployRunnable, 1_000L)
-        }
+        // 晋升落盘已完成；部署本身由 onWindowHidden（键盘收起）触发，
+        // 这里不再做任何调度（打字期间绝不部署）。
     }
 
     /**
