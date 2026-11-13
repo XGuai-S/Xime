@@ -366,10 +366,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     @Volatile
     private var wordTablesLoaded = false
 
-    /** 词库是否正在加载（防 onStartInput 兜底重试与 onCreate 加载并发）。 */
-    @Volatile
-    private var wordTablesLoading = false
-
     /**
      * 词库表互斥锁：保护 [candidateOrderTable] / [wordFreqTable] / [autoWordTemp] /
      * [autoWordFixed] / [wordBlacklist] 的**读-改-写**。
@@ -827,7 +823,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 注意保持「读 + 收敛 + 写回 + prune」的顺序完整执行：这些操作之间共享
         // 内存态与磁盘基线，拆开并发会互相覆盖。
         serviceScope.launch(Dispatchers.IO) {
-            wordTablesLoading = true
             var ok = false
             // 加载失败重试（指数退避，共 3 次）；仍失败交给 onStartInput 兜底重试
             for (attempt in 0 until 3) {
@@ -835,9 +830,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 if (ok) break
                 if (attempt < 2) kotlinx.coroutines.delay(500L * (1L shl attempt))
             }
-            wordTablesLoading = false
             if (!ok) {
-                FileLogger.e(TAG, "词库加载 3 次均失败，本次保持空表；下次 onStartInput 兜底重试")
+                FileLogger.e(TAG, "词库加载 3 次均失败，本次保持空表降级（下次服务重建时重新加载）")
             }
         }
         FileLogger.i(
@@ -2800,20 +2794,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        // 词库兜底重试：onCreate 时若加载失败（3 次重试都挂），这里在每次进入输入框时
-        // 再补一次，避免整轮服务生命周期都处于空表降级（排序/造词/词频全失效）。
-        if (!wordTablesLoaded && !wordTablesLoading) {
-            FileLogger.i(TAG, "onStartInput: 词库未就绪，触发兜底重试加载")
-            wordTablesLoading = true
-            serviceScope.launch(Dispatchers.IO) {
-                // finally 必须复位：否则 wordTablesLoading 永久 true，后续兜底永不触发
-                try {
-                    loadWordTablesOnce()
-                } finally {
-                    wordTablesLoading = false
-                }
-            }
-        }
         // QQ 撤回/发送消息时会把输入框重建一遍：系统给出的是 restarting=false 的"新会话"，
         // 但实际还是同一个编辑框（同样的包名/fieldId/inputType，且间隔很短）。
         // 这种重启不该换 sessionId、不该清候选栏——否则键盘会闪一下再弹出。
