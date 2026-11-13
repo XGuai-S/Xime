@@ -2952,36 +2952,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 }
             }
         }
-        // 兜底：晋升部署恰好跨越「键盘重新弹出」时，部署期间引擎会话处于编译态，
-        // 此刻打字会拿到空候选。等部署结束后补一次会话重建，消除这个窗口期。
-        if (autoWordDeploying) {
-            FileLogger.i(TAG, "onStartInputView: 晋升部署进行中，待其结束后重建会话")
-            serviceScope.launch(Dispatchers.IO) {
-                var waited = 0L
-                while (autoWordDeploying && waited < 60_000L) {
-                    kotlinx.coroutines.delay(200)
-                    waited += 200
-                }
-                if (waited >= 60_000L) {
-                    FileLogger.w(TAG, "onStartInputView: 等待部署超时，放弃会话重建")
-                    return@launch
-                }
-                keyRouter.postRimeJob {
-                    RimeEngine.getInstance().ensureSession()
-                    val saved = com.kingzcheung.xime.settings.SettingsPreferences
-                        .getCurrentSchema(this@XimeInputMethodService)
-                    val avail = rimeEngine.getAvailableSchemas()
-                    if (saved.isNotEmpty() && saved in avail) {
-                        val switched = rimeEngine.switchSchema(saved)
-                        // 同上：恢复中文标点，避免切换后首键被当成 ASCII 直通
-                        if (switched && !rimeEngine.isAsciiMode()) {
-                            rimeEngine.setOption("ascii_punct", false)
-                        }
-                        withContext(Dispatchers.Main) { updateUI() }
-                    }
-                }
-            }
-        }
         // 发送后残留清理：宿主已把输入框清空（聊天「发送」把嵌入的词发出去并清空输入框），
         // 但上一轮的引擎组合态/候选栏还挂着（QQ 等应用发送时不回调光标归零，
         // onWindowHidden 的清理与键盘再弹出的时序对不上）时，在键盘弹出这一刻补一次清理。
@@ -3526,14 +3496,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             isComposing = false,
         )
         rimeEngine.clearComposition()
-        // 键盘收起：若本轮有词晋升，延迟 10s 再部署（用户 2026-11-14）。
-        // 不能在收起瞬间立刻部署：切换应用时 onWindowHidden 紧接着就是新应用的
-        // onStartInput/onStartInputView，部署若正在进行会让新会话处于编译态，
-        // 表现为「到另一个应用前几个按键只出字母」。等 10s 确认没回来再部署。
-        if (autoWordDeployPending) {
-            mainHandler.removeCallbacks(autoWordDeployRunnable)
-            mainHandler.postDelayed(autoWordDeployRunnable, 10_000L)
-        }
+        // 晋升词不做部署：候选由 mergeAutoWordCandidates 从内存表 autoWordFixed
+        // 实时合并（hitsFor 按权重降序），晋升后立刻可打，不依赖 table.bin。
+        // 部署只会带来会话重建/ascii 状态错乱/候选空窗，收益仅是让词参与引擎排序。
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         val cleanup = Runnable {
             windowHiddenCleanup = null
@@ -3563,10 +3528,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onWindowShown() {
         super.onWindowShown()
-        // 键盘重新弹出：取消待执行的延迟部署，避免打扰正在输入的用户
-        if (autoWordDeployPending) {
-            mainHandler.removeCallbacks(autoWordDeployRunnable)
-        }
         val cancelled = windowHiddenCleanup != null
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         windowHiddenCleanup = null
@@ -3772,7 +3733,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
         // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
         mainHandler.removeCallbacks(wordFreqSaveRunnable)
-        mainHandler.removeCallbacks(autoWordDeployRunnable)
         wordFreqSavePending = false
         saveWordData()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -4091,124 +4051,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private val wordFreqSaveDebounceMs: Long = 1500
 
     private var wordFreqSavePending = false
-
-    /**
-     * 晋升自动部署（2026-11-10 用户规则 A）：晋升进固定词库的词只有编译进
-     * table.bin 才会**按码表顺序**出现在引擎候选里（而非被 mergeAutoWordCandidates
-     * 追加到候选尾部）。晋升发生 → 置标志 → 落盘后触发一次静默增量部署+重载。
-     */
-    @Volatile
-    private var autoWordDeployPending = false
-
-    /** 上次晋升自动部署的时间戳（节流用：60s 内只部署一次，重载会重建 session）。 */
-    @Volatile
-    private var lastAutoWordDeployAt = 0L
-
-    /**
-     * 晋升部署是否仍在进行中。
-     *
-     * 用于兜底：部署若恰好跨越「键盘重新弹出」的时刻，onStartInputView 会在部署
-     * 结束后再补一次会话重建，避免用户遇到「刚切回来打不了字」的窗口期。
-     */
-    @Volatile
-    private var autoWordDeploying = false
-
-    /**
-     * 晋升自动部署的重试任务：每 3 秒检查一次「无组合态 + 节流窗口已过」，
-     * 命中就把 auto_word 编译进 table 并重载 session。
-     *
-     * 为什么不只在 saveWordData（防抖落盘）里判断：上屏后用户往往立刻继续打字，
-     * 落盘时几乎总是有组合态，部署被无限推迟（实测隔了近 30 分钟才触发一次）。
-     * 主动轮询空闲窗口才能真正「晋升后很快生效」。
-     */
-    /**
-     * 晋升自动部署（用户 2026-11-14 规则 C）：**只在键盘收起时**执行。
-     *
-     * 为什么不在打字过程中触发：部署会让 librime 维护线程独占 rimeLock（编译 table.bin
-     * 数秒），期间按键查询走 tryLocked 拿不到锁即返回空候选数组 —— preedit 仍显示编码，
-     * 表现为「打着打着候选栏突然只剩字母」（用户实测 2026-11-14，日志显示约每分钟一次
-     * 部署）。键盘收起时用户不在输入，部署不会打断任何按键。
-     *
-     * 只在 [onWindowHidden] 调用；期间不轮询、不重试。
-     */
-    /**
-     * 晋升部署的延迟任务：键盘收起 10s 后若仍未重新弹出，才真正部署。
-     *
-     * 延迟的目的（用户 2026-11-14）：切换应用会连续触发 onWindowHidden →
-     * 新应用 onStartInput/onStartInputView。若在收起瞬间就部署，新会话会撞上
-     * 编译锁，前几个按键被当 ASCII 直通上屏（只出字母）。10s 足够覆盖切换过程，
-     * 且用户真的停手时部署体验无感。
-     */
-    private val autoWordDeployRunnable: Runnable = Runnable {
-        deployPromotedWordsIfNeeded()
-    }
-
-    private fun deployPromotedWordsIfNeeded() {
-        if (!autoWordDeployPending) return
-        autoWordDeployPending = false
-        lastAutoWordDeployAt = System.currentTimeMillis()
-        autoWordDeploying = true
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                FileLogger.i(TAG, "auto_word: 键盘收起，执行晋升增量部署（词进 table，按码表顺序）")
-                val ok = RimeConfigHelper.ensureDeployment(this@XimeInputMethodService)
-                if (ok) {
-                    // 部署后**必须重建 native 会话**：部署会销毁/重建 rime 引擎内部状态，
-                    // 不重新 switchSchema 的话下次弹键盘时引擎会话处于无效态，
-                    // 表现为「打不了字、出不了候选」（用户 2026-11-14 反馈）。
-                    // 与 ImeSchemaController.reloadConfig 的部署后处理保持一致。
-                    keyRouter.postRimeJob {
-                        // 部署后 rime 引擎内部会话可能已失效：先确保会话存在，
-                        // 再切回当前方案让新 table 生效。两步都不可省——只 switchSchema
-                        // 而 session 已销毁时会直接失败，下次弹键盘就打不了字。
-                        RimeEngine.getInstance().ensureSession()
-                        val savedSchema = com.kingzcheung.xime.settings.SettingsPreferences
-                            .getCurrentSchema(this@XimeInputMethodService)
-                        val available = rimeEngine.getAvailableSchemas()
-                        if (savedSchema.isNotEmpty() && savedSchema in available) {
-                            val switched = rimeEngine.switchSchema(savedSchema)
-                            // 与 ImeSchemaController.switchSchema 保持一致：切方案后恢复中文标点，
-                            // 否则引擎默认 ascii_punct 可能为 true，导致上屏变英文标点/直通字母
-                            if (switched && !rimeEngine.isAsciiMode()) {
-                                rimeEngine.setOption("ascii_punct", false)
-                            }
-                            FileLogger.i(TAG, "auto_word: 部署后会话重建 schema=$savedSchema switched=$switched")
-                        } else {
-                            FileLogger.w(TAG, "auto_word: 部署后当前方案 $savedSchema 不可用，跳过会话重建")
-                        }
-                        // 部署后新会话默认可能是 ASCII：显式归位中文，
-                        // 否则下次弹键盘前几键直出字母（用户 2026-11-14 实测）
-                        if (!rimeEngine.isAsciiMode()) {
-                            rimeEngine.setOption("ascii_punct", false)
-                        } else {
-                            rimeEngine.setOption("ascii_mode", false)
-                            rimeEngine.setOption("ascii_punct", false)
-                        }
-                        val currentId = rimeEngine.getCurrentSchema()
-                        withContext(Dispatchers.Main) {
-                            if (currentId.isNotEmpty()) {
-                                uiState.value = uiState.value.copy(currentSchemaId = currentId)
-                            }
-                            candidateState.value = candidateState.value.copy(
-                                inputText = "", preeditText = "",
-                                candidates = emptyList(), candidateComments = emptyList(),
-                                associationCandidates = emptyList(), pendingEnglishText = "",
-                                isComposing = false, hasNextPage = false, hasPrevPage = false,
-                                candidateActions = emptyList(),
-                            )
-                            updateUI()
-                        }
-                    }
-                } else {
-                    FileLogger.w(TAG, "auto_word: 晋升部署失败，下次键盘收起再试")
-                }
-            } catch (t: Throwable) {
-                FileLogger.e(TAG, "auto_word: 晋升部署异常", t)
-            } finally {
-                autoWordDeploying = false
-            }
-        }
-    }
 
     /**
      * 组合生词的**累积窗口**：最近若干次上屏的汉字段（按上屏顺序）。
@@ -4910,7 +4752,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             if (promotion.promoted.isNotEmpty()) {
                 // 有词晋升：只标记待部署，由 onWindowHidden（键盘收起）触发，
                 // 绝不在打字过程中部署（会独占 rimeLock 导致候选栏空窗）
-                autoWordDeployPending = true
+                // 不做部署：候选由内存表实时合并，无需编译进 table.bin
             }
         }
     }
