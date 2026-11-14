@@ -60,6 +60,37 @@
 2. 跑 `./gradlew assembleDebug --quiet` 确认一致状态
 3. 提交所有已完成的工作
 
+## 性能测量（打字帧率）
+
+改动键盘 UI / 候选栏 / 按键热路径后，应在真机上复测打字帧率，避免引入卡顿回归。
+
+```bash
+# 推送到设备（只需一次，改脚本后重推）
+cp tools/measure-fps.sh /data/local/tmp/ && chmod 755 /data/local/tmp/measure-fps.sh
+
+# 测量（先在任意输入框点出 Xime 键盘）
+sh /data/local/tmp/measure-fps.sh 40 warm
+```
+
+参数：第一个是点按次数（默认 40），第二个传 `warm` 会先等 20 秒让词库加载完成（刚安装 / 刚重启后必须加，否则会把词库加载算进 janky）。键盘未显示时脚本会直接报错退出，避免测到 0 帧；确认已显示仍误报可加 `--force`。
+
+原理：`input tap` 走真实触摸通道连续点按键盘字母区，再读 `dumpsys gfxinfo` 统计帧耗时。测的是完整链路（按键 → Rime → 候选 → 绘制）。
+
+判读标准：
+
+| 指标 | 优秀 | 可接受 | 需排查 |
+|------|------|--------|--------|
+| 50th percentile | < 12ms | < 16ms | ≥ 16ms |
+| 90th percentile | < 16ms | < 20ms | ≥ 20ms |
+| Janky frames | < 5% | < 10% | ≥ 10% |
+| Missed Vsync | 0 | 0~2 | > 2 |
+
+当前基线（3.3.37，248 帧热稳定态，60Hz 屏）：中位 12ms / 90 分位 15ms / janky 1.61% / Missed Vsync 0。
+
+注意事项：
+- 屏幕当前跑 60Hz（`dumpsys display` 的 `mActiveSfDisplayMode`）。键盘渲染中位 12ms 跟不上 120Hz 的 8.3ms 预算，强制高刷反而会抬高 janky，不要为「更流畅」去锁 120Hz。
+- 刚安装后的第一次测量一定偏高（词库加载中），必须等稳定后重测再下结论。
+
 ## Jetpack Compose
 For all Compose/Android UI tasks, follow the instructions in
 `.skills/compose-expert/SKILL.md` and consult the reference
