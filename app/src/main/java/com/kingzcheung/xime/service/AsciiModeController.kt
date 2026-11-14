@@ -119,9 +119,10 @@ internal class AsciiModeController(private val service: XimeInputMethodService) 
      */
     internal fun restoreDefaultChoice() {
         if (!RimeEngine.isInitialized()) return
-        if (service.rimeEngine.isAsciiMode()) {
-            service.rimeEngine.setOption("ascii_mode", false)
-            FileLogger.i(XimeInputMethodService.TAG, "restoreDefaultChoice: ascii true -> false")
-        }
+        // 不先读 isAsciiMode()：它走 tryLocked，锁被部署/会话重建占用时返回 false，
+        // 会让我们误判"已是中文"而跳过归位 → 英文态残留（切换应用前几键直出字母）。
+        // setOption 本身是阻塞且幂等的，直接写即可。
+        service.rimeEngine.setOption("ascii_mode", false)
+        FileLogger.i(XimeInputMethodService.TAG, "restoreDefaultChoice: ascii -> false")
     }
 }

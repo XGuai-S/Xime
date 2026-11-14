@@ -164,6 +164,9 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         displayCandidates: List<String>,
         isComposing: Boolean,
     ) {
+        // 工具面板聚焦时，编码/候选属于面板输入框，写进宿主会串位。
+        // 守卫下沉到本函数，applyComposition 与 updateUIWithResult 两条入口共用。
+        if (service.uiState.value.toolPanelInputFocused) return
         // 删除窗口（退格保护窗）：保留窗口只为两件事——
         //   1. 窗口内不 early return（否则输入框什么都不写，宿主看到 composing 区 stale
         //      → 表现为"一下没了"）；
@@ -519,9 +522,6 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 引擎候选——结果就是「造出来的词永远排在最后，不跟手动/词频走」。
         // 合并后整体再排一次：手动表/词频表里若有这些词，就按表的顺序插到应有的位置；
         // 没有记录的仍保持相对顺序（reorder 对未记录词维持原序、排在已记录词之后）。
-        // 晋升/临时造词也要参与 ①手动 ②词频 排序（用户 2026-11-14）。
-        // 此前 mergeAutoWordCandidates 恒把造词追加到候选**末尾**，且排序只作用于
-        // 引擎候选——结果就是「造出来的词永远排在最后，不跟手动/词频走」。
         //
         // ⚠️ 这里不能用 CandidateOrderStore.reorder：它返回的 actions 是 engine(原下标)，
         // 而本次 actions 混有 engine(i) 与 plugin(word)，无法复用；且按「词文本」反查
@@ -532,15 +532,14 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             if (display.isT9 || isAsciiMode) {
                 merged
             } else {
-                val permutation = when {
-                    autoWordConfig.sortByManual -> computeOrderPermutation(
-                        merged.candidates, service.candidateOrderTable, rawInputText,
-                    )
-                    autoWordConfig.sortByFreq -> computeOrderPermutation(
-                        merged.candidates, service.wordFreqTable, rawInputText,
-                    )
-                    else -> null
-                }
+                // 与引擎候选那段同一口径：手动表未命中（该编码没被拖动过）时回退词频表，
+                // 否则「开手动排序 + 无手动记录」的编码会把造词永远钉在末尾。
+                val byManual = if (autoWordConfig.sortByManual) {
+                    computeOrderPermutation(merged.candidates, service.candidateOrderTable, rawInputText)
+                } else null
+                val permutation = byManual ?: if (autoWordConfig.sortByFreq) {
+                    computeOrderPermutation(merged.candidates, service.wordFreqTable, rawInputText)
+                } else null
                 if (permutation == null) {
                     merged
                 } else {
@@ -552,7 +551,12 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
                     CandidateOrderStore.Reordered(
                         candidates = permutation.map { merged.candidates[it] },
                         comments = permutation.map { merged.comments.getOrElse(it) { "" } },
-                        actions = permutation.mapNotNull { merged.actions.getOrNull(it) },
+                        // 不能 mapNotNull：actions 短一节会被静默丢元素，四个平行数组
+                        // 错位后点选会落到错误的候选/动作上。
+                        actions = permutation.map { idx ->
+                            merged.actions.getOrNull(idx)
+                                ?: CandidateAction.plugin(merged.candidates[idx])
+                        },
                         autoWordTempIndices = newTempIndices,
                     )
                 }

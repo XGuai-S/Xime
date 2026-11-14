@@ -45,7 +45,8 @@ class OtpNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val notification = sbn?.notification ?: return
-        if (!runCatching { SettingsPreferences.isOtpAutofillEnabled(this) }.getOrDefault(true)) return
+        // 默认关闭是隐私设计：读设置失败时必须保持关闭，不能退化成"读不到就采集"。
+        if (!runCatching { SettingsPreferences.isOtpAutofillEnabled(this) }.getOrDefault(false)) return
         // 聊天类应用不采集：微信/QQ 里随便说一句「验证码 123456」就会被当验证码，
         // 还会把用户手头的剪贴板换掉（用户 2026-11 反馈的误报来源）。
         val pkg = sbn?.packageName.orEmpty()

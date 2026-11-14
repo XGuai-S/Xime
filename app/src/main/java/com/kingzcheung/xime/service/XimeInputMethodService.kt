@@ -465,7 +465,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal var swipeDeletedAnchor: String? = null
 
     /** 累积的 partial commit 段列表（多段选词场景下逐段追加，文本+拼音同源，供调频/回滚） */
-    internal val t9PartialSegments = mutableListOf<T9PartialSegment>()
+    // 主线程（提交/回退）与按键处理线程都会读写，必须同步，否则可能
+    // ConcurrentModificationException / 丢段。
+    internal val t9PartialSegments =
+        java.util.Collections.synchronizedList(mutableListOf<T9PartialSegment>())
     /**
      * 组合态编码编辑光标（raw input 字符偏移，-1 = 位于末尾/非编辑态）。
      * 仅全键盘（非 T9）使用：滑动移动此位置，退格/字母键在编辑态由宿主直接改
@@ -922,7 +925,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         
         initDeploymentCallback()
         
-        val initJob = serviceScope.launch(Dispatchers.IO) {
+        serviceScope.launch(Dispatchers.IO) {
             try {
                 notifyDeploymentStatus(true, "正在初始化...")
                 
@@ -1211,10 +1214,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 这里在 key 队列里再锁一次，确保第一键之前状态就是中文。
         keyRouter.postRimeJob {
             if (RimeEngine.isInitialized() && !startAscii) {
-                if (rimeEngine.isAsciiMode()) {
-                    rimeEngine.setOption("ascii_mode", false)
-                    FileLogger.i(TAG, "onStartInput: 强制归位中文（原引擎为 ascii）")
-                }
+                // 不先 isAsciiMode()（tryLocked，锁被占时返回 false 会误判成"已是中文"），
+                // 直接阻塞写一次，幂等且保证第一键之前状态就是中文。
+                rimeEngine.setOption("ascii_mode", false)
                 rimeEngine.setOption("ascii_punct", false)
             }
         }
@@ -3736,6 +3738,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         com.kingzcheung.xime.handwriting.HandwritingEngine.release()
         ExtensionManager.release()
         com.kingzcheung.xime.association.NativeOnnxEngine.releaseSharedEnv()
+        // 键盘隐藏后的 3s 清理任务挂在长生命的主线程 handler 上，不撤会持有已销毁
+        // 的 Service 并在其上操作 rimeEngine/uiState。
+        windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
+        windowHiddenCleanup = null
         serviceScope.cancel()
         keyProcessingDispatcher.close()
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
@@ -4142,6 +4148,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 2. word_freq 上屏即写、条目巨多，任何真词库没有的词都先被词频表"收录"过
      *    一次，等于组合生词被词频表完全挡死。
      */
+    @Volatile
     private var schemeRootWords: Set<String> = emptySet()
 
     /** 当前方案词典「词 → 编码串」（多码空格分隔，仅 2~4 字词），组合生词编码级去重用。 */
@@ -4251,7 +4258,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             .getEnabledSchemas(ctx)
             .mapNotNull { com.kingzcheung.xime.settings.SchemaManager.getReferencedDictName(ctx, it) }
             .distinct()
-        if (rootDictNames.isEmpty()) return
+        if (rootDictNames.isEmpty()) {
+            // 方案列表暂时读空（引擎重建/配置未就绪）时不能保留上一方案的缓存：
+            // 否则查重判据仍按旧方案词典走，跨方案误挡/误放。
+            schemeDictCache = null
+            dictSnapshot = null
+            schemeDictWords = emptySet()
+            schemeRootWords = emptySet()
+            schemeRootWordCodes = emptyMap()
+            schemeCharCodes = emptyMap()
+            FileLogger.w(TAG, "scheme dict refresh: no enabled schema root dict, cache cleared")
+            return
+        }
         val activeSchemaId = com.kingzcheung.xime.settings.SettingsPreferences.getCurrentSchema(ctx)
         val activeRootDict = com.kingzcheung.xime.settings.SchemaManager.getReferencedDictName(ctx, activeSchemaId)
             ?.takeIf { it in rootDictNames }.orEmpty()
@@ -4361,6 +4379,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val result = SchemeDictCache(
             words, noFreq, noAutoWord, charCodes, rootWords, activeRootDict, rootWordCodes,
         )
+        // 活动方案文件本身纳入快照：用户给方案新增 import_tables 时，被引用的词典
+        // 文件都没变，只看词典会让缓存永远命中，新词典的词进不来。
+        java.io.File(rimeDir, "$activeSchemaId.schema.yaml")
+            .takeIf { it.isFile }
+            ?.let { snapshot += Triple(it.absolutePath, it.lastModified(), it.length()) }
         dictSnapshot = snapshot.toList()
         schemeDictCache = result
         applySchemeDictCache(result)
@@ -4392,11 +4415,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (visibleText != null) {
             // 可见侧快照：stamp 只给 (秒, 字节数)，路径用「可见目录 + 文件名」拼出，
             // 与主词典快照的绝对路径同形，缓存命中判定才能一致。
-            com.kingzcheung.xime.settings.UserConfigDir.stamp(ctx, fileName)?.let { (m, sz) ->
-                val abs = java.io.File(
-                    com.kingzcheung.xime.settings.UserConfigDir.absoluteDir, fileName
-                ).absolutePath
-                snapshot?.add(Triple(abs, m * 1000L, sz))
+            // 快照判定用 File.lastModified()（毫秒）。stamp() 给的是秒级，×1000 后与
+            // 真实 mtime（ext4 纳秒精度）几乎必然不等 → 缓存永不命中、每次全量重解析。
+            val snapFile = java.io.File(
+                com.kingzcheung.xime.settings.UserConfigDir.absoluteDir, fileName
+            )
+            if (snapFile.isFile) {
+                snapshot?.add(Triple(snapFile.absolutePath, snapFile.lastModified(), snapFile.length()))
             }
             return parseCharEntries(visibleText, name)
         }
@@ -4558,6 +4583,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 单字上屏（composeCodes 返回空）是最常见的组合场景（「一」+「键」→「一键」），
             // 若在这里直接 return，组合逻辑永远走不到，表现为「字词上屏不组词」。
             recordComboWord(text, autoWordConfig)
+            // 造词可能改写了 autoWordTemp/autoWordFixed，这里必须调度一次落盘：
+            // 本分支 return 在函数末尾的 scheduleWordFreqSave() 之前，漏了就会丢造词。
+            scheduleWordFreqSave()
             // 把本次上屏推进组合窗口，下一次（及更后面的上屏）才能与它拼接。
             advanceComboHistory(text)
             return
@@ -4855,15 +4883,24 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (!wordTablesLoaded) return
         // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词。
         // 全程持锁：与 IO 线程的 saveWordData 互斥，避免旧快照回写覆盖（见 wordTablesLock）。
+        var toSave: Map<String, Map<String, Int>>? = null
         wordTablesLock.lock()
         try {
             wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
             val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
             if (next === wordBlacklist) return
             wordBlacklist = next
-            WordBlacklistStore.save(this, next)
+            toSave = next
         } finally {
             wordTablesLock.unlock()
+        }
+        // 落盘放到 IO：长按候选在主线程触发，持锁写外部存储会连带阻塞上屏计数
+        // 与 saveWordData（典型 ANR 面）。内存表已在锁内更新，写盘失败不影响本次生效。
+        toSave?.let { snapshot ->
+            serviceScope.launch(Dispatchers.IO) {
+                runCatching { WordBlacklistStore.save(this@XimeInputMethodService, snapshot) }
+                    .onFailure { FileLogger.e(TAG, "WordBlacklist save failed", it) }
+            }
         }
         FileLogger.i(TAG, "WordBlacklist: added '$word' code='$code'")
     }

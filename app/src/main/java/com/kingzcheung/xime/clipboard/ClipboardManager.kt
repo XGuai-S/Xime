@@ -130,6 +130,9 @@ class ClipboardManager private constructor(private val context: Context) {
     @Volatile
     private var selfWrittenText: String? = null
 
+    /** 单条文本剪贴板入库上限（字符）。超长内容（日志/JSON）不入库。 */
+    private val MAX_TEXT_CHARS = 100_000
+
     /**
      * 采集系统剪贴板。
      *
@@ -137,7 +140,7 @@ class ClipboardManager private constructor(private val context: Context) {
      * 且带 uri）改为读取字节落盘为图片条目——旧实现会把 `content://…` 当**文本**存进历史，
      * 属既存缺陷，本次一并修掉（读取失败/非支持类型直接跳过，不再退化成 URI 文本）。
      */
-    private fun readClipboard(retries: Int = 3) {
+    private fun readClipboard() {
         try {
             val clipData = androidClipboardManager.primaryClip
             if (clipData != null && clipData.itemCount > 0) {
@@ -192,13 +195,9 @@ class ClipboardManager private constructor(private val context: Context) {
                     return
                 }
             }
-            if (retries > 0) {
-                // 复用已持有的 mainHandler：原先每次重试都 new 一个 Handler，
-                // 剪贴板同步高频触发时会持续产生短命对象。
-                mainHandler.postDelayed({ readClipboard(retries - 1) }, 100L)
-            } else {
-                Log.w(TAG, "Failed to read clipboard after all retries")
-            }
+            // 不做兜底重试（用户约定）：延迟重试会与真实回调交错，把一次性
+            // selfWrittenText 标记提前吃掉，导致自写内容被重新入库。
+            Log.w(TAG, "Clipboard read returned no usable item")
         } catch (e: SecurityException) {
             Log.w(TAG, "Cannot read clipboard: missing permission", e)
         } catch (e: Exception) {
@@ -670,12 +669,21 @@ class ClipboardManager private constructor(private val context: Context) {
         isListeningToSystemClipboard = true
     }
 
+    /** 注销系统剪贴板监听（服务销毁时调用）。 */
     fun release() {
-        // Singleton — no cleanup needed.
+        if (!isListeningToSystemClipboard) return
+        runCatching { androidClipboardManager.removePrimaryClipChangedListener(clipboardListener) }
+        isListeningToSystemClipboard = false
     }
 
     fun addItem(text: String) {
         if (text.isBlank()) return
+        // 超大文本（几 MB 的 JSON/日志）会把整串写进 Room + StateFlow + 候选栏，
+        // 直接卡 UI 帧；超过上限不入库。
+        if (text.length > MAX_TEXT_CHARS) {
+            Log.w(TAG, "Clipboard text too large (${text.length} chars), skip")
+            return
+        }
         scope.launch {
             dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
             _clipboardChanged.emit(

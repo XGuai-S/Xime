@@ -53,11 +53,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         afterUpdate: (suspend () -> Unit)? = null,
     ) {
         val transformed = service.candidateTransform.transformFor(result)
-        // 会话日志：记录本键处理后的组合快照（输入串/候选/上屏增量），供离线重建纠错标签
-        com.kingzcheung.xime.correction.KeyTapLogger.recordComposition(
-            result.inputText, result.preeditText, result.committedText, result.isAsciiMode,
-            result.candidates.map { it.text to it.comment }
-        )
+        // 会话日志：记录本键处理后的组合快照（输入串/候选/上屏增量），供离线重建纠错标签。
+        // 先判开关再构造参数：原来的 map 闭包在 enabled=false 时也每键分配一次 List。
+        if (com.kingzcheung.xime.correction.KeyTapLogger.enabled) {
+            com.kingzcheung.xime.correction.KeyTapLogger.recordComposition(
+                result.inputText, result.preeditText, result.committedText, result.isAsciiMode,
+                result.candidates.map { it.text to it.comment }
+            )
+        }
 
         // 邻键误触纠错：把按键几何先验与当前组合编码对齐后送入 librime 插件
         // （候选生成/打分/出词/排序都在插件内完成，用同一份词典与用户词典）。
@@ -414,7 +417,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val editingInput = if (editingCaret >= 0) {
             service.rimeEngine.getCachedInputText().ifEmpty { service.rimeEngine.getInput() }
         } else ""
-        if (!isAsciiMode && candState.isComposing && !isShifted &&
+        // T9 键不经过本函数，不会清除 editingCaretPos；若残留（先全键盘编辑过再切 T9），
+        // 这里会把字母插进 T9 数字编码。判据显式排除 T9 方案。
+        val editingInT9 = isT9Schema(service.uiState.value.currentSchemaId)
+        if (!isAsciiMode && !editingInT9 && candState.isComposing && !isShifted &&
             editingCaret in 0..editingInput.length && editingInput.isNotEmpty()
         ) {
             val ch = key.lowercase()[0]
@@ -422,8 +428,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 editingInput.substring(editingCaret)
             service.editingCaretPos = editingCaret + 1
             service.editingCaretInput = newInput
-            service.rimeEngine.setInput(newInput)
-            sendTransformedResult(service.rimeEngine.getProcessResult(true)) {
+            // 单锁原子调用：两段式（setInput + tryLocked getProcessResult）在锁被抢占时
+            // 会拿到空结果，把整串编码和候选一起清空。
+            sendTransformedResult(service.rimeEngine.setInputAndGetResult(newInput)) {
                 if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
             }
             return MainKeyResult(needsUIUpdate, committedText, consumed = true)
@@ -446,8 +453,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         "ImeKeyRouter",
                         "avoidAutoSelect: input='$currentInput' + '$key' -> code='$nextCode' hasAutoWord=true, 改走 setInput"
                     )
-                    service.rimeEngine.setInput(nextCode)
-                    val result = service.rimeEngine.getProcessResult(true)
+                    val result = service.rimeEngine.setInputAndGetResult(nextCode)
                     sendTransformedResult(result) {
                         if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
                     }
@@ -790,12 +796,15 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             }
             "delete" -> {
                 if (hasComposing) {
-                    // 组合态：退格走 Rime，更新候选栏
-                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
-                    if (result.inputText.isEmpty()) {
-                        service.rimeEngine.clearComposition()
+                    // 组合态：退格走 Rime。必须入队：processKeyAndGetResult 是阻塞等锁，
+                    // 部署/会话重建期间在主线程直接调会卡住 UI（面板聚焦时即 ANR）。
+                    postRimeJob {
+                        val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                        if (result.inputText.isEmpty()) {
+                            service.rimeEngine.clearComposition()
+                        }
+                        sendTransformedResult(result)
                     }
-                    sendTransformedResult(result)
                 } else {
                     ToolPanelEditTextHolder.editText?.let { et ->
                         val start = et.selectionStart.coerceAtLeast(0)
@@ -829,11 +838,12 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     val isLetter = key.matches(LETTER_REGEX)
                     val isChineseMode = !service.uiState.value.isAsciiMode
                     if (isLetter && isChineseMode) {
-                        // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进面板输入框
+                        // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进面板输入框。
+                        // 入队处理，保持与普通按键同一串行通道（原实现直接在主线程阻塞等锁）。
                         val keyCode = key.lowercase()[0].code
-                        val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
-                        if (result.processed) {
-                            sendTransformedResult(result)
+                        postRimeJob {
+                            val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
+                            if (result.processed) sendTransformedResult(result)
                         }
                         return true
                     }
@@ -894,12 +904,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 val candState = service.candidateState.value
                 val isComposing = candState.isComposing || candState.inputText.isNotEmpty()
                 if (isComposing) {
-                    // Rime 有组合态 → 转发退格到 Rime 清空候选字母/联想词
-                    val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
-                    if (result.inputText.isEmpty()) {
-                        service.rimeEngine.clearComposition()
+                    // Rime 有组合态 → 转发退格到 Rime。同样入队，避免主线程阻塞等锁。
+                    postRimeJob {
+                        val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
+                        if (result.inputText.isEmpty()) {
+                            service.rimeEngine.clearComposition()
+                        }
+                        sendTransformedResult(result)
                     }
-                    sendTransformedResult(result)
                 } else {
                     // 无组合态 → 按焦点路由删除表单内（文本框/触发编码框）已上屏文字
                     service.deleteInQuickSendForm()

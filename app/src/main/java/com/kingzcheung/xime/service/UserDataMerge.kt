@@ -250,7 +250,13 @@ internal object UserDataMerge {
         }
         val merged = reconcileTable(baselineText, currentText, memory, parse)
         if (merged.isEmpty()) {
-            // 空表：删掉两份 dict.yaml 与历史 txt，不留空壳
+            // 外部手改过（内容变了）但解析不出条目：用户可能只是改坏了缩进/分割符。
+            // 这种情况必须保留文件原样，不能删除——否则磁盘与内存同时被清空。
+            if (externalChanged(baselineText, currentText)) {
+                onBaseline(currentText)
+                return merged
+            }
+            // 没被外部改过：删掉两份 dict.yaml 与历史 txt，不留空壳
             runCatching { mirrorDict.delete() }
             runCatching { privateDict.delete() }
             runCatching { legacyTxt.delete() }
@@ -262,20 +268,25 @@ internal object UserDataMerge {
         serializeBody(merged, sb)
         val text = sb.toString()
 
-        var ok = false
+        // 分开记录两个写入结果：读侧优先镜像，若镜像写失败而私有写成功，
+        // 下次 load 会读到镜像里的旧内容并被误判为「用户手改」，把旧值回灌进内存表。
+        var mirrorOk = false
         runCatching {
             mirrorDir.mkdirs()
             mirrorDict.writeText(text)
-            ok = true
+            mirrorOk = true
         }
         runCatching {
             privateRimeDir.mkdirs()
             privateDict.writeText(text)
-            ok = true
         }
-        if (ok) {
+        if (mirrorOk) {
             runCatching { legacyTxt.delete() }
             onBaseline(text)
+        } else {
+            // 镜像不可信：置基线为未知，下次保存不合并磁盘旧值（直接用内存表覆盖），
+            // 避免旧镜像内容被当成用户手改整体回灌。
+            onBaseline(null)
         }
         return merged
     }

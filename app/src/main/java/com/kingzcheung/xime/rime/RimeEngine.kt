@@ -322,25 +322,24 @@ class RimeEngine {
             waited += 100
         }
 
-        locked {
-            waited = 0L
-            while (waited < timeoutMs) {
-                if (!nativeHasSession()) {
-                    nativeCreateSession()
-                }
-                if (getAvailableSchemas().isNotEmpty()) {
-                    return true
-                }
-                try {
-                    Thread.sleep(100)
-                } catch (_: InterruptedException) {
-                    return false
-                }
-                waited += 100
+        // 锁内只做一次建会话；等待与重试放到锁外，避免部署慢时独占 rimeLock 长达
+        // timeoutMs（此前实测 180s）：那段时间所有按键排队、所有 tryLocked 查询返回空，
+        // 表现为键盘整段无响应、候选恒空白。
+        locked { if (!nativeHasSession()) nativeCreateSession() }
+        waited = 0L
+        while (waited < timeoutMs) {
+            if (getAvailableSchemas().isNotEmpty()) return true
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                return false
             }
-            FileLogger.w(TAG, "ensureSession: schemas not available after ${timeoutMs}ms, deployment may still be running")
-            return false
+            waited += 100
+            // 会话可能在部署过程中被销毁，短锁重建一次
+            locked { if (!nativeHasSession()) nativeCreateSession() }
         }
+        FileLogger.w(TAG, "ensureSession: schemas not available after ${timeoutMs}ms, deployment may still be running")
+        return false
     }
 
     fun isMaintaining(): Boolean {

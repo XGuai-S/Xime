@@ -172,8 +172,10 @@ object OtpCollector {
     val pending: StateFlow<List<OtpCandidate>> = _pending.asStateFlow()
 
     /** 由设置项驱动；关闭后不再收集（已收集的保留）。 */
+    // 初值与设置项默认值一致（默认关闭）。XimeApplication 冷启动会按 prefs 覆盖，
+    // 这里若写 true，任何新增采集入口都可能绕过授权。
     @Volatile
-    var enabled: Boolean = true
+    var enabled: Boolean = false
 
     /**
      * 记录一条验证码。
@@ -193,14 +195,14 @@ object OtpCollector {
             val fresh = cur.filter { now - it.capturedAt <= FRESH_WINDOW_MS }
             if (fresh.any { it.primary == candidate.primary }) return@synchronized false
             // 只保留**最新一条** + 未过期项：新码替换旧的，顺手清掉过期废码
-            _pending.value = listOf(candidate) + fresh
+            _pending.value = (listOf(candidate) + fresh).take(MAX_KEEP)
             true
         }
         if (!accepted) return false
         // 安全：**绝不**把验证码本身写进日志（日志文件可能被导出/分享）
         FileLogger.i(
             TAG,
-            "captured otp from=$source len=${candidate.primary.length}" +
+            "captured otp from=${source.substringBefore(':')} len=${candidate.primary.length}" +
                 if (candidate.secondary != null) " hasSecondary=true" else "",
         )
         return true
@@ -246,7 +248,13 @@ object OtpCollector {
      */
     fun takeFresh(windowMs: Long = FRESH_WINDOW_MS): String? {
         val now = System.currentTimeMillis()
-        return _pending.value.firstOrNull { now - it.capturedAt <= windowMs }?.primary
+        // 取用即移除：原来锁外读且不消费，每次焦点进入验证码框都会再填一次同一码。
+        return synchronized(pendingLock) {
+            val cur = _pending.value
+            val hit = cur.firstOrNull { now - it.capturedAt <= windowMs } ?: return@synchronized null
+            _pending.value = cur.filterNot { it === hit }
+            hit.primary
+        }
     }
 
     /** 用户已取用某个验证码（点选/上屏）后移除，避免候选栏一直挂着。 */

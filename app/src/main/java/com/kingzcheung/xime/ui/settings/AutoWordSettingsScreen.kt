@@ -104,8 +104,20 @@ fun AutoWordSettingsContent(onBack: () -> Unit) {
  * 把开关状态同步进 xime.yaml 的 `auto_word.enabled`：保留现有参数重写整个 auto_word 块。
  */
 private fun setAutoWordEnabled(context: android.content.Context, enabled: Boolean) {
+    // 只改 enabled 一行：不能整块覆写。auto_word 有 13 个键（含 sort_by_freq /
+    // no_freq_dicts / no_auto_word_dicts 等），整块模板化会把用户配置静默清空。
+    val text = com.kingzcheung.xime.settings.UserConfigDir.readText(
+        context, com.kingzcheung.xime.settings.UserConfigDir.UNIFIED_CONFIG_FILE
+    )
+    val block = if (text != null) patchAutoWordEnabledBlock(text, enabled) else null
+    if (block != null) {
+        if (!UnifiedConfigFile.updateTopLevelBlock(context, "auto_word", block)) return
+        KeysConfigHelper.loadConfig(context)
+        return
+    }
+    // xime.yaml 里还没有 auto_word 块：按默认值新建一份（现有参数取自代码默认）。
     val current = KeysConfigHelper.getAutoWordConfig()
-    val block = """
+    val fresh = """
         auto_word:
           # 自动造词：上屏词进临时词库，被选中上屏满 promote_count 次晋升固定词库；
           # 临时词库中超过 promote_days 天没被选中的词删除（文件与 xime.yaml 同级）。
@@ -116,6 +128,32 @@ private fun setAutoWordEnabled(context: android.content.Context, enabled: Boolea
           combo_min_chars: ${current.comboMinChars}
           combo_max_chars: ${current.comboMaxChars}
     """.trimIndent()
-    if (!UnifiedConfigFile.updateTopLevelBlock(context, "auto_word", block)) return
+    if (!UnifiedConfigFile.updateTopLevelBlock(context, "auto_word", fresh)) return
     KeysConfigHelper.loadConfig(context)
+}
+
+/** 从现有 xime.yaml 取出 auto_word 整块，仅替换/补写 enabled，其余键原样保留。 */
+private fun patchAutoWordEnabledBlock(text: String, enabled: Boolean): String? {
+    val lines = text.lines()
+    var start = -1
+    for (i in lines.indices) {
+        if (lines[i].trimEnd() == "auto_word:") { start = i; break }
+    }
+    if (start < 0) return null
+    var end = lines.size
+    for (i in start + 1 until lines.size) {
+        val line = lines[i]
+        if (line.isNotBlank() && !line.startsWith(" ") && !line.startsWith("\t")) { end = i; break }
+    }
+    val block = lines.subList(start, end).toMutableList()
+    var replaced = false
+    for (i in 1 until block.size) {
+        if (block[i].trimStart().startsWith("enabled:")) {
+            block[i] = "  enabled: $enabled"
+            replaced = true
+            break
+        }
+    }
+    if (!replaced) block.add(1, "  enabled: $enabled")
+    return block.joinToString("\n")
 }

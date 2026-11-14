@@ -195,14 +195,20 @@ internal object WordFreqStore {
         val legacyVisible = UserConfigDir.readText(context, FILE_NAME)
         val legacyStamp = UserConfigDir.stamp(context, FILE_NAME)
 
-        val dictText = when {
-            mirrorDict.isFile -> runCatching { mirrorDict.readText() }.getOrNull()
-            privateDict.isFile -> runCatching { privateDict.readText() }.getOrNull()
-            else -> null
+        // 读失败要回退到另一份（镜像不可读时私有副本往往还在），且记录实际命中的
+        // 文件：时间比较若固定拿 mirrorDict（不存在时 mtime=0）会把历史 txt 判成更新。
+        var dictSource: java.io.File? = null
+        var dictText: String? = null
+        for (candidate in listOf(mirrorDict, privateDict)) {
+            if (!candidate.isFile) continue
+            val t = runCatching { candidate.readText() }.getOrNull() ?: continue
+            dictSource = candidate
+            dictText = t
+            break
         }
         val text = if (dictText != null) {
-            if (legacyVisible != null && legacyStamp != null &&
-                legacyStamp.first > mirrorDict.lastModified() / 1000L
+            if (legacyVisible != null && legacyStamp != null && dictSource != null &&
+                legacyStamp.first > dictSource.lastModified() / 1000L
             ) legacyVisible else dictText
         } else {
             legacyVisible ?: return emptyMap()

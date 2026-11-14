@@ -575,10 +575,12 @@ internal object AutoWordStore {
         if (hits.isEmpty()) return Promotion(temp, fixed, emptyList())
         val best = pickPreferred(hits, preferCode)
         // 从临时库删掉该词的全部编码条目（它已晋升，多形态一并收口）
-        val nextTemp = LinkedHashMap<String, LinkedHashMap<String, Entry>>(temp.size)
+        // 未挂该词的编码层直接复用原 Map 引用：原来每层都深拷贝，
+        // 临时库几万条时每次上屏都要复制上万个 LinkedHashMap（主线程）。
+        val nextTemp = LinkedHashMap<String, Map<String, Entry>>(temp.size)
         for ((code, words) in temp) {
             if (!words.containsKey(word)) {
-                nextTemp[code] = LinkedHashMap(words)
+                nextTemp[code] = words
                 continue
             }
             val nw = LinkedHashMap(words)
@@ -586,17 +588,20 @@ internal object AutoWordStore {
             if (nw.isNotEmpty()) nextTemp[code] = nw
         }
         // 移入固定词库：清掉该词历史挂在别的编码下的同名条目（一词一码）
-        val nextFixed = LinkedHashMap<String, LinkedHashMap<String, Int>>(fixed.size)
+        val nextFixed = LinkedHashMap<String, Map<String, Int>>(fixed.size)
         for ((code, words) in fixed) {
             if (code == best.code || !words.containsKey(word)) {
-                nextFixed[code] = LinkedHashMap(words)
+                nextFixed[code] = words
                 continue
             }
             val nw = LinkedHashMap(words)
             nw.remove(word)
             if (nw.isNotEmpty()) nextFixed[code] = nw
         }
-        nextFixed.getOrPut(best.code) { LinkedHashMap() }[word] = promoteWeight(best.count)
+        // 值层现在是共享引用（Map 而非可变 LinkedHashMap），写入要换一层新 Map
+        val target = nextFixed[best.code]?.let { LinkedHashMap(it) } ?: LinkedHashMap<String, Int>()
+        target[word] = promoteWeight(best.count)
+        nextFixed[best.code] = target
         return Promotion(nextTemp, nextFixed, listOf(best))
     }
 

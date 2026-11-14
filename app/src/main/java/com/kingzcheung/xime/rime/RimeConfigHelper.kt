@@ -180,8 +180,6 @@ object RimeConfigHelper {
             //  2) 方案可能未把反查词典写进 dependencies（如 XGuai_flypy 用 Flypy_char
             //     反查但未声明依赖），librime 不编译它、不产出 reverse.bin。
             // 两种情况都只影响反查功能，不影响主输入；据此判定失败会误报「尚未部署」。
-            // 反查词典存在仍保留变量引用，避免未用变量告警。
-            reverseDict?.let { /* 反查功能可用性由运行时自检，不参与部署判定 */ }
         }
         return true
     }
@@ -292,8 +290,6 @@ object RimeConfigHelper {
             //  2) 方案可能未把反查词典写进 dependencies（如 XGuai_flypy 用 Flypy_char
             //     反查但未声明依赖），librime 不编译它、不产出 reverse.bin。
             // 两种情况都只影响反查功能，不影响主输入；据此判定失败会误报「尚未部署」。
-            // 反查词典存在仍保留变量引用，避免未用变量告警。
-            reverseDict?.let { /* 反查功能可用性由运行时自检，不参与部署判定 */ }
         }
 
         val currentHash = computeDeploymentHash(context)
@@ -388,6 +384,24 @@ object RimeConfigHelper {
         if (defaultCustomYaml.exists()) {
             digest.update("default.custom".toByteArray())
             fileUpdateDigest(digest, defaultCustomYaml)
+        }
+
+        // 其余顶层配置（symbols.yaml / punctuation.yaml / preset.yaml / key_bindings.yaml、
+        // essay.txt 等）与 lua/ 目录脚本也要计入：改了这些若 hash 不变，
+        // 会走「hash 一致 + 产物完整」捷径跳过部署，表现为「部署了但没生效」。
+        rimeDir.listFiles()
+            ?.filter { it.isFile && (it.name.endsWith(".yaml") || it.name.endsWith(".txt")) }
+            ?.filter { it.name != "default.yaml" && it.name != "default.custom.yaml" }
+            ?.filter { !it.name.endsWith(".dict.yaml") }
+            ?.sortedBy { it.name }
+            ?.forEach { cfg ->
+                digest.update(cfg.name.toByteArray())
+                fileUpdateDigest(digest, cfg)
+            }
+        val luaDir = File(rimeDir, "lua")
+        luaDir.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { f ->
+            digest.update(f.relativeTo(rimeDir).path.toByteArray())
+            fileUpdateDigest(digest, f)
         }
 
         return digest.digest().joinToString("") { String.format("%02x", it) }
