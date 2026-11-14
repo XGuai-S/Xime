@@ -1751,8 +1751,9 @@ private suspend fun AwaitPointerEventScope.awaitSwipeDirection(
                 if (direction != null) {
                     change.consume()
                     // 方向刚判定：立即跟手走一步，之后交给上面的按步长连续触发
-                    if (stepDrag && direction != "up" && direction != "down") {
-                        onHorizontalStep?.invoke(direction!!)
+                    val dir = direction
+                    if (stepDrag && dir != null && dir != "up" && dir != "down") {
+                        onHorizontalStep?.invoke(dir)
                     }
                 }
             }

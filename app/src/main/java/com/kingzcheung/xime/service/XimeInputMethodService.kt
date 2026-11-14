@@ -209,18 +209,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }.asCoroutineDispatcher()
     
     internal val keyJobs = Channel<Job>(Channel.UNLIMITED)
-    /**
-     * 在途按键计数（发送 +1 / job 完成 -1）。
-     *
-     * Channel<Job> 没有 size API，无法直接得知积压深度；用这个计数器近似
-     * 「key-process 尚未处理完的按键数」。>1 表示队列有积压，是快打卡顿的证据。
-     */
-    internal val keyJobsInFlight = java.util.concurrent.atomic.AtomicInteger(0)
-    /**
-     * keyJobs 积压埋点计数（非线程安全，仅用于「每 N 键记一次」的日志降频）。
-     * handleKeyPress 在主线程串行调用，无需同步。
-     */
-    internal var queueDepthLogCounter = 0
     internal val uiEventChannel = Channel<suspend () -> Unit>(Channel.CONFLATED)
 
     /**
@@ -490,7 +478,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal var floatingCardBounds: FloatingCardGeometry.CardBounds? = null
     /** 悬浮卡片实测高（dp）；0 = 尚未实测（拖动钳制此时用 FloatingCardGeometry 兜底） */
     internal var currentFloatingCardHeightDp: Int = 0
-    internal var previousSchemaId: String = ""
     
     internal val calculatorEngine = com.kingzcheung.xime.calculator.CalculatorEngine()
 
@@ -3451,8 +3438,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onFinishInput()
         inlineSuggestionManager?.clear()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-        // 会话结束：引擎 ascii 归位默认中文，英文态不跨会话残留
-        asciiModeController.restoreDefaultChoice()
+        // 会话结束：引擎 ascii 归位默认中文，英文态不跨会话残留。
+        // 必须入队：setOption 是阻塞等 rimeLock，部署/会话重建期间在主线程直接调会卡住 UI。
+        keyRouter.postRimeJob { asciiModeController.restoreDefaultChoice() }
         clearInputState()
         recentClipboardItemsState.value = emptyList()
     }
@@ -3489,7 +3477,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 切换应用时往往不触发 onFinishInput（只走 onWindowHidden），引擎的 ascii_mode
         // 会残留下来：切回中文界面后前几个按键被当成 ASCII 直通，出现「字谜/字母」上屏
         // （用户 2026-11-14 反馈）。这里在键盘收起时一并归位，与 onFinishInput 同口径。
-        asciiModeController.restoreDefaultChoice()
+        // 同样入队执行，避免 setOption 阻塞主线程。
+        keyRouter.postRimeJob { asciiModeController.restoreDefaultChoice() }
         // 收起键盘立即清空候选栏：不等 3 秒延迟清理，否则下次弹出的一瞬间
         // 仍会看到上一次的候选/编码残留。只清显示层与 native 组合态；
         // 面板、语音等重状态仍交给下面的延迟清理，宿主 restartInput 造成的

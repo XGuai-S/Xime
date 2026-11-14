@@ -55,11 +55,20 @@ class PluginLifecycleManager(
             try {
                 instance.onUnload()
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.w(TAG, "plugin onUnload failed: $pluginId", e)
             }
         }
 
-        loadedPlugins.remove(pluginId)
+        // 释放 JS 运行时（QuickJS 引擎 + 线程池）。原来只调 onUnload 就把实例从 map
+        // 摘掉，engine 从未 close → 每次插件热重载/禁用都泄漏一个引擎实例。
+        // close() 内部幂等，且会先跑 onUnload（此处已跑过，二次调用无副作用）。
+        loadedPlugins.remove(pluginId)?.script?.let { script ->
+            try {
+                script.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "plugin script close failed: $pluginId", e)
+            }
+        }
         pluginInstances.remove(pluginId)
     }
 

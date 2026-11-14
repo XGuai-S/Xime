@@ -374,11 +374,20 @@ fun EmojiKeyboardLayout(
                     )
                 }
             } else {
+                // 与上面的图片表情分支同构：chunked 每帧重算会产生大量临时列表，
+                // remember 后仅在数据/列数变化时重建；同时补稳定 key 提升复用率。
+                val emojiTextRows = remember(category.emojis, emojiColumns) {
+                    category.emojis.chunked(emojiColumns)
+                }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    items(category.emojis.chunked(emojiColumns)) { rowEmojis ->
+                    items(
+                        items = emojiTextRows,
+                        key = { row -> row.firstOrNull() ?: row.hashCode().toString() },
+                        contentType = { "emoji-text-row" },
+                    ) { rowEmojis ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(2.dp)

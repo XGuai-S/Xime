@@ -9,6 +9,7 @@ import com.kingzcheung.xime.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
@@ -20,7 +21,8 @@ object OnnxAssociationEngine {
     @Volatile
     private var isInitialized = false
     private var warmupStarted = false
-    private val warmupScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val warmupJob = SupervisorJob()
+    private val warmupScope = CoroutineScope(Dispatchers.Default + warmupJob)
     private var inferenceClient: InferenceClient? = null
 
     suspend fun initialize(context: Context): Boolean {
@@ -137,6 +139,10 @@ object OnnxAssociationEngine {
 
     fun release() {
         isInitialized = false
+        // warmupScope 的 SupervisorJob 是独立根，不随任何外部作用域取消；不主动 cancel
+        // 会让预热协程（含 InferenceClient 绑定）在释放后继续存活。
+        warmupJob.cancelChildren()
+        warmupStarted = false
         inferenceClient?.apply {
             runBlocking { runCatching { unloadModel(InferenceClient.MODEL_PREDICTION) } }
             unbind()

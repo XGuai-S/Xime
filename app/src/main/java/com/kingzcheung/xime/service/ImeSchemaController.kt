@@ -286,7 +286,6 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 service.startActivity(intent)
                 return
             }
-            service.previousSchemaId = service.rimeEngine.getCurrentSchema()
             SettingsPreferences.setCurrentSchema(service, schemaId)
             service.keyboardViewModel.switchMain(com.kingzcheung.xime.keyboard.MainType.HANDWRITING)
             // 手写模型按"用键盘时加载"管理：切到手写方案即展示手写键盘，

@@ -143,6 +143,10 @@ class VoiceRecognitionHandler(
     }
 
     fun release() {
+        // 两个延迟任务都挂在长生命的主线程 handler 上，且捕获了 Service；
+        // 不撤销会让已销毁的 Service 一直被持有，并可能在销毁后继续回调。
+        mainHandler.removeCallbacks(delayedPreStartRunnable)
+        mainHandler.removeCallbacks(finishTimeoutRunnable)
         if (::speechRecognitionManager.isInitialized) {
             speechRecognitionManager.release()
         }
