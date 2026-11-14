@@ -406,8 +406,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *  主线程写（onStartInput）、key-processing 线程读（英文联想短路），volatile 保证可见性。 */
     @Volatile
     private var editorRestricted: Boolean = false
-    /** 秘密输入框（密码/TYPE_NULL）：英文联想与回删替换的统一禁用线 */
+    /** 秘密输入框（密码/TYPE_NULL/NO_PERSONALIZED_LEARNING）：英文联想、回删替换、
+     *  按键日志、词频造词、验证码与剪贴板候选的统一禁用线。
+     *  主线程写（onStartInput）、key-processing 线程与 UI 组合同步读，必须 volatile。 */
+    @Volatile
     private var editorSecret: Boolean = false
+    /** 宿主声明"不要个性化学习"：不记词频/造词/按键日志，但联想与候选照常。 */
+    @Volatile
+    private var editorNoLearn: Boolean = false
 
     internal var isTrackingVoiceButtons = false
     internal var voiceRecordingStarted = false
@@ -1243,6 +1249,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 候选栏」（每复制一次、每进一个输入框都来一次）。
      */
     private fun canShowClipboardInCandidateBar(): Boolean {
+        // 密码框不显示剪贴板：从密码管理器复制来的密码会以明文挂在候选栏上
+        // （共享屏幕、投屏、肩窥可见），且点错会把旧密码提交进当前框。
+        if (isSecretEditor()) return false
         val cs = candidateState.value
         // 正在组字（有编码或组合态）／有联想候选 → 剪贴板不得抢占
         if (cs.isComposing) return false
@@ -2863,6 +2872,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         editorRestricted = EditorInfoClassifier.isRestrictedEditor(attribute)
         // 秘密输入框判定（密码/终端，不含 NO_SUGGESTIONS）：英文联想/回删替换的禁用线
         editorSecret = EditorInfoClassifier.isSecretEditor(attribute)
+        editorNoLearn = EditorInfoClassifier.shouldSkipLearning(attribute)
 
         // 输入 target 变化：旧编辑框的 composing 区域不再可达，复位标记。
         // 防御 stale 标记导致 endComposingInputBox 对新编辑框执行 setComposingText("")
@@ -3990,8 +4000,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 需在主线程调用。
      */
     internal fun commitTextSilently(text: String, isPaste: Boolean = false) {
-        // 会话日志：上屏文本（用于把按键序列与其最终结果对齐）
-        KeyTapLogger.recordCommit(text, isPaste)
+        // 会话日志：上屏文本（用于把按键序列与其最终结果对齐）。
+        // 密码框必须跳过——词频与插件事件都有 editorSecret 过滤，唯独这里漏了，
+        // 会把密码明文写进 files/logs/key_tap.jsonl（最长 256 字符/次）。
+        if (!editorSecret && !editorNoLearn) KeyTapLogger.recordCommit(text, isPaste)
         if (uiState.value.quickSendFormFocused) {
             // 焦点在触发编码输入框时路由到编码框，否则路由到快捷发送文本框
             val codeFocused = uiState.value.quickSendCodeFocused
@@ -4497,7 +4509,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     /** [recordWordFrequency] 的实际实现；调用方必须已持有 [wordTablesLock]。 */
     private fun recordWordFrequencyLocked(text: String, isPaste: Boolean) {
-        if (isPaste || editorSecret) return
+        if (isPaste || editorSecret || editorNoLearn) return
         // 词库尚未从磁盘装载完成（见 onCreate 的异步加载）：此时 wordFreqTable /
         // autoWordTemp / schemeCharCodes 都是空表占位，记录进去会被加载完成后的
         // 整体替换**静默覆盖**（词频丢计数、造词丢收录）。直接跳过，等下一轮上屏。

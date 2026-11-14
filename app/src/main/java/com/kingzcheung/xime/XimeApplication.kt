@@ -24,6 +24,7 @@ import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -52,7 +53,9 @@ class XimeApplication : Application(), ImageLoaderFactory {
         private const val TAG = "XimeApplication"
     }
     
-    private val applicationScope = CoroutineScope(Dispatchers.IO)
+    // 必须带 SupervisorJob：此 scope 承载引擎预初始化、配置预热、自动备份，
+    // 任一子协程未捕获异常会取消整个 scope，导致上述功能全部静默失效。
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     
     override fun onCreate() {
         super.onCreate()

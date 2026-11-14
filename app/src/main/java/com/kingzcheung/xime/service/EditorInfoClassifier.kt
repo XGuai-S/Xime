@@ -72,6 +72,19 @@ internal object EditorInfoClassifier {
     }
 
     /**
+     * 「不要学习」输入框：宿主用 IME_FLAG_NO_PERSONALIZED_LEARNING 声明
+     * （银行/支付的验证码框、银行卡框常用）。
+     *
+     * 与 [isSecretEditor] 的区别：这类框**允许**联想与候选展示，只是内容不得
+     * 进词频/造词/按键日志——否则会明文落盘到可见目录 /storage/emulated/0/rime/xime/。
+     * 不能并入 isSecretEditor：那会连带禁用英文联想与回删替换，属于过度限制。
+     */
+    fun shouldSkipLearning(info: EditorInfo?): Boolean {
+        if (info == null) return false
+        return info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0
+    }
+
+    /**
      * 纯数字类输入框（数字/电话/日期时间，且非密码）：适合自动弹出数字键盘。
      */
     fun isNumberEditor(info: EditorInfo?): Boolean {

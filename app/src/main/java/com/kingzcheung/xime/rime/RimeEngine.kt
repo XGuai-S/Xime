@@ -141,6 +141,7 @@ class RimeEngine {
          * 又不至于让快打排队」的折中。
          */
         private const val KEY_LOCK_RETRY_WAIT_MS = 100L
+        @Volatile
         private var instance: RimeEngine? = null
         private var deploymentCallback: ((Boolean, String) -> Unit)? = null
 
@@ -173,6 +174,10 @@ class RimeEngine {
         }
     }
 
+    // 写发生在 initLock 内、读发生在任意线程且不持锁（onStartInput / key 线程 /
+    // loadWordTablesOnce 轮询）。缺 @Volatile 会让主线程读到陈旧的 false，
+    // 表现为「引擎已就绪但 onStartInput 整段跳过」或词库加载协程空等 15s。
+    @Volatile
     private var isInitialized = false
     private val initLock = Any()
     @Volatile

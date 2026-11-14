@@ -83,7 +83,8 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 点击走 handleAssociationSelect → commitText，正是验证码上屏该做的事。
         // 放在本函数最末尾，确保不被前面的逻辑覆盖。
         // 不再排除 T9：T9 空闲时 inputText 同样为空，验证码应该照常进候选栏
-        if (inputText.isEmpty()) {
+        // 密码框不注入验证码：用户输支付密码时短信验证码挂到候选栏上，肩窥即泄露。
+        if (inputText.isEmpty() && !service.isSecretEditor()) {
             runCatching {
                 val otpList = com.kingzcheung.xime.service.otp.OtpCollector.displayList()
                 if (otpList.isNotEmpty()) {

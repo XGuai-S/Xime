@@ -73,14 +73,26 @@ class PredictionManager(
         _lastCommitChunk = ""
     }
     
+    /**
+     * 删掉最后一个**码点**（而非 UTF-16 码元）。
+     * emoji 与增补平面汉字占两个 char，直接 dropLast(1) 会留下孤立高位代理，
+     * 导致「重复上一次上屏」提交乱码、左滑整段回删的锚校验失效。
+     */
+    private fun dropLastCodePoint(s: String): String {
+        if (s.isEmpty()) return s
+        return if (s.length >= 2 &&
+            s[s.length - 2].isHighSurrogate() && s[s.length - 1].isLowSurrogate()
+        ) s.dropLast(2) else s.dropLast(1)
+    }
+
     fun deleteLastChar() {
         if (_lastCommittedText.isNotEmpty()) {
-            _lastCommittedText = _lastCommittedText.dropLast(1)
+            _lastCommittedText = dropLastCodePoint(_lastCommittedText)
         }
         // 用户删掉了刚才上屏的最后一个字：待重复的这笔内容也要同步缩短，
         // 否则换行键上滑会把用户已经删掉的字又打出来。
         if (_lastCommitChunk.isNotEmpty()) {
-            _lastCommitChunk = _lastCommitChunk.dropLast(1)
+            _lastCommitChunk = dropLastCodePoint(_lastCommitChunk)
         }
     }
     

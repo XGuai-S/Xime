@@ -103,11 +103,14 @@ internal class AsciiModeController(private val service: XimeInputMethodService) 
     internal fun applyStartDecision(attribute: EditorInfo?): Boolean {
         if (!RimeEngine.isInitialized()) return service.uiState.value.isAsciiMode
         val target = EditorInfoClassifier.isPasswordEditor(attribute)
-        if (service.rimeEngine.isAsciiMode() != target) {
+        // 不在主线程直接 setOption：它阻塞等 rimeLock，部署期（词库编译 30s+）
+        // 会让 onStartInput 卡死 → ANR。这里只算目标值，写入交给按键串行队列。
+        // onStartInput 另有一处 postRimeJob 做同样的写入，两者幂等。
+        service.keyRouter.postRimeJob {
             service.rimeEngine.setOption("ascii_mode", target)
             FileLogger.i(
                 XimeInputMethodService.TAG,
-                "applyStartDecision: ascii ${!target} -> $target (password=$target)"
+                "applyStartDecision: ascii -> $target (password=$target)"
             )
         }
         return target

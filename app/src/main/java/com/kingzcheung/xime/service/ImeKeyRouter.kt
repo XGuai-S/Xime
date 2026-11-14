@@ -191,6 +191,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val clipboardItemForSpace = if (key == "space") service.firstVisibleClipboardItem() else null
         service.markShowingClipboardConsumed()
         val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
+            // 与 postRimeJob 同款兜底：serviceScope 没有 CoroutineExceptionHandler，
+            // 主按键通道里任何 Rime/JNI 异常都会走进程默认处理器直接崩掉输入法。
+            try {
             val state = service.uiState.value
             val candState = service.candidateState.value
             var needsUIUpdate = false
@@ -227,6 +230,11 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             
             if (needsUIUpdate) {
                 refreshAfterKey(committedText)
+            }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                FileLogger.e("ImeKeyRouter", "key job failed", e)
             }
         }
         service.keyJobs.trySend(job)
