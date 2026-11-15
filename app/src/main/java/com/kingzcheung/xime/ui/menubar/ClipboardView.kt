@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.twotone.Image
 import androidx.compose.material.icons.twotone.Sync
@@ -111,6 +112,9 @@ fun ClipboardView(
     var isMultiSelect by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var showClearConfirm by remember { mutableStateOf(false) }
+    // 剪贴板搜索：纯 UI 层内存过滤（≤1000 条），不动 DAO——
+    // 多选/删除/拖拽/图片条目机制全部原样复用。图片条目 text 为空，搜索时自然不显示。
+    var searchQuery by remember { mutableStateOf("") }
 
     fun exitMultiSelect() {
         isMultiSelect = false
@@ -277,6 +281,77 @@ fun ClipboardView(
             }
         }
 
+        // 剪贴板 tab 的搜索框：与标题行同款视觉（iconButtonContainer 底），
+        // 多选模式下隐藏（避免与批量操作栏争空间）。
+        if (selectedTab == 0 && !isMultiSelect) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (isWide) 50.dp else 8.dp)
+                    .padding(bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(iconButtonContainer)
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "搜索剪贴板",
+                            tint = subTextColor,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = textColor,
+                                fontSize = 13.sp,
+                            ),
+                            modifier = Modifier.weight(1f),
+                            decorationBox = { inner ->
+                                if (searchQuery.isEmpty()) {
+                                    androidx.compose.foundation.layout.Box {
+                                        Text("搜索剪贴板内容", color = subTextColor, fontSize = 13.sp)
+                                        inner()
+                                    }
+                                } else inner()
+                            }
+                        )
+                        if (searchQuery.isNotEmpty()) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "清除搜索",
+                                tint = subTextColor,
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clickable { searchQuery = "" }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 搜索态下过滤：忽略大小写；图片条目 text 为空，自动排除（搜索只针对文本）。
+        val displayClipboardItems = if (searchQuery.isEmpty() || selectedTab != 0) {
+            clipboardItems
+        } else {
+            clipboardItems.filter { it.text.contains(searchQuery, ignoreCase = true) }
+        }
+
         val pagerState = rememberPagerState(
             initialPage = selectedTab,
             pageCount = { 2 }
@@ -303,7 +378,7 @@ fun ClipboardView(
         ) { page ->
             if (page == 0) {
                 ClipboardTabContent(
-                    items = clipboardItems,
+                    items = displayClipboardItems,
                     itemBgColor = itemBgColor,
                     textColor = textColor,
                     subTextColor = subTextColor,
