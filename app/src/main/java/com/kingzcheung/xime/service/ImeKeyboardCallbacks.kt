@@ -1,5 +1,7 @@
 package com.kingzcheung.xime.service
 
+import com.kingzcheung.xime.ai.data.AppSettingsExt.hasAnyProviderConfigured
+
 import android.view.KeyEvent
 import android.view.View
 import androidx.compose.runtime.Composable
@@ -103,6 +105,14 @@ internal fun rememberImeKeyboardCallbacks(
 onCommitImage = { imagePath -> handleCommitImage(service, imagePath) },
             onVoiceModeChange = { enabled -> handleVoiceModeChange(service, enabled) },
             onVoiceStickyToggle = { handleVoiceStickyToggle(service) },
+            // AI 工作台：确保 AI 模块就绪后打开面板（首次点击会初始化引擎，略慢）
+            onOpenAiWorkbench = { openAiWorkbench(service) },
+            // 面板渲染时惰性取控制器与状态流；未就绪返回 null（面板显示空态，不崩）
+            aiWorkbenchProvider = {
+                val c = service.aiVoiceController
+                val bridge = c?.let { service.aiStateFlow() }
+                if (c != null && bridge != null) c to bridge else null
+            },
             onPageDown = { service.keyRouter.pageDown() },
             onPageUp = { service.keyRouter.pageUp() },
             onGlobalCandidateSelect = { globalIndex ->
@@ -123,6 +133,29 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
             onToolPanelAction = { actionId -> service.dispatchToolPanelAction(actionId) },
             onToolPanelFieldInput = { key, value -> service.onToolPanelFieldInput(key, value) },
             onToolPanelFocusChange = { focused -> handleToolPanelFocusChange(service, focused) },
+            onClipboardSearchFocusChange = { focused ->
+                service.uiState.value = service.uiState.value.copy(clipboardSearchFocused = focused)
+                // 退出搜索态时清掉 Rime 组合：搜索框里打了一半的拼音属于搜索框，
+                // 标志一变 false，下一帧 syncInputBoxComposition 就会把残留编码写进宿主聊天框。
+                if (!focused) {
+                    service.mainHandler.post {
+                        service.rimeEngine.clearComposition()
+                        service.candidateState.value = service.candidateState.value.copy(
+                            inputText = "", preeditText = "",
+                            candidates = emptyList(), candidateComments = emptyList(),
+                            associationCandidates = emptyList(), pendingEnglishText = "",
+                            isComposing = false,
+                        )
+                    }
+                }
+                // 进入搜索态：宿主编辑器里可能还挂着未上屏的 composing（先打拼音再开剪贴板），
+                // 必须在这里清掉，否则它会被 finishComposingText 提交成正文残留在聊天框。
+                if (focused) {
+                    service.mainHandler.post {
+                        if (service.inputBoxComposingActiveForDelete) service.endComposingInputBox()
+                    }
+                }
+            },
             onKeyboardModeChange = { chineseMode -> handleKeyboardModeChange(service, chineseMode) },
             onDismissDeploying = { service.notifyDeploymentStatus(false, "") },
             onFloatingModeChange = { enabled -> service.schemaController.toggleFloatingMode(enabled, floatingMinY) },
@@ -154,6 +187,7 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
             onQuickSendCodeFocusChange = { focused: Boolean -> handleQuickSendCodeFocusChange(service, focused) },
         )
     }
+
 }
 
     /**
@@ -708,3 +742,34 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
             s.copy(quickSendCodeFocused = false)
         }
     }
+/**
+ * 打开 AI 工作台面板（移植自 TypeFree 的五大 AI 意图）。
+ *
+ * 行为：
+ * 1. 首次调用时懒初始化 AI 模块（AppRepository + AiPipelineEngine）；
+ * 2. 权限检查：语音相关意图需要 RECORD_AUDIO；
+ * 3. 若未配置任何服务商 Key，引导到 AI 设置页而不是直接报错。
+ *
+ * 面板本体在 ai/panels 下（VoiceMainPanel / HelpMeWritePanel / SpeakToEditPanel /
+ * RealtimeTranslatePanel / JevCopilotPanel / AskAiCardPanel），由 AiWorkbenchView 承载。
+ */
+internal fun openAiWorkbench(service: XimeInputMethodService) {
+    val controller = service.ensureAiVoiceController()
+    if (controller == null) {
+        android.widget.Toast.makeText(
+            service, "AI 模块初始化失败，请查看日志", android.widget.Toast.LENGTH_SHORT
+        ).show()
+        return
+    }
+    if (!com.kingzcheung.xime.ai.XimeAiApp.repository.settings.value.hasAnyProviderConfigured()) {
+        android.widget.Toast.makeText(
+            service, "请先在设置中配置 AI 服务商 API Key", android.widget.Toast.LENGTH_LONG
+        ).show()
+        com.kingzcheung.xime.util.FileLogger.i(
+            "ImeKeyboardCallbacks",
+            "AI workbench requested but no provider configured"
+        )
+        return
+    }
+    service.showAiWorkbenchPanel()
+}

@@ -55,6 +55,15 @@ data class KeyboardCallbacks(
     val onCommitImage: ((String) -> Unit)? = null,
     val onVoiceModeChange: ((Boolean) -> Unit)? = null,
     val onVoiceStickyToggle: (() -> Unit)? = null,
+    /** AI 工作台入口（移植自 TypeFree 的五大 AI 意图面板）。 */
+    val onOpenAiWorkbench: (() -> Unit)? = null,
+    /**
+     * 提供 AI 面板所需的两样东西（惰性求值）：
+     * 语音控制器 + UI 状态流。返回 null 表示 AI 模块未就绪，
+     * 此时面板显示"正在初始化"而不会崩。
+     */
+    val aiWorkbenchProvider: (() -> Pair<com.kingzcheung.xime.ai.ime.VoiceController,
+        kotlinx.coroutines.flow.StateFlow<com.kingzcheung.xime.ai.ime.ImeUiState>>?)? = null,
     val onPageDown: (() -> Unit)? = null,
     val onPageUp: (() -> Unit)? = null,
     val onCursorMove: ((Int) -> Unit)? = null,
@@ -85,6 +94,8 @@ data class KeyboardCallbacks(
      * 通用工具面板输入框焦点变化。
      */
     val onToolPanelFocusChange: ((Boolean) -> Unit)? = null,
+    /** 剪贴板搜索框焦点变化（与工具面板分开，避免副作用）。 */
+    val onClipboardSearchFocusChange: ((Boolean) -> Unit)? = null,
     val onKeyboardModeChange: ((Boolean) -> Unit)? = null,
     val onDismissDeploying: (() -> Unit)? = null,
     val onFloatingModeChange: ((Boolean) -> Unit)? = null,

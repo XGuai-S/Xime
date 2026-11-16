@@ -363,7 +363,7 @@ class SpeechRecognitionManager(private val context: Context) {
     }
 
     private fun createBackend(): AsrBackend? {
-        // 用户开启"本地识别"时才使用离线后端，否则走在线插件
+        // 用户开启"本地识别"时才使用离线后端，否则走在线插件（严格互斥，不自动切换）
         val useLocal = SettingsPreferences.isSttUseLocal(context)
         return if (useLocal) {
             AsrBackendFactory.create(context) ?: createOnlineAsrBackend()

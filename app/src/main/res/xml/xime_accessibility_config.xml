@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AI 语音胶囊的无障碍配置（移植自 TypeFree 的 accessibility_service_config.xml）。
+
+  用途：为「读屏截屏 AI 帮回」与悬浮胶囊提供窗口内容读取能力。
+  隐私约束（与 TypeFree 一致，由 XimeAccessibilityService 内部强制）：
+  - 仅在用户显式开启「AI 帮回」并手动点击 ✦ 军师时才抓取当前视口；
+  - 银行/支付/密码框界面硬编码熔断；
+  - 抓到的内容用完即焚，不落盘。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewFocused|typeViewClicked|typeViewTextSelectionChanged|typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows|flagInputMethodEditor"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/ai_accessibility_service_description"
+    android:notificationTimeout="30" />

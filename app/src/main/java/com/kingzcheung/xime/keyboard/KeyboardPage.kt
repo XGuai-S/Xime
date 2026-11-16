@@ -36,4 +36,6 @@ sealed interface OverlayRoute {
     data object Emoji : OverlayRoute
     data object Edit : OverlayRoute
     data object ToolPanel : OverlayRoute
+    /** AI 工作台（五大 AI 意图：口述净写 / 帮我写 / 语音编辑 / 实时快译 / Jev 军师）。 */
+    data object AiWorkbench : OverlayRoute
 }

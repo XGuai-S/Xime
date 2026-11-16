@@ -22,6 +22,10 @@ object SettingsRoutes {
     const val Plugins = "plugins"
     const val PluginSettings = "plugin_settings"
     const val SmartPrediction = "smart_prediction"
+    /** AI 服务商配置（语音/润色/翻译/军师 共用） */
+    const val Ai = "ai"
+    const val AiHistory = "ai_history"
+    const val AiStyle = "ai_style"
     const val Correction = "correction"
     const val AutoWord = "auto_word"
     const val SpeechToText = "speech_to_text"

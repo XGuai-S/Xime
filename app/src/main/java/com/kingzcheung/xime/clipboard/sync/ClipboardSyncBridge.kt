@@ -2,6 +2,7 @@ package com.kingzcheung.xime.clipboard.sync
 
 import android.util.Log
 import com.kingzcheung.xime.clipboard.ClipboardImageStore
+import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.clipboard.ClipboardItem
 import com.kingzcheung.xime.clipboard.ClipboardManager
 import com.kingzcheung.xime.plugin.core.api.ClipboardProfile
@@ -82,13 +83,23 @@ class ClipboardSyncBridge(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** 上次推送/写入的 hash（去重）。 */
+    // 文本与图片是两条独立通道：共用一个去重键会让两条通道的写入互相覆盖、
+    // 「刚推的图片」错误参与文本去重判断（反之亦然）——分通道各持一份，语义互不掺和。
+    /** 上次推送/写入的文本 hash（去重）。 */
     @Volatile
-    private var lastHash: String? = null
+    private var textLastHash: String? = null
 
-    /** 自写 hash：引擎写入本地剪贴板的内容 hash，用于回声抑制。 */
+    /** 上次推送/写入的图片 hash（去重）。 */
     @Volatile
-    private var selfWritten: String? = null
+    private var imageLastHash: String? = null
+
+    /** 自写文本 hash：引擎写入本地剪贴板的内容 hash，用于回声抑制。 */
+    @Volatile
+    private var textSelfWritten: String? = null
+
+    /** 自写图片 hash：回声抑制（图片通道）。 */
+    @Volatile
+    private var imageSelfWritten: String? = null
 
     @Volatile
     private var running = false
@@ -122,7 +133,7 @@ class ClipboardSyncBridge(
                 }
                 if (item.text.isBlank()) return@onEach
                 val hash = ClipboardProfile.sha256Hex(item.text.toByteArray(Charsets.UTF_8))
-                if (hash == selfWritten) {
+                if (hash == textSelfWritten) {
                     Log.d(TAG, "Echo suppressed (self-written)")
                     return@onEach
                 }
@@ -167,7 +178,7 @@ class ClipboardSyncBridge(
 
     private suspend fun pushLocal(text: String, hash: String) {
         if (!running) return
-        if (hash == lastHash) {
+        if (hash == textLastHash) {
             Log.d(TAG, "No change, skip push")
             return
         }
@@ -180,10 +191,11 @@ class ClipboardSyncBridge(
             plugin.push(profile)
         } catch (e: Exception) {
             Log.e(TAG, "push failed", e)
+            FileLogger.w(TAG, "剪贴板同步推送失败: ${e.message}", e)
             false
         }
         if (ok) {
-            lastHash = hash
+            textLastHash = hash
             retryUntil = 0L
         } else {
             retryUntil = System.currentTimeMillis() + PUSH_RETRY_BACKOFF_MS
@@ -228,7 +240,7 @@ class ClipboardSyncBridge(
             ClipboardImageStore.sniffExtension(bytes) ?: "png"
         }
         val profile = ClipboardProfile.fromImage(bytes, extension)
-        if (profile.hash == lastHash) {
+        if (profile.hash == imageLastHash) {
             Log.d(TAG, "No change, skip image push")
             return
         }
@@ -236,10 +248,11 @@ class ClipboardSyncBridge(
             plugin.push(profile)
         } catch (e: Exception) {
             Log.e(TAG, "push image failed", e)
+            FileLogger.w(TAG, "剪贴板图片同步推送失败: ${e.message}", e)
             false
         }
         if (ok) {
-            lastHash = profile.hash
+            imageLastHash = profile.hash
             retryUntil = 0L
             Log.d(TAG, "Image pushed (${bytes.size} bytes, ${profile.dataName})")
         } else {
@@ -252,6 +265,7 @@ class ClipboardSyncBridge(
             plugin.pull()
         } catch (e: Exception) {
             Log.e(TAG, "pull failed", e)
+            FileLogger.w(TAG, "剪贴板同步拉取失败: ${e.message}", e)
             null
         }
         if (remote == null) return
@@ -269,14 +283,14 @@ class ClipboardSyncBridge(
         }
 
         // 与本地当前内容相同 或 与自己写回的内容相同 → 跳过（避免循环）
-        if (remoteHash == currentHash || remoteHash == selfWritten) {
+        if (remoteHash == currentHash || remoteHash == textSelfWritten) {
             Log.d(TAG, "Remote unchanged vs local, skip write")
             return
         }
 
         Log.d(TAG, "Remote changed, writing to local clipboard")
-        lastHash = remoteHash
-        selfWritten = remoteHash
+        textLastHash = remoteHash
+        textSelfWritten = remoteHash
         clipboardManager.copyToSystemClipboard(remote.text)
     }
 
@@ -303,18 +317,19 @@ class ClipboardSyncBridge(
             Log.e(TAG, "Remote attachment hash mismatch, discard (declared=${remote.hash}, actual=$hash)")
             return
         }
-        if (hash == selfWritten || hash == lastHash) {
+        if (hash == imageSelfWritten || hash == imageLastHash) {
             Log.d(TAG, "Remote attachment unchanged vs local, skip")
             return
         }
         // 先登记去重状态再入库：入库会触发 clipboardChanged，订阅者可能先于后续语句看到它
-        lastHash = hash
-        selfWritten = hash
+        imageLastHash = hash
+        imageSelfWritten = hash
         val path = clipboardManager.importImageFromSync(data, remote.dataName)
         if (path == null) {
             // 落盘/入库失败：回滚去重状态，否则同内容下次会被误判为"已同步"
-            if (lastHash == hash) lastHash = null
-            if (selfWritten == hash) selfWritten = null
+            if (imageLastHash == hash) imageLastHash = null
+            if (imageSelfWritten == hash) imageSelfWritten = null
+            FileLogger.w(TAG, "剪贴板图片同步落盘失败，已回滚去重状态")
             Log.e(TAG, "Failed to import remote image, dedupe state rolled back")
             return
         }

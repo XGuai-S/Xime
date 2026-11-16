@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.twotone.Edit
+import androidx.compose.material.icons.twotone.AutoAwesome
 import androidx.compose.material.icons.twotone.Mic
 import androidx.compose.ui.graphics.vector.ImageVector
 
@@ -37,7 +38,13 @@ enum class ToolbarButton(
     END("end", "段尾", Icons.AutoMirrored.TwoTone.LastPage),
     HANDWRITING_LOOKUP("handwriting_lookup", "手写找字", Icons.Outlined.Gesture),
     EDIT("edit", "编辑", Icons.TwoTone.Edit),
-    VOICE("voice", "语音", Icons.TwoTone.Mic);
+    VOICE("voice", "语音", Icons.TwoTone.Mic),
+    /**
+     * AI 工作台入口（移植自 TypeFree 的五大 AI 意图）。
+     * 点开后面板顶部是五个意图标签：口述净写 / 帮我写 / 语音编辑 / 实时快译 / Jev 军师，
+     * 并含「问 AI」卡片。需要先在设置里配置至少一个服务商 Key。
+     */
+    AI("ai", "AI 工作台", Icons.TwoTone.AutoAwesome);
 
     companion object {
         val DEFAULT_VISIBLE = emptySet<ToolbarButton>()

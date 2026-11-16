@@ -98,6 +98,15 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             }
         }
 
+        // 搜索态下编码/候选属于剪贴板搜索框，写进宿主会串位（聊天框与搜索框同时出现
+        // 同一串字，用户 2026-11-15 真机反馈「两个都出现」）。
+        if (service.uiState.value.clipboardSearchFocused) {
+            // 「候选首词嵌入输入框」在剪贴板搜索态同样要生效：搜索框不是真实 EditText，
+            // 拿不到 composing 区，所以把首候选经 uiState 交给搜索框展示（见
+            // InputUIState.clipboardSearchEmbeddedCandidate）。
+            syncClipboardSearchCandidate(shown)
+            return
+        }
         if (!service.uiState.value.toolPanelInputFocused) {
             syncInputBoxComposition(codeInInputBox, shown.text, shown.candidates, shown.isComposing)
         }
@@ -165,9 +174,16 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         displayCandidates: List<String>,
         isComposing: Boolean,
     ) {
-        // 工具面板聚焦时，编码/候选属于面板输入框，写进宿主会串位。
-        // 守卫下沉到本函数，applyComposition 与 updateUIWithResult 两条入口共用。
-        if (service.uiState.value.toolPanelInputFocused) return
+        // 输入法内部编辑器聚焦（工具面板 / 剪贴板搜索框）时，编码与候选属于那个输入框，
+        // 写进宿主会串位。守卫下沉到本函数，applyComposition 与 updateUIWithResult 两条入口共用。
+        if (service.uiState.value.toolPanelInputFocused ||
+            service.uiState.value.clipboardSearchFocused
+        ) {
+            // 进入搜索态前可能已在宿主留下 composing 区（用户先打拼音再开剪贴板），
+            // 这里清一次，避免残留在正文里；无 composing 时由标记短路，不产生多余 IPC。
+            if (service.inputBoxComposingActiveForDelete) service.endComposingInputBox()
+            return
+        }
         // 删除窗口（退格保护窗）：保留窗口只为两件事——
         //   1. 窗口内不 early return（否则输入框什么都不写，宿主看到 composing 区 stale
         //      → 表现为"一下没了"）；
@@ -309,6 +325,30 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         /** T9 路径下参与显示决策的 rawPreedit（仅供 [applyComposition] 的诊断日志使用）。 */
         val t9RawPreedit: String? = null,
     )
+
+    /**
+     * 把「首候选嵌入」同步到剪贴板搜索框。
+     *
+     * 搜索框是纯 Compose 展示（不接真实输入法焦点），无法承载 composing 区，
+     * 所以「候选首词显示在输入框」这一功能在搜索态改为**在搜索框里显示首候选**：
+     * 与宿主输入框的同名功能语义一致（正文里预览将要上屏的词），但对搜索框是纯展示，
+     * 不写入任何内容，不影响 searchQuery 与实际过滤。
+     *
+     * 开关关闭时清空（搜索框只显示用户输入的关键词）。
+     */
+    private fun syncClipboardSearchCandidate(shown: DisplayState) {
+        val enabled = SettingsPreferences.showCandidateFirstInInputBox(service)
+        val candidate = if (enabled && shown.isComposing) {
+            service.candidateState.value.candidates.firstOrNull().orEmpty()
+        } else {
+            ""
+        }
+        if (service.uiState.value.clipboardSearchEmbeddedCandidate != candidate) {
+            service.uiState.value = service.uiState.value.copy(
+                clipboardSearchEmbeddedCandidate = candidate
+            )
+        }
+    }
 
     /** T9 插件候选并入后的结果：候选、注释，以及与候选平行的 actions。 */
     private class MergedT9Candidates(

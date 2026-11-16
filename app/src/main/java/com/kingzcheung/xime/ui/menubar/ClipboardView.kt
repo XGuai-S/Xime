@@ -1,5 +1,11 @@
 package com.kingzcheung.xime.ui.menubar
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,7 +25,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -44,6 +52,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,9 +62,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,6 +98,15 @@ fun ClipboardView(
     onSplitWords: (String, Long) -> Unit,
     onBack: (() -> Unit)? = null,
     onClipboardTabChange: ((Int) -> Unit)? = null,
+    /**
+     * 搜索框要内嵌显示的首候选（「候选首词显示在输入框」开启时空串以外的值）。
+     * 纯展示：不参与 searchQuery，也不影响过滤结果。
+     */
+    embeddedCandidate: String = "",
+    /** 搜索框聚焦时把键盘按键路由到搜索框（而不是宿主应用）。 */
+    onSearchFocusChange: ((Boolean) -> Unit)? = null,
+    /** 搜索态下在列表下方插入键盘（由调用方渲染真实 Rime 键盘）。 */
+    keyboardSlot: (@Composable () -> Unit)? = null,
     bottomPaddingDp: Int = 0,
     modifier: Modifier = Modifier,
     onQuickSendAddClick: (() -> Unit)? = null,
@@ -115,6 +138,74 @@ fun ClipboardView(
     // 剪贴板搜索：纯 UI 层内存过滤（≤1000 条），不动 DAO——
     // 多选/删除/拖拽/图片条目机制全部原样复用。图片条目 text 为空，搜索时自然不显示。
     var searchQuery by remember { mutableStateOf("") }
+    // 搜索模式：点搜索框后下方列表区换成自绘键盘（输入法自身窗口内系统不弹软键盘）
+    var searchKeyboardActive by remember { mutableStateOf(false) }
+    // 持有搜索框 EditText 引用：点整框时主动给它焦点并通知按键路由
+    var searchEditText by remember { mutableStateOf<android.widget.EditText?>(null) }
+
+    /** 进入搜索态：只翻标志位，注册交给下面的 LaunchedEffect。
+     *  旧实现靠点击回调里读 EditText 引用，离屏框尚未创建时点击等于没生效，
+     *  按键会直接落到宿主应用上（表现为“光标不在搜索框”）。 */
+    fun activateSearch() {
+        searchKeyboardActive = true
+        searchEditText?.let { et ->
+            com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText = et
+            onSearchFocusChange?.invoke(true)
+        }
+    }
+
+    /** 退出搜索态：必须复位按键路由标志，否则上屏会继续写进已废弃的搜索框。 */
+    fun exitSearch() {
+        searchKeyboardActive = false
+        onSearchFocusChange?.invoke(false)
+    }
+
+    /** 改搜索词的唯一出口：Compose 展示态与离屏 EditText 双向同步。
+     *  只改 state 会导致下一键在离屏框旧内容上追加，被清掉的字又回来。 */
+    fun setQuery(value: String) {
+        searchQuery = value
+        val et = searchEditText ?: return
+        if (et.text?.toString() != value) {
+            et.setText(value)
+            try {
+                et.setSelection(value.length)
+            } catch (e: Exception) {
+                // 离屏框不参与可见选中，设置失败不影响过滤
+            }
+        }
+    }
+
+    // 搜索态生效后绑定：此时离屏 EditText 一定已由 AndroidView 创建
+    LaunchedEffect(searchEditText, searchKeyboardActive) {
+        if (!searchKeyboardActive) return@LaunchedEffect
+        searchEditText?.let { et ->
+            com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText = et
+            com.kingzcheung.xime.util.FileLogger.d(
+                "ClipboardView",
+                "activateSearch: et.attached=${et.isAttachedToWindow} callback=${onSearchFocusChange != null}"
+            )
+            onSearchFocusChange?.invoke(true)
+        }
+    }
+
+    // 面板关闭（返回/选中条目/切键盘/换页）必然销毁本组件，这里兜底复位路由标志：
+    // 否则 clipboardSearchFocused 一直为 true，之后所有上屏都被吞进一个废弃的 EditText。
+    DisposableEffect(Unit) {
+        onDispose {
+            onSearchFocusChange?.invoke(false)
+            if (com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText === searchEditText) {
+                com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText = null
+            }
+        }
+    }
+
+    // 搜索框只在「剪贴板 tab + 非多选」显示，但搜索键盘与按键路由标志是独立的两份状态。
+    // 任一条件变化都要退出搜索态：否则按键会写进一个看不见的离屏框，宿主一个字都收不到。
+    LaunchedEffect(selectedTab, isMultiSelect) {
+        if ((selectedTab != 0 || isMultiSelect) && searchKeyboardActive) {
+            exitSearch()
+        }
+    }
 
     fun exitMultiSelect() {
         isMultiSelect = false
@@ -131,6 +222,31 @@ fun ClipboardView(
             .fillMaxSize()
             .background(backgroundColor)
     ) {
+        // 离屏按键接收器：尺寸 1x1、透明、不参与布局可见区域。
+        // 键盘按键经 ToolPanelEditTextHolder 写入这里，再同步到 searchQuery。
+        // 这样搜索框本身只需纯 Compose 展示，整行点击不会被 EditText 吞掉。
+        androidx.compose.ui.viewinterop.AndroidView(
+            modifier = Modifier.size(1.dp),
+            factory = { ctx ->
+                android.widget.EditText(ctx).apply {
+                    alpha = 0f
+                    importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    isClickable = false
+                    setSingleLine(true)
+                    searchEditText = this
+                    addTextChangedListener(object : android.text.TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                        override fun afterTextChanged(s: android.text.Editable?) {
+                            val t = s?.toString().orEmpty()
+                            if (t != searchQuery) searchQuery = t
+                        }
+                    })
+                }
+            }
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -288,7 +404,9 @@ fun ClipboardView(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = if (isWide) 50.dp else 8.dp)
-                    .padding(bottom = 6.dp),
+                    .padding(bottom = 6.dp)
+                    // 整行可点：点搜索框任意位置（图标/文字/空白）都唤起键盘
+                    .clickable { activateSearch() },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
@@ -297,6 +415,19 @@ fun ClipboardView(
                         .height(30.dp)
                         .clip(RoundedCornerShape(15.dp))
                         .background(iconButtonContainer)
+                        .then(
+                            // 搜索态给一圈描边：还没输入内容时也能看出焦点已经在搜索框
+                            if (searchKeyboardActive) {
+                                Modifier.border(
+                                    1.dp,
+                                    accentColor.copy(alpha = 0.75f),
+                                    RoundedCornerShape(15.dp)
+                                )
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .clickable { activateSearch() }
                         .padding(horizontal = 10.dp),
                     contentAlignment = Alignment.CenterStart
                 ) {
@@ -311,45 +442,122 @@ fun ClipboardView(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        androidx.compose.foundation.text.BasicTextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            singleLine = true,
-                            textStyle = androidx.compose.ui.text.TextStyle(
-                                color = textColor,
-                                fontSize = 13.sp,
-                            ),
-                            modifier = Modifier.weight(1f),
-                            decorationBox = { inner ->
-                                if (searchQuery.isEmpty()) {
-                                    androidx.compose.foundation.layout.Box {
-                                        Text("搜索剪贴板内容", color = subTextColor, fontSize = 13.sp)
-                                        inner()
-                                    }
-                                } else inner()
-                            }
+                        // 纯 Compose 展示（整行可点由外层 Row 处理）。
+                        // 键盘按键通过离屏 EditText 接收后同步到这里。
+                        // 光标：离屏 EditText 不参与布局，系统插入符不会画到这里，
+                        // 所以搜索态自绘一个闪烁插入符，否则看不出焦点已经进入搜索框。
+                        if (searchKeyboardActive && searchQuery.isEmpty()) {
+                            SearchCaret(color = textColor)
+                            Spacer(modifier = Modifier.width(3.dp))
+                        }
+                        Text(
+                            text = searchQuery.ifEmpty { "搜索剪贴板内容" },
+                            color = if (searchQuery.isEmpty()) subTextColor else textColor,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (searchQuery.isNotEmpty()) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "清除搜索",
-                                tint = subTextColor,
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .clickable { searchQuery = "" }
+                        // 候选首词嵌入（与宿主输入框同名功能一致）：搜索态下把将要上屏的词
+                        // 以浅色跟在关键词后面预览，纯展示、不写入搜索词。
+                        if (searchKeyboardActive && embeddedCandidate.isNotEmpty()) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = embeddedCandidate,
+                                color = accentColor.copy(alpha = 0.85f),
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                         }
+                        if (searchKeyboardActive && searchQuery.isNotEmpty()) {
+                            SearchCaret(color = textColor)
+                        }
+                        if (searchQuery.isNotEmpty()) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier.size(28.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "清除搜索",
+                                    tint = subTextColor,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clickable { setQuery("") }
+                                )
+                            }
+                        }
                     }
+                }
+
+                // 搜索按钮：未进入搜索态时点它等于点搜索框（唤起键盘）；
+                // 已在搜索态时点它收起键盘看结果——过滤是实时的，不需要额外「提交」。
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(
+                            if (searchQuery.isNotEmpty()) MaterialTheme.colorScheme.primary
+                            else iconButtonContainer
+                        )
+                        .clickable {
+                            if (searchKeyboardActive) exitSearch() else activateSearch()
+                        }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (searchKeyboardActive) "完成" else "搜索",
+                        color = if (searchQuery.isNotEmpty()) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            textColor
+                        },
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1
+                    )
                 }
             }
         }
 
-        // 搜索态下过滤：忽略大小写；图片条目 text 为空，自动排除（搜索只针对文本）。
-        val displayClipboardItems = if (searchQuery.isEmpty() || selectedTab != 0) {
-            clipboardItems
-        } else {
-            clipboardItems.filter { it.text.contains(searchQuery, ignoreCase = true) }
+        // 搜索态下过滤：空格分隔的多个关键词取「全部命中」(AND)，大小写不敏感。
+        // 图片条目 text 为空，自然被排除（搜索只针对文本）。
+        val searchTokens = remember(searchQuery) {
+            searchQuery.trim().split(WHITESPACE_REGEX).filter { it.isNotEmpty() }
+        }
+        val displayClipboardItems = remember(clipboardItems, searchTokens, selectedTab) {
+            if (searchTokens.isEmpty() || selectedTab != 0) {
+                clipboardItems
+            } else {
+                // 一遍扫描完成「过滤 + 计分」：旧比较器在每两两比较时都重新 minOf 全扫
+                // （O(n log n · tokens · |text|)），这里先把分数算好再排序（O(n·tokens + n log n)）。
+                // 小写副本只用来判命中与计分；卡片高亮仍用原串 regionMatches，下标不受
+                // 少数字符小写化变长（如 İ→i̇）影响。
+                val lowerTokens = searchTokens.map { it.lowercase() }
+                clipboardItems.mapNotNull { item ->
+                    val lower = item.text.lowercase()
+                    var firstHit = -1
+                    for (token in lowerTokens) {
+                        val idx = lower.indexOf(token)
+                        if (idx < 0) return@mapNotNull null
+                        if (firstHit < 0 || idx < firstHit) firstHit = idx
+                    }
+                    item to firstHit
+                }.sortedWith(compareBy({ it.second }, { it.first.text.length }))
+                    .map { it.first }
+            }
+        }
+
+        // 关键词变化后回到列表顶部：否则停在旧滚动位置时过滤结果更短，
+        // 会出现「明明有结果却是空白页」的错觉。
+        val gridState = rememberLazyGridState()
+        LaunchedEffect(searchTokens) {
+            if (searchTokens.isNotEmpty()) gridState.scrollToItem(0)
         }
 
         val pagerState = rememberPagerState(
@@ -370,6 +578,7 @@ fun ClipboardView(
             }
         }
 
+        run {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier
@@ -379,6 +588,9 @@ fun ClipboardView(
             if (page == 0) {
                 ClipboardTabContent(
                     items = displayClipboardItems,
+                    queryTokens = searchTokens,
+                    emptyHint = if (searchTokens.isNotEmpty()) "没有匹配的剪贴板内容" else "剪贴板为空",
+                    gridState = gridState,
                     itemBgColor = itemBgColor,
                     textColor = textColor,
                     subTextColor = subTextColor,
@@ -415,6 +627,40 @@ fun ClipboardView(
                     onLongPressItem = { item, isLeftColumn ->
                         menuAnchor = MenuAnchor(item, isLeftColumn, tab = 1)
                     }
+                )
+            }
+        }
+        }
+
+        // 搜索态：下方换成自绘键盘（键盘即为本输入法，系统不会为自身弹软键盘，
+        // 因此这里用自绘键盘接管输入）。
+        if (searchKeyboardActive && keyboardSlot != null) {
+            // 方案 B：下方渲染真实 Rime 键盘（双拼/词库/候选全在）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(250.dp)
+                    .padding(top = 4.dp)
+            ) {
+                keyboardSlot()
+            }
+        } else if (searchKeyboardActive) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                SearchKeyboard(
+                    onInput = { ch -> setQuery(searchQuery + ch) },
+                    onBackspace = {
+                        if (searchQuery.isNotEmpty()) setQuery(searchQuery.dropLast(1))
+                    },
+                    onClear = { setQuery("") },
+                    onSearch = { exitSearch() },
+                    keyBgColor = keyBgColor,
+                    textColor = keyTextColor,
+                    accentColor = keyTextColor
                 )
             }
         }
@@ -674,6 +920,11 @@ data class LongPressMenuEntry(
 @Composable
 fun ClipboardTabContent(
     items: List<ClipboardItem>,
+    /** 当前搜索关键词（已拆分）：卡片内高亮命中的片段。 */
+    queryTokens: List<String> = emptyList(),
+    /** 列表为空时的提示语：搜索无结果与真正为空要说不同的话。 */
+    emptyHint: String = "剪贴板为空",
+    gridState: LazyGridState = rememberLazyGridState(),
     itemBgColor: Color,
     textColor: Color,
     subTextColor: Color,
@@ -698,7 +949,7 @@ fun ClipboardTabContent(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "剪贴板为空",
+                text = emptyHint,
                 color = subTextColor,
                 fontSize = 13.sp
             )
@@ -706,6 +957,7 @@ fun ClipboardTabContent(
     } else {
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
+            state = gridState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 10.dp, vertical = 2.dp),
@@ -713,6 +965,8 @@ fun ClipboardTabContent(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
+                // 图片文件解析含磁盘 IO：条目重组很频繁，按条目 id 缓存一次即可。
+                val itemFile = remember(item.id) { imageFileOf?.invoke(item) }
                 val highlighted = isMultiSelect && item.id in selectedIds
                 val onClick: () -> Unit = {
                     if (isMultiSelect) {
@@ -731,6 +985,7 @@ fun ClipboardTabContent(
                 // 启动失败（文件缺失/URI 获取失败/系统拒绝）由手势回退长按菜单。
                 val onStartDrag: (() -> Boolean)? = if (isMultiSelect) null else {
                     {
+                        // 拖拽时文件可能刚落盘，重新解析一次拿最新状态
                         val ok = ClipboardDragSender.startDragAndDrop(view, item, imageFileOf?.invoke(item))
                         if (ok) onDragSendStarted?.invoke()
                         ok
@@ -744,7 +999,7 @@ fun ClipboardTabContent(
                         textColor = textColor,
                         subTextColor = subTextColor,
                         accentColor = accentColor,
-                        file = imageFileOf?.invoke(item),
+                        file = itemFile,
                         modifier = Modifier.height(62.dp),
                         onClick = onClick,
                         onLongClick = onLongClick,
@@ -755,6 +1010,7 @@ fun ClipboardTabContent(
                 } else {
                     GridItemCard(
                         text = item.text,
+                        queryTokens = queryTokens,
                         highlighted = highlighted,
                         bgColor = itemBgColor,
                         textColor = textColor,
@@ -864,6 +1120,8 @@ fun ClipboardImageCard(
 @Composable
 fun GridItemCard(
     text: String,
+    /** 搜索关键词：命中片段用强调色 + 半粗显示，一眼看出为什么匹配。 */
+    queryTokens: List<String> = emptyList(),
     highlighted: Boolean,
     bgColor: Color,
     textColor: Color,
@@ -901,14 +1159,114 @@ fun GridItemCard(
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalArrangement = Arrangement.Center
     ) {
+        // 始终走 AnnotatedString 重载：String / AnnotatedString 混在 if-else 里
+        // 会被推断成 Any，Text 没有匹配的重载（编译报 None of the candidates）。
+        // 缓存命中的标注串：列表滚动与重组很频繁，每次重新扫描并分配没有意义。
+        val annotated = remember(text, queryTokens, accentColor) {
+            highlightMatches(text, queryTokens, accentColor)
+        }
         Text(
-            text = text,
+            text = annotated,
             color = textColor,
             fontSize = 14.sp,
             lineHeight = 19.sp,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+    }
+}
+
+/**
+ * 搜索框的自绘插入符：独立组件，只在搜索态被组合——
+ * 面板打开但没进搜索态时完全不创建动画时钟，键盘窗口照常进入 idle 帧。
+ * alpha 在 graphicsLayer 里读 State：闪烁只重绘该层，不触发整棵子树重组。
+ */
+@Composable
+private fun SearchCaret(color: Color) {
+    val alpha = rememberInfiniteTransition(label = "searchCaret")
+        .animateFloat(
+            initialValue = 1f,
+            targetValue = 0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 520, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "searchCaretAlpha"
+        )
+    Box(
+        modifier = Modifier
+            .width(1.5.dp)
+            .height(15.dp)
+            .background(color)
+            .graphicsLayer { this.alpha = alpha.value }
+    )
+}
+
+/** 单张卡片最多标注的高亮段数（两行文本远用不到，纯防御性上界）。 */
+private const val MAX_HIGHLIGHT_RANGES = 64
+
+/** 空格分隔关键词：既支持多词，也容忍全角空格（NFKC 归一前先按空白切）。 */
+private val WHITESPACE_REGEX = Regex("[\\s\\u00A0\\u3000]+")
+
+/**
+ * 大小写不敏感的 [from] 起点查找，返回字符下标；未命中返回 -1。
+ *
+ * 不用 lowercase() 再 indexOf：某些字符小写化后长度会变（如 İ），
+ * 下标就对不上高亮区间了。regionMatches 逐个位置比较，下标始终对原始串。
+ */
+private fun indexOfIgnoreCase(text: String, token: String, from: Int): Int {
+    // token 为空时必须短路：调用方用 idx + token.length 推进起点，长度为 0 会原地打转。
+    if (token.isEmpty()) return -1
+    val last = text.length - token.length
+    if (last < 0) return -1
+    // 起点越界直接返回 -1。这里不能用 coerceIn(0, last) 钳进范围：
+    // 那会把「已搜索到末尾」的 from 拉回 last 再命中一次，形成无限追加
+    // （2026-11-16 真机 OOM：Arrays.copyOf 36MB，栈顶就是本函数）。
+    var i = if (from < 0) 0 else from
+    while (i <= last) {
+        if (text.regionMatches(i, token, 0, token.length, ignoreCase = true)) return i
+        i++
+    }
+    return -1
+}
+
+/**
+ * 把 [text] 中命中 [tokens] 的片段标成 [hitColor] + 半粗。
+ *
+ * 多个关键词命中同一段时先合并区间，否则会叠加多层 SpanStyle（加粗叠两次、
+ * 颜色互相覆盖），渲染结果是脏的。
+ */
+private fun highlightMatches(text: String, tokens: List<String>, hitColor: Color): AnnotatedString {
+    if (tokens.isEmpty()) return AnnotatedString(text)
+    val ranges = mutableListOf<IntRange>()
+    var budget = MAX_HIGHLIGHT_RANGES
+    outer@ for (token in tokens) {
+        var from = 0
+        while (true) {
+            val idx = indexOfIgnoreCase(text, token, from)
+            if (idx < 0) break
+            ranges += idx until (idx + token.length)
+            from = idx + token.length
+            // 硬上界：卡片只渲染两行，几十段高亮之后的都看不见；
+            // 更要紧的是防止任何查找逻辑退化时把主线程内存吃穿。
+            if (--budget <= 0) break@outer
+        }
+    }
+    if (ranges.isEmpty()) return AnnotatedString(text)
+    val merged = mutableListOf<IntRange>()
+    ranges.sortedBy { it.first }.forEach { r ->
+        val last = merged.lastOrNull()
+        if (last != null && r.first <= last.last + 1) {
+            merged[merged.size - 1] = last.first..maxOf(last.last, r.last)
+        } else {
+            merged += r
+        }
+    }
+    return buildAnnotatedString {
+        append(text)
+        merged.forEach { r ->
+            addStyle(SpanStyle(color = hitColor, fontWeight = FontWeight.SemiBold), r.first, r.last + 1)
+        }
     }
 }
 

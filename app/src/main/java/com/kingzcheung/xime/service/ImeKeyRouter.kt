@@ -116,6 +116,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 空键无任何按键语义，且下游 Rime 路由按 key[0] 取码（key.lowercase()[0]），
         // 空串会越界崩溃（2026-09-14 真机实证：滑动手势 commit 值为空时触发）。
         if (key.isEmpty()) return
+        // 任意按键先取消在途/待触发的 AI 句子补全
+        runCatching { service.cancelAiCompletion() }
         // 键盘任意按键点击 → 此前收到的验证码立即从候选栏撤下，且此后不再被注入
         // （用户 2026-11 规则）。快照必须早于标记与撤下：空格上屏验证码用的是
         // 「点击前」的待用列表与联想序列，否则第一次按空格就被自己的规则挡掉。
@@ -772,11 +774,25 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * @return true 表示按键已被消费，调用方应立即返回
      */
     private fun handleToolPanelKey(key: String, isShifted: Boolean): Boolean {
-        if (!service.uiState.value.toolPanelInputFocused) return false
+        if (!service.uiState.value.toolPanelInputFocused &&
+            !service.uiState.value.clipboardSearchFocused
+        ) return false
+        // 目标框已丢失（面板关闭 / 旋转 / 切悬浮清过 holder）时不消费按键，
+        // 让主流程把它交给宿主；否则文字会被吞掉且宿主毫无反应。
+        if (ToolPanelEditTextHolder.editText == null) return false
+        com.kingzcheung.xime.util.FileLogger.d(
+            "ImeKeyRouter",
+            "toolPanelKey: key=$key et=${com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText != null}"
+        )
         val candState = service.candidateState.value
         val hasComposing = candState.isComposing || candState.inputText.isNotEmpty()
         when (key) {
             "enter" -> {
+                if (service.uiState.value.clipboardSearchFocused) {
+                    // 搜索态：回车只结束一次输入，绝不能触发工具面板的 AI 生成
+                    // （该路径最终经 commitToolPanelItem 直接写宿主，等于替用户发消息）。
+                    return true
+                }
                 if (hasComposing) {
                     // 组合态：先把拼音提交进面板输入框，再触发生成
                     val input = candState.inputText
@@ -818,8 +834,13 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         val start = et.selectionStart.coerceAtLeast(0)
                         val end = et.selectionEnd.coerceAtLeast(start)
                         if (start == end && start > 0) {
-                            et.text?.delete(start - 1, start)
-                            try { et.setSelection(start - 1) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start-1) ignored: ${e.message}") }
+                            val cs = et.text
+                            // 代理对按字符回退：只删一个 code unit 会留下孤立低位代理（显示成方块）
+                            val from = if (start > 0 && cs != null && start <= cs.length &&
+                                Character.isLowSurrogate(cs[start - 1])
+                            ) (start - 2).coerceAtLeast(0) else start - 1
+                            cs?.delete(from, start)
+                            try { et.setSelection(from) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start-1) ignored: ${e.message}") }
                         } else if (end > start) {
                             et.text?.delete(start, end)
                             try { et.setSelection(start) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start) ignored: ${e.message}") }
@@ -1048,6 +1069,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 clearInputStateForKeys()
             }
             "clear_all" -> {
+                if (service.uiState.value.clipboardSearchFocused ||
+                    service.uiState.value.toolPanelInputFocused
+                ) return false
                 // 上滑清空 = 多次退格快捷方式（对标主流输入法）：输入态只清输入态，空闲态清空全部已上屏。
                 // 输入态判定见 hasInputState()——不能用 RIME getInput()，tryLocked 锁竞争时静默返回空。
                 if (hasInputState(candState)) {
@@ -1121,6 +1145,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 service.lastUndoAnchorText = null
             }
             "undo_clear" -> {
+                if (service.uiState.value.clipboardSearchFocused ||
+                    service.uiState.value.toolPanelInputFocused
+                ) return false
                 // 下滑撤回 = 撤销"上滑清空 / 删除"，仅空闲态有效（输入态恢复会插入错误位置），
                 // 判定与 clear_all 共用 hasInputState()。
                 if (!hasInputState(candState)) {
@@ -1258,6 +1285,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * @return true 表示确实删掉了内容
      */
     internal suspend fun handleDeleteLastCommitKey(): Boolean {
+        if (service.uiState.value.clipboardSearchFocused ||
+            service.uiState.value.toolPanelInputFocused
+        ) return false
         val chunk = service.predictionManager.lastCommitChunk
         if (chunk.isEmpty()) {
             FileLogger.d("ImeKeyRouter", "[SWIPE-DEL] no last commit chunk")
@@ -1307,6 +1337,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * @return true 表示确实恢复了内容
      */
     internal suspend fun handleRestoreLastCommitKey(): Boolean {
+        if (service.uiState.value.clipboardSearchFocused ||
+            service.uiState.value.toolPanelInputFocused
+        ) return false
         val chunk = service.swipeDeletedChunk
         val anchor = service.swipeDeletedAnchor
         if (chunk.isNullOrEmpty()) {

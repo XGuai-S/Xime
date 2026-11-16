@@ -4,4 +4,7 @@
     <string name="subtype_label_pinyin">拼音</string>
     <string name="keyboard_name">曦码输入法</string>
     <string name="ime_service_label">曦码输入法</string>
+    <!-- AI 语音胶囊的无障碍服务说明（隐私披露，必须如实描述用途） -->
+    <string name="ai_accessibility_label">曦码 AI 语音胶囊</string>
+    <string name="ai_accessibility_service_description">用于「AI 语音帮回」与悬浮语音胶囊：在微信、QQ 等聊天应用中读取当前屏幕可见的聊天内容，帮助你生成回复草稿。仅在手动点击时按需抓取，银行/支付/密码界面自动熔断，内容用完即焚、不写入任何历史或词库。</string>
 </resources>

@@ -619,6 +619,161 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     internal val keyRouter = ImeKeyRouter(this)
 
+    /**
+     * AI 语音链路（移植自 TypeFree 的 VoiceController + 五大意图面板）。
+     *
+     * 懒加载：只有用户第一次打开 AI 面板时才构造，避免给正常打字增加任何开销。
+     * 语音识别、AI 润色、读屏帮回、悬浮胶囊共用这一套引擎（XimeAiApp.aiEngine）。
+     */
+    private var aiBridge: com.kingzcheung.xime.ai.XimeAiHostBridge? = null
+    internal var aiVoiceController: com.kingzcheung.xime.ai.ime.VoiceController? = null
+        private set
+
+    /** AI 面板的 UI 状态流（来自 XimeAiHostBridge，与 VoiceController 共享）。 */
+    internal fun aiStateFlow(): kotlinx.coroutines.flow.StateFlow<com.kingzcheung.xime.ai.ime.ImeUiState>? =
+        runCatching { aiBridge?.stateFlow }.getOrNull()
+
+    /** 打开 AI 工作台面板（由工具栏 AI 按钮触发）。 */
+    internal fun showAiWorkbenchPanel() {
+        runCatching {
+            keyboardViewModel.showOverlay(
+                com.kingzcheung.xime.keyboard.OverlayRoute.AiWorkbench
+            )
+        }.onFailure { FileLogger.e(TAG, "showAiWorkbenchPanel failed", it) }
+    }
+
+    /** 取得（必要时创建）AI 语音控制器。 */
+    internal fun ensureAiVoiceController(): com.kingzcheung.xime.ai.ime.VoiceController? {
+        aiVoiceController?.let { return it }
+        if (!com.kingzcheung.xime.ai.XimeAiApp.isReady()) {
+            val ok = com.kingzcheung.xime.ai.XimeAiApp.init(application)
+            if (!ok) {
+                FileLogger.e(TAG, "AI module init failed, AI features unavailable")
+                return null
+            }
+        }
+        val bridge = aiBridge ?: com.kingzcheung.xime.ai.XimeAiHostBridge(
+            application,
+            object : com.kingzcheung.xime.ai.XimeAiHostBridge.HostBridge {
+                override fun inputConnection() = currentInputConnection
+
+                override fun currentEditorInfo() = currentInputEditorInfo
+
+                // 走既有上屏通道：Rime 组合态收尾、词频学习、插件事件都会正常触发
+                override fun commitText(text: String) = commitTextSilently(text)
+
+                override fun performFeedback(strong: Boolean) {
+                    // AI 上屏的轻反馈：复用按键振动通道，不依赖 View（面板场景无需气泡）
+                    runCatching { feedbackManager.performVibration() }
+                }
+
+                override fun toast(message: String) {
+                    mainHandler.post {
+                        android.widget.Toast.makeText(
+                            this@XimeInputMethodService, message, android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+                override fun isSensitiveEditor() = isSecretEditor()
+            }
+        ).also { aiBridge = it }
+
+        val controller = com.kingzcheung.xime.ai.ime.VoiceController(
+            host = bridge,
+            audioRecorderProvider = {
+                com.kingzcheung.xime.ai.audio.WavAudioRecorder(application)
+            },
+            // 语音/AI 结果上屏后，通知 Rime 重置组合态，避免与后续打字冲突
+            onExternalCommitToEngine = { text ->
+                keyRouter.postRimeJob {
+                    runCatching { rimeEngine.clearComposition() }
+                }
+            },
+            onResetComposing = {
+                runCatching { rimeEngine.clearComposition() }
+            },
+        )
+        aiVoiceController = controller
+        FileLogger.i(TAG, "AI voice controller initialized")
+        return controller
+    }
+
+    // ---- AI 句子补全（L3，默认关闭；开关为 aiCompletionEnabled）----
+    private var aiSentenceCompleter: com.kingzcheung.xime.ai.ime.predict.AiSentenceCompleter? = null
+    @Volatile private var lastAiCompletionAttemptAt = 0L
+
+    private fun ensureAiSentenceCompleter(): com.kingzcheung.xime.ai.ime.predict.AiSentenceCompleter? {
+        aiSentenceCompleter?.let { return it }
+        if (!com.kingzcheung.xime.ai.XimeAiApp.ensureInit(applicationContext)) return null
+        return runCatching {
+            com.kingzcheung.xime.ai.ime.predict.AiSentenceCompleter(
+                serviceScope,
+                com.kingzcheung.xime.ai.XimeAiApp.aiEngine
+            )
+        }.getOrNull().also { aiSentenceCompleter = it }
+    }
+
+    /** 取消在途/待触发的 AI 句子补全（任意按键时调用）。 */
+    internal fun cancelAiCompletion() {
+        runCatching { aiSentenceCompleter?.cancel() }
+    }
+
+    /**
+     * 一次文字上屏后尝试调度 AI 句子补全；结果注入候选栏联想位（点选即上屏）。
+     * 仅当 aiCompletionEnabled 且非无痕/密码/组合态时生效；默认关闭不影响日常打字。
+     */
+    internal fun scheduleAiCompletionIfEnabled() {
+        try {
+            if (editorSecret) return
+            if (!com.kingzcheung.xime.ai.XimeAiApp.ensureInit(applicationContext)) return
+            val repo = com.kingzcheung.xime.ai.XimeAiApp.repository
+            val st = repo.settings.value
+            if (!st.aiCompletionEnabled || st.manualIncognitoMode) return
+            // 冷却：每 3 秒最多一次补全请求，避免打字频繁提交把中转站打爆（429）
+            val nowMs = android.os.SystemClock.uptimeMillis()
+            if (nowMs - lastAiCompletionAttemptAt < 3000L) return
+            lastAiCompletionAttemptAt = nowMs
+            val completer = ensureAiSentenceCompleter() ?: return
+            val ic = currentInputConnection ?: return
+            val before = ic.getTextBeforeCursor(200, 0)?.toString()?.trimEnd().orEmpty()
+            FileLogger.d(TAG, "aiCompl schedule: beforeLen=${before.length} mode=${st.pipelineMode}")
+            if (before.isEmpty()) return
+            val info = currentInputEditorInfo
+            val appName = info?.packageName.orEmpty()
+            val style = runCatching { repo.resolveActiveStyle(appName, info?.inputType ?: 0).first }
+                .getOrElse { return }
+            completer.scheduleCompletion(
+                contextBeforeCursor = before,
+                settings = st,
+                activeStyle = style,
+                targetAppName = appName,
+                isIncognitoMode = false
+            ) { suggestion ->
+                FileLogger.d(TAG, "aiCompl result len=${suggestion.length}")
+                if (suggestion.isBlank()) return@scheduleCompletion
+                mainHandler.post {
+                    try {
+                        val c = candidateState.value
+                        if (c.isComposing || c.inputText.isNotEmpty()) return@post
+                        val now = currentInputConnection?.getTextBeforeCursor(200, 0)
+                            ?.toString()?.trimEnd().orEmpty()
+                        if (now == before) {
+                            updateCandidateState {
+                                it.copy(
+                                    associationCandidates = (listOf(suggestion) +
+                                        it.associationCandidates.filter { x -> x != suggestion }).take(6)
+                                )
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
     internal val sessionController = ImeSessionController(this)
 
     internal val schemaController = ImeSchemaController(this)
@@ -1713,9 +1868,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             toolPanelLoading = false,
             enterKeyText = "发送",
         )
-        ToolPanelEditTextHolder.editText = null
-        ToolPanelEditTextHolder.main = null
-        ToolPanelEditTextHolder.userEdited = false
+        // 剪贴板搜索态正用着这个 holder 时不能清：横屏旋转 / 切悬浮会走到这里，
+        // 清掉后搜索框彻底打不进字、上屏也会静默丢弃（ClipboardView 不会重跑绑定）。
+        if (!uiState.value.clipboardSearchFocused) {
+            ToolPanelEditTextHolder.editText = null
+            ToolPanelEditTextHolder.main = null
+            ToolPanelEditTextHolder.userEdited = false
+        }
         toolPanelLoadingJob?.cancel()
     }
 
@@ -2847,6 +3006,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        // 换了输入框：帮写的"原文基准"失效，避免拿上一个框的原文改写
+        runCatching { ensureAiVoiceController()?.resetHelpWriteBase() }
+        // 把当前宿主包名/输入类型同步给 AI 面板状态。
+        // 之前 targetPackage 从未被赋值（一直是空串），导致军师读屏时
+        // "目标包名"为空，窗口匹配退化成任意非本应用窗口，读到的是后台
+        // 应用（如 com.omarea.vtools）后被黑名单拦截，最终 msgs=0。
+        runCatching {
+            val pkg = attribute?.packageName?.orEmpty().orEmpty()
+            val inputType = attribute?.inputType ?: 0
+            runCatching { aiBridge?.stateFlow }?.getOrNull()?.let { flow ->
+                flow.value = flow.value.copy(
+                    targetPackage = pkg,
+                    targetAppName = runCatching {
+                        if (pkg.isBlank()) "" else
+                            com.kingzcheung.xime.ai.XimeAiApp.repository.resolveAppName(pkg)
+                    }.getOrDefault(""),
+                    currentInputType = inputType
+                )
+            }
+        }
+
         super.onStartInput(attribute, restarting)
         // QQ 撤回/发送消息时会把输入框重建一遍：系统给出的是 restarting=false 的"新会话"，
         // 但实际还是同一个编辑框（同样的包名/fieldId/inputType，且间隔很短）。
@@ -3144,6 +3324,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         candidatesEnd: Int,
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        // 剪贴板搜索态：拼音组合属于搜索框（Rime 引擎同一实例），宿主选区变化与它无关。
+        // 不拦会被误判为「用户移动光标」，把搜索框打了一半的编码清掉。
+        if (uiState.value.clipboardSearchFocused) return
         // 自身写入 InputConnection 会同步触发本回调，处理中直接忽略，避免递归
         if (!selectionUpdateGate.tryEnter()) return
         try {
@@ -3445,6 +3628,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     override fun onFinishInput() {
+        // 离开输入框：清掉 AI 面板里的宿主包名，避免下个应用沿用旧目标
+        runCatching {
+            runCatching { aiBridge?.stateFlow }?.getOrNull()?.let { flow ->
+                flow.value = flow.value.copy(targetPackage = "", targetAppName = "")
+            }
+        }
         super.onFinishInput()
         inlineSuggestionManager?.clear()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
@@ -4019,18 +4208,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
             return
         }
-        if (uiState.value.toolPanelInputFocused) {
+        if (uiState.value.toolPanelInputFocused || uiState.value.clipboardSearchFocused) {
+            // 延后写会把「上屏顺序」交给另一个队列，执行时必须重新确认目标还在；
+            // 否则面板关闭 / 悬浮切换后 holder 为 null，文字会静默消失（无日志、无回退）。
             mainHandler.post {
-                ToolPanelEditTextHolder.editText?.let { et ->
-                    val start = et.selectionStart.coerceAtLeast(0)
-                    val textLen = text.length
-                    et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), text)
-                    try { et.setSelection(start + textLen) } catch (e: Exception) { FileLogger.d(TAG, "et.setSelection(start + textLen) ignored: ${e.message}") }
+                val et = ToolPanelEditTextHolder.editText
+                if (et == null) {
+                    FileLogger.w(TAG, "internal commit target lost, fallback to host: len=" + text.length)
+                    currentInputConnection?.commitText(text, 1)
+                    return@post
                 }
+                val start = et.selectionStart.coerceAtLeast(0)
+                val textLen = text.length
+                et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), text)
+                try { et.setSelection(start + textLen) } catch (e: Exception) { FileLogger.d(TAG, "et.setSelection(start + textLen) ignored: ${e.message}") }
             }
             return
         }
         currentInputConnection?.commitText(text, 1)
+
+        // AI 句子补全：任意文字真正上屏后尝试调度下一句补全（默认关闭，未开启时立即返回）
+        runCatching { scheduleAiCompletionIfEnabled() }
 
         // 上屏词频统计：真实上屏后按当前编码计入统计表（自动造词与候选排序的数据源）
         recordWordFrequency(text, isPaste)
@@ -5176,7 +5374,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun deleteBeforeCursor(count: Int) {
         val quickSendFocused = uiState.value.quickSendFormFocused
-        if (quickSendFocused || uiState.value.toolPanelInputFocused) {
+        if (quickSendFocused || uiState.value.toolPanelInputFocused ||
+            uiState.value.clipboardSearchFocused
+        ) {
             val et = when {
                 quickSendFocused && uiState.value.quickSendCodeFocused ->
                     QuickSendFormCodeEditTextHolder.editText
@@ -5200,7 +5400,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun replaceBeforeCursor(expected: String, replacement: String): Boolean {
         val quickSendFocused = uiState.value.quickSendFormFocused
-        if (quickSendFocused || uiState.value.toolPanelInputFocused) {
+        if (quickSendFocused || uiState.value.toolPanelInputFocused ||
+            uiState.value.clipboardSearchFocused
+        ) {
             val et = when {
                 quickSendFocused && uiState.value.quickSendCodeFocused ->
                     QuickSendFormCodeEditTextHolder.editText

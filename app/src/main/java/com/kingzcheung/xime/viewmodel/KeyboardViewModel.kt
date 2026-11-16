@@ -129,6 +129,8 @@ data class KeyboardUiState(
     val toolPanelDisplay: String? get() = source.toolPanelDisplay
     val toolPanelUiNodes: List<com.kingzcheung.xime.plugin.core.config.UiNode>? get() = source.toolPanelUiNodes
     val clipboardSyncEnabled: Boolean get() = source.clipboardSyncEnabled
+    /** 剪贴板搜索框要内嵌显示的首候选（空串 = 不显示），见 InputUIState 同名字段说明。 */
+    val clipboardSearchEmbeddedCandidate: String get() = source.clipboardSearchEmbeddedCandidate
 }
 
 class KeyboardViewModel(application: Application) : AndroidViewModel(application) {
@@ -389,8 +391,24 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
     /** AsciiModeChanged 分支：resolveAsciiModeChanged 的迁移目标。正文自 dispatch 逐字搬出，仅整体缩进减 8 空格。 */
     private fun resolveAsciiModeChanged(action: KeyboardDispatchAction.AsciiModeChanged, current: KeyboardViewState): Triple<KeyboardViewState, KeyboardPage, KeyboardLayoutState> {
         return if (current is KeyboardViewState.Overlay) {
-            FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (overlay)")
-            Triple(current, _page.value, _keyboardState.value)
+            // Overlay 期间的中英切换必须生效：剪贴板搜索态在 Overlay 里渲染真实键盘
+            // （KeyboardLayoutScreen），若这里直接 return，键盘区读到的 keyboardState 仍是
+            // 旧值——用户上滑空格切英文完全没反应（真机 2026-11-16：「剪贴板搜索上滑空格
+            // 键盘没英文键盘」）。只替换 behind 并保留 Overlay 路由：面板不被踢掉，
+            // 退出后底层键盘也是切换后的新状态。
+            val kb = initialKeyboardLayoutState(action.isAsciiMode, action.schemaId)
+            // behind 统一走 kb.toViewState()：中文/英文/T9/笔画四种形态与布局状态一一对应，
+            // 退出 Overlay 后底层键盘立刻是切换后的形态，不需要再等一次事件纠正。
+            val nb = kb.toViewState(current.behind)
+            FileLogger.d(
+                "XimeKeyboard",
+                "AsciiModeChanged in overlay: ascii=${action.isAsciiMode}, behind=${current.behind} -> $nb / $kb"
+            )
+            Triple(
+                KeyboardViewState.Overlay(current.route, current.backStack, nb),
+                _page.value,
+                kb
+            )
         } else if (current is KeyboardViewState.NumberPanel || current is KeyboardViewState.CommonSymbolPanel) {
             FileLogger.d("XimeKeyboard", "AsciiModeChanged skipped: current=$current (panel)")
             Triple(current, _page.value, _keyboardState.value)

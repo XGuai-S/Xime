@@ -89,8 +89,8 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261223
-        versionName = "3.3.39"
+        versionCode = 20261307
+        versionName = "3.11.12"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -310,6 +310,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
     // okhttp-sse for SSE stream parsing (plugin streaming API)
     implementation("com.squareup.okhttp3:okhttp-sse:5.4.0")
+    // Gson：移植自 TypeFree 的 AI 引擎（AiPipelineEngine / JevResponseParser）使用，
+    // 与项目自有的 kotlinx-serialization 并存，两者职责不重叠（前者只服务 AI 模块）。
+    implementation("com.google.code.gson:gson:2.11.0")
+    // ML Kit 中文文字识别：移植自 TypeFree 的「读屏截屏 AI 帮回」，
+    // 用于把截图里的聊天内容转成文本（ViewportOcrExtractor）。
+    // 模型随 APK 打包（约 +20MB），保证离线可用、无需首次下载。
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     // Apache Commons Compress for tar.bz2 extraction
     implementation("org.apache.commons:commons-compress:1.28.0")
 

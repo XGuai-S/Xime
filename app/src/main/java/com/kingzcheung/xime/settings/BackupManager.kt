@@ -3,6 +3,7 @@ package com.kingzcheung.xime.settings
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
 import com.kingzcheung.xime.plugin.core.api.RemoteBackupEntry
@@ -87,7 +88,10 @@ object BackupManager {
         }
         // 流式打包到 cacheDir：包体不驻留内存（含方案词典与插件包时可达数十 MB）
         val (fileName, archive) = RimeExportManager.buildArchiveToFile(context)
-            .getOrElse { return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = it.message) }
+            .getOrElse {
+                FileLogger.w(TAG, "备份打包失败: ${it.message}", it)
+                return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = it.message)
+            }
         return@withLock try {
             Log.i(TAG, "Backup: name=$fileName size=${archive.length()}")
             val result = plugin.pushBackup(fileName, archive)
@@ -164,8 +168,10 @@ object BackupManager {
         val result = backupNow(context, plugin.second)
         if (!result.ok) {
             Log.w(TAG, "AutoBackup: 自动备份失败: ${result.message}")
+            FileLogger.w(TAG, "自动备份失败: ${result.message}")
         } else {
             Log.i(TAG, "AutoBackup: 自动备份完成")
+            FileLogger.i(TAG, "自动备份完成")
         }
         return true
     }
@@ -181,9 +187,18 @@ object BackupManager {
      */
     suspend fun restore(context: Context, plugin: BackupPlugin, id: String): Result<Unit> {
         val download = plugin.pullBackup(id)
-            ?: return Result.failure(Exception("下载备份包失败"))
+            ?: run {
+                FileLogger.w(TAG, "从远端下载备份包失败（id=$id）")
+                return Result.failure(Exception("下载备份包失败"))
+            }
         return try {
-            restoreFromArchive(context, download.file)
+            val outcome = restoreFromArchive(context, download.file)
+            if (outcome.isSuccess) {
+                FileLogger.i(TAG, "备份恢复完成：${outcome.getOrNull()}")
+            } else {
+                FileLogger.w(TAG, "备份恢复失败: ${outcome.exceptionOrNull()?.message}")
+            }
+            outcome
         } finally {
             // 恢复完释放落盘句柄（删除宿主缓存文件；幂等）
             plugin.releaseBackup(download.blobId)

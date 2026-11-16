@@ -42,6 +42,9 @@ fun SettingsScreen(
                 onNavigateToPlugins = { navController.navigate(SettingsRoutes.Plugins) },
                 onNavigateToModelLocal = { navController.navigate(SettingsRoutes.ModelLocal) },
                 onNavigateToSmartPrediction = { navController.navigate(SettingsRoutes.SmartPrediction) },
+                onNavigateToAi = { navController.navigate(SettingsRoutes.Ai) },
+                onNavigateToAiHistory = { navController.navigate(SettingsRoutes.AiHistory) },
+                onNavigateToAiStyle = { navController.navigate(SettingsRoutes.AiStyle) },
                 onNavigateToCorrection = { navController.navigate(SettingsRoutes.Correction) },
                 onNavigateToAutoWord = { navController.navigate(SettingsRoutes.AutoWord) },
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
@@ -184,7 +187,10 @@ fun SettingsScreen(
                 onBack = { navController.popBackStack() }
             )
         }
-        composable(SettingsRoutes.SmartPrediction) {
+                composable(SettingsRoutes.Ai) {
+            AiSettingsScreen(onBack = { navController.popBackStack() })
+        }
+composable(SettingsRoutes.SmartPrediction) {
             SmartPredictionSettingsContent(
                 onBack = { navController.popBackStack() },
                 onNavigateToModelManagement = { navController.navigate(SettingsRoutes.ModelLocal) },
@@ -334,6 +340,12 @@ fun SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenLogViewer = { navController.navigate(SettingsRoutes.LogViewer) },
             )
+        }
+        composable(SettingsRoutes.AiStyle) {
+            AiStyleScreen(onBack = { navController.popBackStack() })
+        }
+        composable(SettingsRoutes.AiHistory) {
+            AiHistoryScreen(onBack = { navController.popBackStack() })
         }
         composable(SettingsRoutes.HandwritingCapture) {
             HandwritingCaptureScreen(

@@ -2,6 +2,7 @@ package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.util.Log
+import com.kingzcheung.xime.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -43,17 +44,21 @@ object AutoBackup {
     fun start(scope: CoroutineScope, context: Context) {
         scope.launch {
             delay(INITIAL_DELAY_MS)
-            val interval = intervalMs(context) ?: run {
-                Log.i(TAG, "自动备份已关闭（backup.auto_interval_hours <= 0）")
-                return@launch
-            }
-            Log.i(TAG, "自动备份调度启动（周期 ${interval / 3600_000}h）")
             while (scope.isActive) {
+                // 每轮重新读取周期：用户改 backup.auto_interval_hours 或关闭自动备份后
+                // 立即生效，不再需要重启输入法进程（旧实现启动时读一次就固定了）。
+                val interval = intervalMs(context) ?: run {
+                    Log.i(TAG, "自动备份已关闭（backup.auto_interval_hours <= 0）")
+                    return@launch
+                }
                 try {
-                    BackupManager.maybeAutoBackup(context)
+                    val ran = BackupManager.maybeAutoBackup(context)
+                    if (ran) FileLogger.i(TAG, "自动备份检查已执行（周期 ${interval / 3600_000}h）")
                 } catch (t: Throwable) {
-                    // 备份异常不致命：记录后等下个周期再试
+                    // 备份异常不致命：记录后等下个周期再试；同时写入 xime 日志文件，
+                    // 否则用户只在 logcat 里能找到失败原因，App 内日志完全无痕。
                     Log.w(TAG, "自动备份检查异常", t)
+                    FileLogger.w(TAG, "自动备份检查异常: ${t.message}", t)
                 }
                 delay(interval)
             }

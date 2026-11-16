@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -493,6 +494,8 @@ fun KeyboardView(
                                     PermissionHelper.requestRecordAudioPermission(toolbarContext)
                                 }
                             })
+                            // AI 工作台：打开五大意图面板（口述净写/帮我写/语音编辑/实时快译/Jev 军师）
+                            ToolbarButton.AI -> ({ callbacks.onOpenAiWorkbench?.invoke() })
                         }
                         is ToolbarButtonItem.Plugin -> ({
                             if (item.action == "open_panel") {
@@ -1606,6 +1609,7 @@ fun KeyboardView(
                         clipboardItems = state.clipboardItems,
                         quickSendItems = state.quickSendItems,
                         selectedTab = p.route.tab,
+                        embeddedCandidate = state.clipboardSearchEmbeddedCandidate,
                         backgroundColor = keyboardBgColor,
                         keyTextColor = keyTextColor,
                         keyBgColor = keyBgColor,
@@ -1622,6 +1626,37 @@ fun KeyboardView(
                         onSplitWords = { text, _ -> viewModel.pushOverlay(OverlayRoute.SplitWords(text)) },
                         onBack = { viewModel.closeOverlay() },
                         onClipboardTabChange = { viewModel.pushOverlay(OverlayRoute.Clipboard(it)) },
+                        // 搜索框聚焦 → 键盘按键路由到搜索框。
+                        // 注意：不能用 onToolPanelFocusChange（那是工具面板的），
+                        // 否则会影响候选栏与输入框的组合同步，导致首选词短暂失效。
+                        onSearchFocusChange = { focused ->
+                            callbacks.onClipboardSearchFocusChange?.invoke(focused)
+                        },
+                        // 方案 B：搜索态下在剪贴板下方渲染真实键盘（同一个 KeyboardLayoutScreen）
+                        keyboardSlot = {
+                            KeyboardLayoutScreen(
+                                keyboardState = keyboardState,
+                                themeId = state.themeId,
+                                isDarkTheme = state.isDarkTheme,
+                                isAsciiMode = state.isAsciiMode,
+                                schemaName = state.schemaName,
+                                enterKeyText = state.enterKeyText,
+                                isSttEnabled = state.isSttEnabled,
+                                isVoiceMode = state.isVoiceMode,
+                                isVoiceSticky = state.voiceSticky,
+                                isFloatingMode = state.isFloatingMode,
+                                swipeCancelEpoch = state.swipeCancelEpoch,
+                                capitalAmountExitSignal = state.capitalAmountExitSignal,
+                                t9UiState = { state },
+                                candidateState = candidateState,
+                                viewModel = viewModel,
+                                callbacks = callbacks,
+                                onKeyPress = { key -> callbacks.onKeyPress(key, false) },
+                                modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                                isHandwritingLookup = false,
+                                onHandwritingCandidates = { }
+                            )
+                        },
                         bottomPaddingDp = state.keyboardBottomPaddingDp,
                         modifier = Modifier.fillMaxWidth().fillMaxHeight(),
                         onQuickSendAddClick = {
@@ -1738,6 +1773,33 @@ fun KeyboardView(
                         onItemClick = { item -> callbacks.onToolPanelItemClick?.invoke(item) },
                         modifier = Modifier.fillMaxWidth().fillMaxHeight()
                     )
+                    is OverlayRoute.AiWorkbench -> {
+                        val aiPair = callbacks.aiWorkbenchProvider?.invoke()
+                        if (aiPair != null) {
+                            com.kingzcheung.xime.ai.ui.AiWorkbenchView(
+                                controller = aiPair.first,
+                                uiStateFlow = aiPair.second,
+                                onClose = { onHapticFeedback?.invoke(); viewModel.closeOverlay() },
+                                backgroundColor = keyboardBgColor,
+                                textColor = keyTextColor,
+                                accentColor = accentColor,
+                                itemBgColor = keyBgColor,
+                                bottomPaddingDp = state.keyboardBottomPaddingDp,
+                            )
+                        } else {
+                            // AI 模块未就绪：给一个可关闭的空态，不崩
+                            androidx.compose.foundation.layout.Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                androidx.compose.material3.Text(
+                                    text = "AI 模块未就绪，请先在设置中配置服务商",
+                                    color = keyTextColor,
+                                    fontSize = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp)
+                                )
+                            }
+                        }
+                    }
                 }
                 else -> {}
             }

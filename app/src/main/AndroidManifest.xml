@@ -3,6 +3,12 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- AI 语音胶囊：悬浮窗 + 前台服务（麦克风） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- 悬浮胶囊常驻用的常驻通知（Android 13+ 需用户授权，拒绝时只影响通知可见性） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -116,6 +122,28 @@
             android:exported="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+    
+        <!-- AI 语音胶囊的无障碍服务：读屏上下文 + 截屏 OCR（移植自 TypeFree）。
+             默认关闭，需用户在系统设置里手动启用；服务内部对银行/支付/密码界面强制熔断。 -->
+        <service
+            android:name=".ai.bubble.XimeAccessibilityService"
+            android:label="@string/ai_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/xime_accessibility_config" />
+        </service>
+
+        <!-- AI 语音悬浮胶囊（前台服务，麦克风类型） -->
+        <service
+            android:name=".ai.bubble.XimeBubbleService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
     </application>
 

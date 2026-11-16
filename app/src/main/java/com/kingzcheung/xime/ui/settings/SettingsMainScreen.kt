@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.twotone.AutoAwesome
+import androidx.compose.material.icons.twotone.History
+import androidx.compose.material.icons.twotone.Bolt
 import androidx.compose.material.icons.twotone.AutoFixHigh
 import androidx.compose.material.icons.twotone.Backup
 import androidx.compose.material.icons.twotone.BugReport
@@ -76,6 +78,10 @@ fun SettingsMainContent(
     onNavigateToPlugins: () -> Unit,
     onNavigateToModelLocal: () -> Unit = {},
     onNavigateToSmartPrediction: () -> Unit,
+    /** AI 服务商配置（语音识别/文本润色/翻译/军师 共用）。 */
+    onNavigateToAi: () -> Unit,
+    onNavigateToAiHistory: () -> Unit = {},
+    onNavigateToAiStyle: () -> Unit = {},
     onNavigateToCorrection: () -> Unit = {},
     onNavigateToAutoWord: () -> Unit = {},
     onNavigateToSpeechToText: () -> Unit,
@@ -323,6 +329,42 @@ fun SettingsMainContent(
 
             item {
                 SettingsSection(title = "智能", content = {
+                    SettingsItem(
+                        icon = Icons.TwoTone.Bolt,
+                        title = "AI 服务商",
+                        subtitle = "配置语音识别与文本润色的 API Key，启用五大 AI 意图",
+                        onClick = onNavigateToAi,
+                        showArrow = true
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    SettingsItem(
+                        icon = Icons.TwoTone.Description,
+                        title = "文风",
+                        subtitle = "语音润色风格：自动按 App 匹配或固定一种",
+                        onClick = onNavigateToAiStyle,
+                        showArrow = true
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+                    SettingsItem(
+                        icon = Icons.TwoTone.History,
+                        title = "AI 历史记录",
+                        subtitle = "查看语音识别上屏记录、复制与清理",
+                        onClick = onNavigateToAiHistory,
+                        showArrow = true
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 56.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
                     SettingsItem(
                         icon = Icons.TwoTone.AutoAwesome,
                         title = "智能联想",
