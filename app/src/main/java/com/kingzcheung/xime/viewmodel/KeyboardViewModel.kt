@@ -129,8 +129,6 @@ data class KeyboardUiState(
     val toolPanelDisplay: String? get() = source.toolPanelDisplay
     val toolPanelUiNodes: List<com.kingzcheung.xime.plugin.core.config.UiNode>? get() = source.toolPanelUiNodes
     val clipboardSyncEnabled: Boolean get() = source.clipboardSyncEnabled
-    /** 剪贴板搜索框要内嵌显示的首候选（空串 = 不显示），见 InputUIState 同名字段说明。 */
-    val clipboardSearchEmbeddedCandidate: String get() = source.clipboardSearchEmbeddedCandidate
 }
 
 class KeyboardViewModel(application: Application) : AndroidViewModel(application) {

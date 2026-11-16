@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.kingzcheung.xime.clipboard.ClipboardDragSender
 import com.kingzcheung.xime.clipboard.ClipboardItem
+import com.kingzcheung.xime.service.CandidateState
 import com.kingzcheung.xime.clipboard.clipboardLongPressDrag
 import com.kingzcheung.xime.ui.CLIPBOARD_CARD_MAX_PX
 import com.kingzcheung.xime.ui.rememberClipboardImageRequest
@@ -99,10 +100,13 @@ fun ClipboardView(
     onBack: (() -> Unit)? = null,
     onClipboardTabChange: ((Int) -> Unit)? = null,
     /**
-     * 搜索框要内嵌显示的首候选（「候选首词显示在输入框」开启时空串以外的值）。
-     * 纯展示：不参与 searchQuery，也不影响过滤结果。
+     * 候选态：搜索框的「嵌入首选」直接从这里读首候选。
+     *
+     * 为什么传 State 而不是由服务层写入 uiState 中转：Compose 侧只有真正订阅了
+     * 变化源才会重组。经 uiState 走一圈时，KeyboardView 的 kbState 由 remember 缓存
+     * （按键时用同一实例跳过重组），新字段到不了 ClipboardView——实测「嵌入首选不生效」。
      */
-    embeddedCandidate: String = "",
+    embeddedCandidateState: androidx.compose.runtime.State<CandidateState>? = null,
     /** 搜索框聚焦时把键盘按键路由到搜索框（而不是宿主应用）。 */
     onSearchFocusChange: ((Boolean) -> Unit)? = null,
     /** 搜索态下在列表下方插入键盘（由调用方渲染真实 Rime 键盘）。 */
@@ -142,6 +146,25 @@ fun ClipboardView(
     var searchKeyboardActive by remember { mutableStateOf(false) }
     // 持有搜索框 EditText 引用：点整框时主动给它焦点并通知按键路由
     var searchEditText by remember { mutableStateOf<android.widget.EditText?>(null) }
+
+    // 「候选首词显示在输入框」在搜索态的等价展示：把将要上屏的词跟在关键词后面预览。
+    // 纯展示，不写入 searchQuery、不影响过滤。
+    //
+    // CompositionLocal / SharedPreferences 都必须无条件读取：把 LocalContext.current 放进
+    // if 分支会形成条件式 CompositionLocal 读取，重组时槽位数量变化会让 Compose 抛错
+    // 或错位复用。开关值本身用 remember 缓存，避免每次重组都走一遍 SharedPreferences。
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val candidateFirstEnabled = remember(context) {
+        com.kingzcheung.xime.settings.SettingsPreferences.showCandidateFirstInInputBox(context)
+    }
+    val embeddedCandidate: String = if (searchKeyboardActive && candidateFirstEnabled &&
+        embeddedCandidateState != null
+    ) {
+        val cand = embeddedCandidateState.value
+        if (cand.isComposing) cand.candidates.firstOrNull().orEmpty() else ""
+    } else {
+        ""
+    }
 
     /** 进入搜索态：只翻标志位，注册交给下面的 LaunchedEffect。
      *  旧实现靠点击回调里读 EditText 引用，离屏框尚未创建时点击等于没生效，

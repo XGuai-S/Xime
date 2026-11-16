@@ -79,14 +79,6 @@ data class InputUIState(
     /** 剪贴板搜索框聚焦：仅用于「按键转发到搜索框」与「暂停宿主输入框组合同步」，
      *  与 toolPanelInputFocused 分开，避免影响工具面板原有逻辑。 */
     val clipboardSearchFocused: Boolean = false,
-    /**
-     * 剪贴板搜索框当前应内嵌显示的「首候选」文本（空串 = 不显示）。
-     *
-     * 搜索框是纯 Compose 展示，承载不了 composing 区；「候选首词显示在输入框」开启时
-     * 由 [ImeSessionController.syncClipboardSearchCandidate] 写入这里，搜索框据此在关键词
-     * 后面跟着显示将要上屏的词，语义与宿主输入框的同名功能一致（纯展示，不改 searchQuery）。
-     */
-    val clipboardSearchEmbeddedCandidate: String = "",
     /** 当前打开面板的插件 id。 */
     val toolPanelPluginId: String = "",
     /** 面板标题（插件名）。 */

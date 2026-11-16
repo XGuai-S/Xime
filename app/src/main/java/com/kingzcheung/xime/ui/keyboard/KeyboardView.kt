@@ -1609,7 +1609,9 @@ fun KeyboardView(
                         clipboardItems = state.clipboardItems,
                         quickSendItems = state.quickSendItems,
                         selectedTab = p.route.tab,
-                        embeddedCandidate = state.clipboardSearchEmbeddedCandidate,
+                        // 直接传候选态：ClipboardView 只在搜索态读首项做「嵌入首选」预览。
+                        // 不走 uiState 中转——kbState 由 remember 缓存，按键时不会重建。
+                        embeddedCandidateState = candidateState,
                         backgroundColor = keyboardBgColor,
                         keyTextColor = keyTextColor,
                         keyBgColor = keyBgColor,
