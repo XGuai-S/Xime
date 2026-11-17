@@ -82,6 +82,14 @@ object SecureValueCipher : ValueCipher {
             )
             String(cipher.doFinal(cipherText), Charsets.UTF_8)
         } catch (e: Exception) {
+            // 解密失败最常见的原因不是 corruption，而是**换机/重装后密钥不匹配**：
+            // 密文随备份恢复过来了，但 AndroidKeyStore 里的主密钥跟设备绑定、不会随备份走。
+            // 旧实现静默返回 null，表现为「插件配置全部变空 + isConfigured()==false
+            // → 自动备份永久停摆」，而 UI 上完全不报错，用户无从判断。
+            com.kingzcheung.xime.util.FileLogger.w(
+                "SecureValueCipher",
+                "解密失败（可能是跨设备/重装恢复的密文，需重新填写该配置）: ${e.javaClass.simpleName}"
+            )
             null
         }
     }

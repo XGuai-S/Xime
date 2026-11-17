@@ -903,7 +903,27 @@ object SchemaManager {
         return BUILTIN_SCHEMAS
     }
 
+    /**
+     * 方案启用列表的读-改-写互斥。
+     *
+     * `setEnabledSchemas` / `toggleSchema` 是典型的 load→mutate→save，且会被
+     * 用户点击、部署、恢复备份三条路径并发触发。无锁时后写者覆盖前写者，
+     * 用户刚切换的方案会「自己变回去」。
+     */
+    private val schemaListLock = Any()
+
+    /**
+     * 写入启用方案列表（对外入口）。
+     *
+     * 加锁的原因：本函数是「读 default.custom.yaml → 替换 schema_list 块 → 写回」的
+     * 读-改-写，且会被用户点击、部署流程、恢复备份三条路径并发调用。无锁时后写者
+     * 覆盖前写者，用户刚切换的方案会「自己变回去」。
+     */
     fun setEnabledSchemas(context: Context, schemaIds: List<String>) {
+        synchronized(schemaListLock) { setEnabledSchemasLocked(context, schemaIds) }
+    }
+
+    private fun setEnabledSchemasLocked(context: Context, schemaIds: List<String>) {
         val customFile = getCustomYamlFile(context)
         if (!customFile.exists()) {
             // 首次写入以 app 固定模板为基底（含 menu/page_size 等默认 patch），
@@ -922,13 +942,37 @@ object SchemaManager {
             val text = customFile.readText()
             val updated = replaceSchemaListBlock(text, schemaIds)
             if (updated != text) {
-                customFile.writeText(updated)
+                // 原子写：避免截断窗口把用户的 menu/switcher/key_binder patch 弄丢
+                writeTextAtomically(customFile, updated)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write custom.yaml schema_list", e)
         }
         // F1: 同步写进 default.yaml，确保 librime 真正编译启用的方案
         applyEnabledSchemasToDefaultYaml(context, schemaIds)
+    }
+
+    /**
+     * 原子写文本文件：写 `.tmp` 后 rename 覆盖。
+     *
+     * `File.writeText` 是「截断 + 写」，写到一半被杀/断电就留下半截文件。
+     * 对 `default.custom.yaml` 这类承载用户自定义 patch 的文件，截断意味着
+     * menu / switcher / key_binder 全部配置丢失（下次读取解析失败会回退内置默认）。
+     */
+    private fun writeTextAtomically(target: File, text: String): Boolean {
+        return try {
+            target.parentFile?.mkdirs()
+            val tmp = File(target.parentFile, "${target.name}.tmp")
+            tmp.writeText(text)
+            if (!tmp.renameTo(target)) {
+                Log.e(TAG, "原子写失败（rename）：${target.name}")
+                tmp.delete()
+                false
+            } else true
+        } catch (e: Exception) {
+            Log.e(TAG, "原子写失败：${target.name}", e)
+            false
+        }
     }
 
     private fun writeSchemaListOnlyCustom(customFile: File, schemaIds: List<String>) {
@@ -938,7 +982,7 @@ object SchemaManager {
         for (id in schemaIds) {
             sb.appendLine("    - schema: $id")
         }
-        customFile.writeText(sb.toString())
+        writeTextAtomically(customFile, sb.toString())
     }
 
     /**

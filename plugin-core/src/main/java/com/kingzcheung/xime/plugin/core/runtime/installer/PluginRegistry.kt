@@ -42,7 +42,13 @@ class PluginRegistry(private val context: Application) {
 
     private val legacyRegistryFile: File by lazy { File(context.filesDir, LEGACY_REGISTRY_FILE) }
 
-    private val plugins = mutableMapOf<String, PluginInfo>()
+    /**
+     * 插件元数据。用并发容器而不是 mutableMapOf：
+     * `getAllPlugins()` 在 UI 线程返回 `values.toList()`，而安装/卸载/启停在 IO 线程
+     * 调用 [addPlugin] / [removePlugin] —— 普通 HashMap 并发读写会抛
+     * ConcurrentModificationException（插件列表页偶发崩溃）。
+     */
+    private val plugins = java.util.concurrent.ConcurrentHashMap<String, PluginInfo>()
 
     init {
         loadFromDisk()
@@ -64,19 +70,26 @@ class PluginRegistry(private val context: Application) {
         plugins.remove(id)
     }
 
+    /**
+     * 落盘注册表。
+     *
+     * **不要先 delete 目标再 rename**：旧实现在 rename 前显式删除 registryFile，一旦
+     * 删除成功而 rename 失败（跨文件系统、权限、磁盘满、进程被杀），注册表就彻底没了 ——
+     * 插件目录还在，但元数据空了，用户看到的是「插件全部消失」且只能重装。
+     * POSIX rename 本身就是原子替换（同目录内），直接 rename 覆盖即可，无需先删。
+     */
     fun flushToDisk() {
-        try {
-            // 原子写入：先写临时文件再 rename，避免崩溃损坏注册表（覆盖式 rename 在 Android 上可靠）
-            val tmp = File(registryFile.parentFile, "${registryFile.name}.tmp")
-            tmp.writeText(encodeRegistryJson(plugins.values))
-            if (registryFile.exists() && !registryFile.delete()) {
-                Log.w(TAG, "删除旧注册表失败，rename 将覆盖")
+        synchronized(this) {
+            try {
+                val tmp = File(registryFile.parentFile, "${registryFile.name}.tmp")
+                // 快照一次，避免遍历并发容器期间被别的线程改动
+                tmp.writeText(encodeRegistryJson(plugins.values.toList()))
+                if (!tmp.renameTo(registryFile)) {
+                    Log.e(TAG, "注册表写入失败：rename 失败（旧文件保持不变）")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "注册表写入失败", e)
             }
-            if (!tmp.renameTo(registryFile)) {
-                Log.e(TAG, "注册表写入失败：rename 失败")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "注册表写入失败", e)
         }
     }
 

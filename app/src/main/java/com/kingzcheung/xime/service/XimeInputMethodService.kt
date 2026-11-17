@@ -1223,28 +1223,41 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 因为 nativeCreateSession 后 schema 的 processor/translator 等
                 // 可能未完全初始化，switchSchema 会触发完整的初始化流程
                 Log.d(TAG, "initRimeEngine: Switching to saved schema: $savedSchema")
-                schemaController.applyPageSizeSetting(savedSchema)
-                rimeEngine.switchSchema(savedSchema)
+                // 切方案要拿 rimeLock（阻塞）。后台部署/维护最长持锁 180s，
+                // 此时在主线程同步等待 = 输入法窗口出不来 → ANR（超 5s）。
+                // 交给按键队列串行执行：队列本就在 key-processing 线程，阻塞安全。
+                keyRouter.postRimeJob {
+                    schemaController.applyPageSizeSetting(savedSchema)
+                    rimeEngine.switchSchema(savedSchema)
+                }
             }
             SchemaManager.isSchemaCompiled(this@XimeInputMethodService, savedSchema) -> {
                 Log.d(TAG, "initRimeEngine: Schema compiled but not in get_schema_list, switching anyway")
-                schemaController.applyPageSizeSetting(savedSchema)
-                rimeEngine.switchSchema(savedSchema)
+                keyRouter.postRimeJob {
+                    schemaController.applyPageSizeSetting(savedSchema)
+                    rimeEngine.switchSchema(savedSchema)
+                }
             }
             availableSchemas.isNotEmpty() -> {
                 // savedSchema 不可用且未编译，退而求其次用第一个可用方案
                 val fallbackSchema = availableSchemas.first()
                 Log.d(TAG, "initRimeEngine: savedSchema '$savedSchema' not available, falling back to '$fallbackSchema'")
-                schemaController.applyPageSizeSetting(fallbackSchema)
-                rimeEngine.switchSchema(fallbackSchema)
+                keyRouter.postRimeJob {
+                    schemaController.applyPageSizeSetting(fallbackSchema)
+                    rimeEngine.switchSchema(fallbackSchema)
+                }
                 SettingsPreferences.setCurrentSchema(this@XimeInputMethodService, fallbackSchema)
             }
         }
                     
         sessionController.updateSchemaName()
-        // onStartInput 在部署进行中会跳过 schema 切换与选项恢复，
-        // 部署完成后这里补齐 UI 状态，保证键盘可用
-        sessionController.restorePersistedSchemaOptions()
+        // 选项恢复必须**排在 switchSchema 之后**：它读 getCurrentSchema() 再按该方案的
+        // switches 逐个 setOption。若在主线程抢先执行，读到的是切换前的方案名，
+        // 恢复的就是上一个方案的开关状态。放进同一 postRimeJob 队列即可保序。
+        keyRouter.postRimeJob {
+            sessionController.restorePersistedSchemaOptions()
+            withContext(Dispatchers.Main) { updateUI() }
+        }
         updateUI()
         Log.d(TAG, "initRimeEngine: Rime engine initialized successfully")
     }

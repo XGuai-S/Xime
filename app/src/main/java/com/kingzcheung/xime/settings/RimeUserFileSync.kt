@@ -248,7 +248,21 @@ object RimeUserFileSync {
      * 2. **部署之前**（设置页「部署方案」）—— 把用户在可见目录里的修改写回 Rime 工作目录，
      *    否则用户改完点部署，部署读到的还是旧文件。
      */
-    fun sync(context: Context): SyncReport {
+    /**
+     * 双向同步的进程级互斥。
+     *
+     * [sync] 有四个调用入口（应用启动预初始化、releaseUserConfig、部署前、恢复备份后），
+     * 是一个「读基线 → 双向 copy → 重写基线」的长事务。并发执行会互相覆盖基线：
+     * 两路各读到旧基线、各自推进、后写的一方把前者的结果抹掉，表现为
+     * 「可见目录的修改被私有旧版本回推」或 `.app-backup` 重复/丢失。
+     */
+    private val syncLock = Any()
+
+    fun sync(context: Context): SyncReport = synchronized(syncLock) {
+        syncLocked(context)
+    }
+
+    private fun syncLocked(context: Context): SyncReport {
         if (!UserConfigDir.isSupported) return SyncReport(ok = false, unsupported = true)
         if (!UserConfigDir.hasWritePermission(context)) {
             return SyncReport(ok = false, permissionRequired = true)
