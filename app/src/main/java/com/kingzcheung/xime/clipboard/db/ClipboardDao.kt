@@ -11,15 +11,14 @@ import kotlinx.coroutines.flow.Flow
 interface ClipboardDao {
 
     /**
-     * 剪贴板列表：**置顶优先**，其余按时间倒序。
+     * 剪贴板列表：按时间倒序取出，面板顺序由
+     * [com.kingzcheung.xime.clipboard.ClipboardManager] 再做一次「最新一条置顶显示」的重排。
      *
-     * 排序放在 SQL 里而不是 UI 层：列表直接照抄这个顺序渲染，
-     * 各消费方（面板、候选栏、导出）拿到的顺序天然一致，不会各自排序漂移。
+     * 为什么排序不写在 SQL 里：面板要的规则是「刚复制的那一条永远第一，置顶卡片紧随其后」，
+     * SQL 表达不了「仅第一条特殊」。放在内存层做，既能保证并列时按 timestamp 稳定，
+     * 也不会让其他消费方（同步、导出）拿到被特化的顺序。
      */
-    @Query(
-        "SELECT * FROM clipboard_entries WHERE isQuickSend = 0 " +
-            "ORDER BY isPinned DESC, timestamp DESC"
-    )
+    @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 0 ORDER BY timestamp DESC")
     fun observeAll(): Flow<List<ClipboardEntry>>
 
     @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 1 ORDER BY timestamp DESC")

@@ -519,7 +519,7 @@ class ClipboardManager private constructor(private val context: Context) {
         migrateLegacyData()
         scope.launch {
             dao.observeAll().collect { entries ->
-                _clipboardItems.value = entries.map { it.toClipboardItem() }
+                _clipboardItems.value = orderForPanel(entries)
                 updateRecentItems()
             }
         }
@@ -573,6 +573,27 @@ class ClipboardManager private constructor(private val context: Context) {
                 Log.e(TAG, "Failed to migrate legacy clipboard items", e)
             }
         }
+    }
+
+    /**
+     * 面板展示顺序。
+     *
+     * 规则（用户 2026-11-17 明确要求）：
+     *   1. **最新复制的那一条永远第一** —— 复制完立刻打开面板就要看到它，这是最高频场景；
+     *   2. 其余条目里**置顶优先**，同组内按时间倒序；
+     *   3. 一旦又复制了新内容，上一条「临时第一」自动回到第 2 步的位置
+     *      （非置顶 ⇒ 落到置顶卡片之后），不需要任何额外状态。
+     *
+     * 入参来自 [ClipboardDao.observeAll]（已按 timestamp DESC），所以 [entries] 的第 0 项
+     * 就是最新一条，无需再比较时间。
+     */
+    private fun orderForPanel(entries: List<ClipboardEntry>): List<ClipboardItem> {
+        if (entries.size <= 1) return entries.map { it.toClipboardItem() }
+        val newest = entries.first()
+        val rest = entries.drop(1).sortedWith(
+            compareByDescending<ClipboardEntry> { it.isPinned }.thenByDescending { it.timestamp }
+        )
+        return (listOf(newest) + rest).map { it.toClipboardItem() }
     }
 
     private fun updateRecentItems() {
