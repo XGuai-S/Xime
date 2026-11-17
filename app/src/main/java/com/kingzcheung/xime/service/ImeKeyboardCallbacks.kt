@@ -138,7 +138,11 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
                 // 退出搜索态时清掉 Rime 组合：搜索框里打了一半的拼音属于搜索框，
                 // 标志一变 false，下一帧 syncInputBoxComposition 就会把残留编码写进宿主聊天框。
                 if (!focused) {
-                    service.mainHandler.post {
+                    // 必须与按键同队列（postRimeJob）清理：用 mainHandler.post 时，
+                    // 排队中的字母 job 可能在本清理之后才跑，把搜索框的拼音重新填回
+                    // candidateState，而此刻 clipboardSearchFocused 已是 false →
+                    // syncInputBoxComposition 不再早退，拼音会被写进宿主正文。
+                    service.keyRouter.postRimeJob {
                         service.rimeEngine.clearComposition()
                         service.candidateState.value = service.candidateState.value.copy(
                             inputText = "", preeditText = "",

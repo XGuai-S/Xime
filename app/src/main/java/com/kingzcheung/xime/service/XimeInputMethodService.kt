@@ -2849,6 +2849,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     override fun repeatLastInput() {
+        // 内部编辑框（工具面板 / 剪贴板搜索框）聚焦时，"重复上一次上屏"要落在那个框里，
+        // 不能直写宿主 —— 否则在搜索框上滑回车会把聊天内容重复发进聊天框。
+        val internalFocused = uiState.value.clipboardSearchFocused ||
+            uiState.value.toolPanelInputFocused
+        if (internalFocused) {
+            repeatLastInputToInternalTarget()
+            return
+        }
         // 有候选还没上屏时，先把第一个候选打上去，并立即**再重复上屏同一个词一次**
         // （用户语义：一次上滑 = 这个候选上屏两次）。
         //
@@ -2881,6 +2889,35 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (lastText.isNotEmpty()) {
             currentInputConnection?.commitText(lastText, 1)
         }
+    }
+
+    /**
+     * 「重复上一次上屏」的内部编辑框分支。
+     *
+     * 语义与 [repeatLastInput] 一致（一次上滑 = 同词上屏两次），但写入目标是
+     * 工具面板 / 剪贴板搜索框的 EditText：经 commitTextSilently 走统一重定向，
+     * 绝不触碰宿主的 InputConnection。
+     */
+    private fun repeatLastInputToInternalTarget() {
+        val candidateNow = candidateState.value
+        if (RepeatCommitPolicy.shouldCommitFirstCandidate(
+                isComposing = candidateNow.isComposing,
+                candidateCount = candidateNow.candidates.size,
+            )
+        ) {
+            keyRouter.selectCandidate(0)
+            keyRouter.postRimeJob {
+                withContext(Dispatchers.Main) {
+                    if (!candidateState.value.isComposing) {
+                        val repeated = predictionManager.lastCommitChunk
+                        if (repeated.isNotEmpty()) commitTextSilently(repeated)
+                    }
+                }
+            }
+            return
+        }
+        val lastText = predictionManager.lastCommitChunk
+        if (lastText.isNotEmpty()) commitTextSilently(lastText)
     }
 
     override fun dispatchKey(key: String) {
@@ -4212,10 +4249,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 延后写会把「上屏顺序」交给另一个队列，执行时必须重新确认目标还在；
             // 否则面板关闭 / 悬浮切换后 holder 为 null，文字会静默消失（无日志、无回退）。
             mainHandler.post {
+                // 延后执行期间搜索/面板态可能已被关掉：此时继续写离屏框会变成"幽灵搜索词"
+                // （TextWatcher 把内容回灌 searchQuery），而写宿主又违背用户当前上下文。
+                // 判定：目标标志已失效 → 丢弃并记日志（宁可少一个字，也不串到错的输入框）。
+                val stillInternal = uiState.value.toolPanelInputFocused ||
+                    uiState.value.clipboardSearchFocused
                 val et = ToolPanelEditTextHolder.editText
-                if (et == null) {
-                    FileLogger.w(TAG, "internal commit target lost, fallback to host: len=" + text.length)
-                    currentInputConnection?.commitText(text, 1)
+                if (!stillInternal || et == null) {
+                    FileLogger.w(
+                        TAG,
+                        "internal commit dropped (stillInternal=$stillInternal, et=${et != null}): len=" + text.length
+                    )
                     return@post
                 }
                 val start = et.selectionStart.coerceAtLeast(0)

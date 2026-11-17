@@ -589,7 +589,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         } else {
             service.rimeEngine.clearComposition()
         }
-        withContext(Dispatchers.Main) { service.sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER) }
+        // 内部编辑框（工具面板 / 剪贴板搜索框）聚焦时，换行只能落在那个框里，
+        // 绝不能发给宿主：搜索框下方按回车把聊天消息发出去是数据外泄级别的问题。
+        // 搜索框是单行搜索词，换行没有语义 —— 直接吞掉（组合态已在上方提交进框内）。
+        val internalFocused = service.uiState.value.clipboardSearchFocused ||
+            service.uiState.value.toolPanelInputFocused
+        if (!internalFocused) {
+            withContext(Dispatchers.Main) { service.sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER) }
+        }
         resetEnterLikeCandidates(schemaId)
         return needsUIUpdate
     }
@@ -788,7 +795,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val hasComposing = candState.isComposing || candState.inputText.isNotEmpty()
         when (key) {
             "enter" -> {
-                if (service.uiState.value.clipboardSearchFocused) {
+                if (service.uiState.value.clipboardSearchFocused ||
+                    service.uiState.value.toolPanelInputFocused
+                ) {
                     // 搜索态：回车只结束一次输入，绝不能触发工具面板的 AI 生成
                     // （该路径最终经 commitToolPanelItem 直接写宿主，等于替用户发消息）。
                     return true
@@ -893,6 +902,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         val start = et.selectionStart.coerceAtLeast(0)
                         et.text?.insert(start, char)
                         try { et.setSelection(start + char.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(start+len) ignored: ${e.message}") }
+                    } ?: run {
+                        // 目标框已丢失（面板关闭 / 旋转 / 切悬浮清过 holder）：
+                        // 不静默吞键，交给主流程按宿主语义上屏。
+                        return false
                     }
                     return true
                 }
@@ -1476,6 +1489,19 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
 
     /** 单次退格处理（service.keyProcessingDispatcher 上执行）。 */
     internal suspend fun processDeleteKey() {
+        // 内部编辑框（工具面板 / 剪贴板搜索框）聚焦时，退格只作用于那个框。
+        // 正常路径已由 handleToolPanelKey 消费；这里再兜一道：holder 丢失或判定失败时
+        // 若落到下方分支，sendDownUpKeyEvents(DEL) / deleteCommittedChar 删的是**宿主正文**，
+        // 用户在搜索框里退格却把聊天记录删掉了。
+        if (service.uiState.value.clipboardSearchFocused ||
+            service.uiState.value.toolPanelInputFocused ||
+            service.uiState.value.quickSendFormFocused
+        ) {
+            // deleteBeforeCursor 会操作 EditText，必须切到主线程（本函数在
+            // keyProcessingDispatcher 上执行，非 UI 线程）。
+            withContext(Dispatchers.Main) { service.deleteBeforeCursor(1) }
+            return
+        }
         // 快捷发送表单显示：退格按焦点路由到表单内 EditText（与单击退格同一路径），不进入 Rime
         val candState = service.candidateState.value
         // 退格改变输入上下文：使在途的联想预测结果失效，防止过期结果迟到回填
