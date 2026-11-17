@@ -20,6 +20,7 @@ import com.kingzcheung.xime.settings.RimeUserFileSync
 import com.kingzcheung.xime.ui.keyboard.AppFonts
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.settings.UnifiedConfigFile
+import com.kingzcheung.xime.settings.BackupManager
 import com.kingzcheung.xime.settings.UserConfigDir
 import com.kingzcheung.xime.ui.theme.KeyboardThemes
 import kotlinx.coroutines.CoroutineScope
@@ -140,6 +141,17 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 要么是纯注释模板，都不会改变本次启动已解析出的行为。
         // 内部顺序：先迁移旧目录 → 再生成统一配置 xime.yaml → 最后判定目录就绪状态。
         // 未授权时整体跳过；授权后由 MainActivity 在回到前台时立即重跑（无需重启应用）。
+        // 恢复事务自检：上一次「备份恢复」若在换入阶段被系统杀进程中断，
+        // files/rime 会停在半新半旧的状态（引擎加载失败、方案文件互相引用不上）。
+        // 这里用事务日志把它整体撤销回恢复前，避免用户每次启动都拿到一个坏掉的配置目录。
+        // 无事务日志时只做一次 exists() 判定，开销可忽略；仍在 IO 线程执行以免拖慢冷启动。
+        applicationScope.launch {
+            try {
+                BackupManager.recoverInterruptedRestore(this@XimeApplication)
+            } catch (t: Throwable) {
+                Log.w(TAG, "recover interrupted restore failed", t)
+            }
+        }
         applicationScope.launch {
             try {
                 UserConfigDir.releaseUserConfig(this@XimeApplication)

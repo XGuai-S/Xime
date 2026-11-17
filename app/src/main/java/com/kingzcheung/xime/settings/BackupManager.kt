@@ -68,6 +68,39 @@ object BackupManager {
     )
 
     /**
+     * 恢复事务暂存目录：解包只写这里，全部校验通过后才逐文件换入目标位置。
+     *
+     * 旧实现边解包边覆盖 `files/rime`、`files/plugins`、`.manifests` 与 prefs。进程在中间
+     * 被杀（输入法常驻进程被回收很常见）、包体后半段损坏、或某条目路径校验失败时，
+     * 落盘就是半新半旧的混合态——rime 里新旧方案文件互相引用，引擎加载失败，用户也没有回退手段。
+     */
+    private const val STAGING_DIR_NAME = ".restore-staging"
+
+    /** 换入阶段的原文件备份目录（提交成功即删；回滚不完整时保留供人工取回）。 */
+    private const val ROLLBACK_DIR_NAME = ".restore-rollback"
+
+    /**
+     * 恢复事务日志（追加写）：`M <rel>` = 原文件已移入备份目录，`W <rel>` = 新文件已换入。
+     * 进程在换入中途死亡时，下次启动凭它把整个事务反向撤销（见 [recoverInterruptedRestore]）。
+     */
+    private const val JOURNAL_FILE_NAME = ".restore-journal"
+
+    /** 方案清单目录 / 注册表文件名（SchemaManifestManager 的私有常量，这里需要按名字定位）。 */
+    private const val MANIFESTS_DIR_NAME = ".manifests"
+    private const val REGISTRY_FILE_NAME = ".registry.json"
+
+    /** 备份包 manifest 条目名（v2 起随包写入：格式版本 + 生成者版本）。 */
+    const val MANIFEST_ENTRY = "manifest.json"
+
+    /**
+     * 当前写入/支持的备份包格式版本。
+     *
+     * v1：无 manifest（历史包）；v2：带 manifest.json。恢复侧遇到**更高**版本直接拒绝，
+     * 避免新版包被旧版应用静默丢掉它不认识的字段（用户看到「恢复成功」但配置残缺）。
+     */
+    const val FORMAT_VERSION = 2
+
+    /**
      * 云备份到远端。返回 BackupResult（失败含原因）。
      *
      * 打包前先触发一次引擎 sync：librime 把各 userdb 导出成
@@ -427,17 +460,29 @@ object BackupManager {
         visibleConfigWriter: ((String) -> Boolean)? = null,
         userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
     ): Result<RestoreOutcome> {
+        // 两阶段恢复：阶段一全部解到 staging（可随时整目录丢弃），阶段二逐文件换入 + 事务日志。
+        // 换入按**文件**进行而不是整目录替换：备份包刻意排除 build/、*.userdb/、default.yaml、
+        // 其它设备的 sync/<id>/，整目录换入会把这些没进包的东西一并删掉。
+        val staging = File(filesDir, STAGING_DIR_NAME)
+        val rollback = File(filesDir, ROLLBACK_DIR_NAME)
+        val journal = File(filesDir, JOURNAL_FILE_NAME)
+        val plan = mutableListOf<String>()
         try {
-            val rimeDir = File(filesDir, "rime")
-            if (!rimeDir.exists()) rimeDir.mkdirs()
-            val pluginsDir = File(filesDir, "plugins")
-            val manifestsDir = SchemaManifestManager.getManifestsDir(filesDir)
+            discardTransaction(staging, rollback, journal)
+            staging.mkdirs()
+            val stagingRime = File(staging, "rime")
             var entryCount = 0
             var dictSnapshotCount = 0
+            var totalBytes = 0L
+            var formatVersion = 0
+            // prefs 与「可见目录」写入是不可回滚的副作用：先攒在内存，等文件全部换入后再提交，
+            // 避免出现「配置写进去了、文件没换上」的割裂态。
+            val pendingPrefs = mutableListOf<Pair<String, ByteArray>>()
+            val pendingUserConfig = mutableListOf<Pair<String, String>>()
+            val pendingUserData = mutableListOf<Pair<String, String>>()
             // 总量守卫：备份包是**外部输入**（用户从任意来源选的 zip / 远端下载的包），
             // 恶意或损坏的包可以是 zip 炸弹（单个高压缩比条目、或数万小条目）。
             // 无上限时 readBytes() 直接打爆常驻的输入法进程，或者把 /data 写满。
-            var totalBytes = 0L
             ZipInputStream(rawInput).use { zis ->
                 while (true) {
                     val entry = zis.nextEntry ?: break
@@ -452,15 +497,24 @@ object BackupManager {
                     if (name.startsWith(META_PREFIX)) {
                         val rel = name.removePrefix(META_PREFIX)
                         val data = zis.readBounded(MAX_META_ENTRY_BYTES)
+                        totalBytes += data.size
+                        if (totalBytes > MAX_TOTAL_BYTES) {
+                            return Result.failure(
+                                Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
+                            )
+                        }
                         when {
-                            rel == "settings.json" -> prefsRestorer(PREFS_NAME_SETTINGS, data)
+                            rel == MANIFEST_ENTRY -> formatVersion = parseFormatVersion(data)
+                            rel == "settings.json" -> pendingPrefs += PREFS_NAME_SETTINGS to data
                             rel.startsWith("plugin_configs/") && rel.endsWith(".json") -> {
                                 val pluginId = rel.removePrefix("plugin_configs/").removeSuffix(".json")
                                 if (isSafeId(pluginId)) {
-                                    prefsRestorer(PREFS_PREFIX_PLUGIN_CFG + pluginId, data)
+                                    pendingPrefs += PREFS_PREFIX_PLUGIN_CFG + pluginId to data
                                 }
                             }
-                            rel == "plugins.xml" -> writeChecked(File(filesDir, "plugins.xml"), filesDir, data)
+                            rel == "plugins.xml" -> {
+                                stageBytes(staging, "plugins.xml", data); plan += "plugins.xml"
+                            }
                             // v3 插件注册表（安装记录 + 启用状态）：与插件包同档（完整方案）
                             // H2：恢复备份不等于信任备份。
                             // 包内 plugins.json 带着 enabled=true 与安装记录，PluginLifecycleManager
@@ -468,37 +522,44 @@ object BackupManager {
                             // 就等于装了一堆会自启的 JS 插件；再叠加同包里的 plugin_net_auth_*，
                             // 攻击者域名还直接处于「用户已授权」状态，完全绕过插件中心与网络授权 UI。
                             // 这里强制把每个插件置为未启用，由用户恢复后自行确认开启。
-                            rel == "plugins.json" -> writeChecked(
-                                File(filesDir, "plugins.json"),
-                                filesDir,
-                                disableAllPluginsInRegistry(data)
-                            )
+                            rel == PLUGINS_REGISTRY_ENTRY -> {
+                                stageBytes(
+                                    staging, PLUGINS_REGISTRY_ENTRY,
+                                    disableAllPluginsInRegistry(data)
+                                )
+                                plan += PLUGINS_REGISTRY_ENTRY
+                            }
                             // 方案清单（文件所有权/校验）：完整方案档随方案本体一起恢复
-                            rel == SCHEME_REGISTRY_ENTRY -> writeChecked(
-                                SchemaManifestManager.getRegistryFile(filesDir), filesDir, data
-                            )
+                            rel == SCHEME_REGISTRY_ENTRY -> {
+                                stageBytes(staging, REGISTRY_FILE_NAME, data)
+                                plan += REGISTRY_FILE_NAME
+                            }
                             rel.startsWith(SCHEME_MANIFESTS_ENTRY) && rel.endsWith(".json") -> {
                                 val schemeId = rel.removePrefix(SCHEME_MANIFESTS_ENTRY).removeSuffix(".json")
                                 if (isSafeId(schemeId)) {
-                                    writeChecked(File(manifestsDir, "$schemeId.json"), manifestsDir, data)
+                                    val relPath = "$MANIFESTS_DIR_NAME/$schemeId.json"
+                                    stageBytes(staging, relPath, data)
+                                    plan += relPath
                                 }
                             }
-                            rel.startsWith("plugins/") -> writeChecked(
-                                File(pluginsDir, rel.removePrefix("plugins/")), pluginsDir, data
-                            )
+                            rel.startsWith("plugins/") -> {
+                                val relPath = "plugins/" + rel.removePrefix("plugins/")
+                                stageBytes(staging, relPath, data)
+                                plan += relPath
+                            }
                             else -> { /* 未知元数据条目跳过（向前兼容） */ }
                         }
                         // 条目计数已在循环开头统一累加（含条目数上限守卫），此处不再重复
                         zis.closeEntry()
                         continue
                     }
-                    val target = File(rimeDir, name)
                     // 显式拒绝绝对路径（File(parent, "/abs") 在 Unix 下会被拼接为 parent/abs，
                     // canonical 检查拦不住；此处按契约直接拒绝）
                     if (isRootedEntryName(name)) {
                         return Result.failure(Exception("备份包包含非法路径: $name"))
                     }
-                    val canonicalRoot = rimeDir.canonicalPath + File.separator
+                    val target = File(stagingRime, name)
+                    val canonicalRoot = stagingRime.canonicalPath + File.separator
                     if (target.canonicalPath != canonicalRoot.removeSuffix(File.separator) &&
                         !target.canonicalPath.startsWith(canonicalRoot)
                     ) {
@@ -514,28 +575,34 @@ object BackupManager {
                     // 候选排序词频表（备份包为顶层 candidate_order.txt）：走「真源」通道
                     //（可见目录，与 xime.yaml 同级），否则恢复出的排序会被可见目录旧表遮蔽。
                     // writer 为 null（纯 JVM 测试）或写入失败时，回退私有目录
-                    // `filesDir/candidate_order.txt`（与 CandidateOrderStore 的私有回退路径一致）。
+                    // `filesDir/<文件名>`（与 CandidateOrderStore 的私有回退路径一致）。
                     val isUserData = relName in USER_DATA_FILE_NAMES
                     if (isUserData) {
-                        val text = String(zis.readBytes(), Charsets.UTF_8)
-                        val routed = userDataWriter?.invoke(relName, text) ?: false
-                        if (!routed) {
-                            File(filesDir, relName).writeText(text)
+                        val data = zis.readBounded(MAX_META_ENTRY_BYTES)
+                        totalBytes += data.size
+                        if (totalBytes > MAX_TOTAL_BYTES) {
+                            return Result.failure(
+                                Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
+                            )
                         }
+                        pendingUserData += relName to String(data, Charsets.UTF_8)
                         zis.closeEntry()
                         continue
                     }
                     if (isUserConfig && visibleConfigWriter != null) {
-                        val text = String(zis.readBytes(), Charsets.UTF_8)
-                        if (!visibleConfigWriter(text)) {
-                            target.parentFile?.mkdirs()
-                            target.writeText(text)
+                        val data = zis.readBounded(MAX_META_ENTRY_BYTES)
+                        totalBytes += data.size
+                        if (totalBytes > MAX_TOTAL_BYTES) {
+                            return Result.failure(
+                                Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
+                            )
                         }
+                        pendingUserConfig += relName to String(data, Charsets.UTF_8)
                         zis.closeEntry()
                         continue
                     }
                     target.parentFile?.mkdirs()
-                    // 流式写入（不整包进内存），但累计总量防写满磁盘
+                    // 流式写入 staging（不整包进内存），但累计总量防写满磁盘
                     target.outputStream().use { out ->
                         val buf = ByteArray(64 * 1024)
                         while (true) {
@@ -550,15 +617,243 @@ object BackupManager {
                             out.write(buf, 0, n)
                         }
                     }
-                    if (name.startsWith("sync/") && name.endsWith(".userdb.txt")) dictSnapshotCount++
+                    if (relName.startsWith("sync/") && relName.endsWith(".userdb.txt")) dictSnapshotCount++
+                    plan += "rime/$relName"
                     zis.closeEntry()
                 }
             }
             if (entryCount == 0) return Result.failure(Exception("备份包为空"))
+            // 版本闸：拒绝更高版本的包（旧版应用会静默丢掉它不认识的字段）
+            if (formatVersion > FORMAT_VERSION) {
+                return Result.failure(
+                    Exception(
+                        "备份包格式版本 v$formatVersion 高于当前支持的 v$FORMAT_VERSION，" +
+                            "请先把应用升级到最新版本再恢复"
+                    )
+                )
+            }
+            if (formatVersion == 0) {
+                FileLogger.w(TAG, "恢复：包内无 $MANIFEST_ENTRY（v1 旧包），按兼容模式恢复")
+            }
+            // —— 阶段二：换入（带事务日志，可回滚） ——
+            if (!commitPlan(filesDir, staging, rollback, journal, plan)) {
+                return Result.failure(
+                    Exception("备份恢复换入失败，已回滚到恢复前状态；详情见日志")
+                )
+            }
+            // 文件已换入，提交不可回滚的副作用（失败只记日志，不回滚文件：
+            // 设置项本就是合并写，少恢复几个键比让用户丢掉刚恢复的文件代价小得多）
+            pendingPrefs.forEach { (prefsName, data) ->
+                try {
+                    prefsRestorer(prefsName, data)
+                } catch (e: Exception) {
+                    FileLogger.e(TAG, "恢复设置失败：$prefsName", e)
+                }
+            }
+            pendingUserData.forEach { (fileName, text) ->
+                val routed = userDataWriter?.invoke(fileName, text) ?: false
+                if (!routed) {
+                    runCatching { File(filesDir, fileName).writeText(text) }
+                        .onFailure { FileLogger.w(TAG, "恢复用户数据表失败：$fileName", it) }
+                }
+            }
+            pendingUserConfig.forEach { (relName, text) ->
+                val routed = visibleConfigWriter?.invoke(text) ?: false
+                if (!routed) {
+                    val fallback = File(filesDir, "rime/$relName")
+                    runCatching {
+                        fallback.parentFile?.mkdirs()
+                        fallback.writeText(text)
+                    }.onFailure { FileLogger.w(TAG, "恢复用户配置失败：$relName", it) }
+                }
+            }
             return Result.success(RestoreOutcome(entryCount, dictSnapshotCount))
         } catch (e: Exception) {
             return Result.failure(e)
+        } finally {
+            staging.deleteRecursively()
+            journal.delete()
+            // 回滚目录只在「回滚本身失败」时保留：里面是恢复前的原始文件，
+            // 删掉就等于把用户数据一起删了，宁可留一个可人工取回的目录。
+            if (rollback.listFiles()?.isEmpty() != false) {
+                rollback.deleteRecursively()
+            } else {
+                FileLogger.e(TAG, "回滚未完成，恢复前文件保留在 ${rollback.path}")
+            }
         }
+    }
+
+    /** 把字节写到 staging 下的相对路径（父目录自动创建）。 */
+    private fun stageBytes(staging: File, relPath: String, data: ByteArray) {
+        val target = File(staging, relPath)
+        writeChecked(target, staging, data)
+    }
+
+    /**
+     * 阶段二：把 staging 里 [plan] 列出的每个文件换入 [filesDir]，逐条写事务日志。
+     *
+     * 每个文件：原目标先移入 [rollback]（记 `M`）→ staging 文件移入目标（记 `W`）。
+     * 任一步失败立即按日志反向撤销；进程若在此间被杀，下次启动由
+     * [recoverInterruptedRestore] 用同一份日志完成撤销。备份包范围外的文件
+     * （build/、*.userdb/、default.yaml 等不在 plan 里）完全不受影响。
+     */
+    private fun commitPlan(
+        filesDir: File,
+        staging: File,
+        rollback: File,
+        journal: File,
+        plan: List<String>
+    ): Boolean {
+        rollback.deleteRecursively()
+        rollback.mkdirs()
+        journal.writeText("")
+        try {
+            for (rel in plan) {
+                val src = File(staging, rel)
+                if (!src.isFile) continue
+                val dst = File(filesDir, rel)
+                dst.parentFile?.mkdirs()
+                if (dst.exists()) {
+                    val bak = File(rollback, rel)
+                    bak.parentFile?.mkdirs()
+                    if (!movePath(dst, bak)) throw java.io.IOException("旧文件暂存失败: $rel")
+                    journal.appendText("M $rel\n")
+                }
+                if (!movePath(src, dst)) throw java.io.IOException("换入失败: $rel")
+                journal.appendText("W $rel\n")
+            }
+            journal.delete()
+            rollback.deleteRecursively()
+            return true
+        } catch (e: Exception) {
+            FileLogger.e(TAG, "备份恢复换入失败，开始回滚", e)
+            val ok = rollbackByJournal(filesDir, rollback, journal)
+            if (!ok) {
+                FileLogger.e(TAG, "回滚不完整：${rollback.path} 保留了恢复前的原始文件")
+            }
+            return false
+        }
+    }
+
+    /**
+     * 按事务日志反向撤销：`W` 删除已换入的新文件，`M` 把原文件从备份目录移回。
+     *
+     * 进程在换入中途被杀也能安全执行（日志是追加写的，末尾半行会被忽略）。
+     * @return 全部撤销成功 true；有残留 false（此时保留 [rollback] 供人工取回）
+     */
+    private fun rollbackByJournal(filesDir: File, rollback: File, journal: File): Boolean {
+        if (!journal.isFile) return true
+        val lines = runCatching { journal.readLines() }.getOrDefault(emptyList())
+        var complete = true
+        for (line in lines.asReversed()) {
+            if (line.length < 3) continue
+            val op = line.substring(0, 1)
+            val rel = line.substring(2)
+            if (rel.isEmpty() || isRootedEntryName(rel) || rel.contains("..")) {
+                complete = false
+                continue
+            }
+            when (op) {
+                "W" -> {
+                    // 换入的新文件：删掉，回到「原文件还在备份目录」的状态
+                    val dst = File(filesDir, rel)
+                    if (dst.exists() && !dst.deleteRecursively()) complete = false
+                }
+                "M" -> {
+                    val bak = File(rollback, rel)
+                    if (bak.exists()) {
+                        val dst = File(filesDir, rel)
+                        if (dst.exists()) dst.deleteRecursively()
+                        if (!movePath(bak, dst)) complete = false
+                    }
+                }
+            }
+        }
+        if (complete) {
+            journal.delete()
+            rollback.deleteRecursively()
+        }
+        return complete
+    }
+
+    /**
+     * 启动自检：上一次恢复是否在换入途中被中断，是则整体撤销。
+     *
+     * 必须由 Application 在 IO 线程调用（恢复中途被杀是常态：输入法常驻进程被 LMK 回收）。
+     * 没有事务日志时是廉价的一次 `File.exists()`。
+     */
+    fun recoverInterruptedRestore(context: Context) {
+        val filesDir = context.filesDir
+        val journal = File(filesDir, JOURNAL_FILE_NAME)
+        val staging = File(filesDir, STAGING_DIR_NAME)
+        val rollback = File(filesDir, ROLLBACK_DIR_NAME)
+        if (!journal.isFile) {
+            // 没有日志 = 上次恢复正常结束（或根本没跑过），顺手清掉可能残留的 staging
+            if (staging.exists()) staging.deleteRecursively()
+            return
+        }
+        FileLogger.w(TAG, "检测到未完成的备份恢复事务，开始回滚")
+        val ok = rollbackByJournal(filesDir, rollback, journal)
+        staging.deleteRecursively()
+        if (ok) {
+            FileLogger.w(TAG, "未完成的备份恢复已回滚到恢复前状态")
+        } else {
+            FileLogger.e(TAG, "未完成的备份恢复回滚不彻底，原文件保留在 ${rollback.path}")
+        }
+    }
+
+    /** 清理上一次事务残留（开始新恢复前调用）。 */
+    private fun discardTransaction(staging: File, rollback: File, journal: File) {
+        staging.deleteRecursively()
+        rollback.deleteRecursively()
+        journal.delete()
+    }
+
+    /** 移动文件或目录：优先 rename（同卷原子），失败退回递归复制 + 删除。 */
+    private fun movePath(src: File, dst: File): Boolean {
+        if (!src.exists()) return true
+        dst.parentFile?.mkdirs()
+        if (src.renameTo(dst)) return true
+        return try {
+            if (!copyTreeTo(src, dst)) return false
+            src.deleteRecursively()
+            true
+        } catch (e: Exception) {
+            FileLogger.e(TAG, "移动失败：${src.path} -> ${dst.path}", e)
+            false
+        }
+    }
+
+    private fun copyTreeTo(src: File, dst: File): Boolean {
+        if (src.isDirectory) {
+            if (!dst.exists() && !dst.mkdirs()) return false
+            val children = src.listFiles() ?: return true
+            for (child in children) {
+                if (!copyTreeTo(child, File(dst, child.name))) return false
+            }
+            return true
+        }
+        return try {
+            dst.parentFile?.mkdirs()
+            src.inputStream().use { input ->
+                dst.outputStream().use { output -> input.copyTo(output) }
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 从 manifest.json 提取 formatVersion；无 manifest（v1 旧包）或解析失败返回 0。
+     *
+     * 这里不用 org.json：恢复核心是纯 JVM 实现（见 BackupManagerTest），
+     * 单测环境下 android 的 org.json 是 stub，直接抛 "not mocked"。
+     */
+    private fun parseFormatVersion(data: ByteArray): Int {
+        val text = String(data, Charsets.UTF_8)
+        val match = Regex("\"formatVersion\"\\s*:\\s*(\\d+)").find(text) ?: return 0
+        return match.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
     }
 
     /** 元数据 id 安全性：非空且不含路径分隔符（防 marketplace/manifests 目录穿越）。 */
@@ -758,6 +1053,18 @@ object BackupManager {
             ?.forEach { manifest ->
                 entries += (META_PREFIX + SCHEME_MANIFESTS_ENTRY + manifest.name) to manifest.readBytes()
             }
+
+        // 格式版本标识：恢复侧据此拒绝「更高版本写出的包」，而不是静默丢掉不认识的字段
+        entries += (META_PREFIX + MANIFEST_ENTRY) to buildManifestJson().toByteArray(Charsets.UTF_8)
         return entries
+    }
+
+    /** 备份包 manifest 内容（格式版本 + 生成者版本 + 创建时间）。 */
+    private fun buildManifestJson(): String = buildString {
+        append("{\"formatVersion\":").append(FORMAT_VERSION)
+        append(",\"appVersion\":\"").append(com.kingzcheung.xime.BuildConfig.VERSION_NAME).append('"')
+        append(",\"appVersionCode\":").append(com.kingzcheung.xime.BuildConfig.VERSION_CODE)
+        append(",\"createdAt\":").append(System.currentTimeMillis())
+        append(",\"generator\":\"xime\"}")
     }
 }

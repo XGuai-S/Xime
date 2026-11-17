@@ -432,7 +432,10 @@ class BackupManagerTest {
         val result = restore(filesDir, bytes)
 
         assertTrue(result.isSuccess)
-        assertEquals("""{"version":1,"plugins":[]}""", File(filesDir, "plugins.json").readText())
+        // 注册表恢复时会被解析后重写（H2：全部插件置为未启用），键顺序不保证 —— 按语义断言
+        val restored = org.json.JSONObject(File(filesDir, "plugins.json").readText())
+        assertEquals(1, restored.getInt("version"))
+        assertEquals(0, restored.getJSONArray("plugins").length())
     }
 
     @Test
@@ -524,5 +527,141 @@ class BackupManagerTest {
 
         assertEquals(0, outcome.dictSnapshotCount)
 
+    }
+
+    // ---- 备份包版本标识（v2 manifest） ----
+
+    @Test
+    fun `restore accepts package with current format version manifest`() {
+        val filesDir = tempDir.newFolder("files")
+        val bytes = zipOfText(
+            mapOf(
+                "${BackupManager.META_PREFIX}${BackupManager.MANIFEST_ENTRY}" to
+                    """{"formatVersion":${BackupManager.FORMAT_VERSION},"appVersion":"3.11.21"}""",
+                "default.custom.yaml" to "patch:"
+            )
+        )
+
+        val result = restore(filesDir, bytes)
+
+        assertTrue(result.isSuccess)
+        assertEquals("patch:", File(filesDir, "rime/default.custom.yaml").readText())
+    }
+
+    @Test
+    fun `restore rejects package with newer format version`() {
+        val filesDir = tempDir.newFolder("files")
+        val newer = BackupManager.FORMAT_VERSION + 1
+        val bytes = zipOfText(
+            mapOf(
+                "${BackupManager.META_PREFIX}${BackupManager.MANIFEST_ENTRY}" to
+                    """{"formatVersion":$newer}""",
+                "default.custom.yaml" to "patch:"
+            )
+        )
+
+        val result = restore(filesDir, bytes)
+
+        assertTrue("更高版本的包必须拒绝，而不是静默丢字段", result.isFailure)
+        // 拒绝发生在换入前：目标目录不应被写入
+        assertTrue(!File(filesDir, "rime/default.custom.yaml").exists())
+    }
+
+    @Test
+    fun `restore still accepts legacy package without manifest`() {
+        val filesDir = tempDir.newFolder("files")
+        val bytes = zipOfText(mapOf("default.custom.yaml" to "patch:"))
+
+        val result = restore(filesDir, bytes)
+
+        assertTrue("v1 旧包保持兼容", result.isSuccess)
+        assertEquals("patch:", File(filesDir, "rime/default.custom.yaml").readText())
+    }
+
+    // ---- 恢复原子性：暂存 + 换入不碰包外文件 ----
+
+    @Test
+    fun `restore leaves staging and journal cleaned up on success`() {
+        val filesDir = tempDir.newFolder("files")
+        val bytes = zipOfText(mapOf("default.custom.yaml" to "patch:"))
+
+        assertTrue(restore(filesDir, bytes).isSuccess)
+        assertTrue(!File(filesDir, ".restore-staging").exists())
+        assertTrue(!File(filesDir, ".restore-rollback").exists())
+        assertTrue(!File(filesDir, ".restore-journal").exists())
+    }
+
+    @Test
+    fun `restore does not delete rime files outside package scope`() {
+        val filesDir = tempDir.newFolder("files")
+        // 备份包刻意排除的东西：leveldb 用户词典、build 产物、派生基座
+        val userdb = File(filesDir, "rime/pinyin_simp.userdb/CURRENT").apply {
+            parentFile!!.mkdirs()
+            writeText("MANIFEST-000001")
+        }
+        val built = File(filesDir, "rime/build/pinyin.prism.bin").apply {
+            parentFile!!.mkdirs()
+            writeText("binary")
+        }
+        val defaultYaml = File(filesDir, "rime/default.yaml").apply { writeText("schema_list:") }
+
+        val bytes = zipOfText(mapOf("default.custom.yaml" to "patch:"))
+        assertTrue(restore(filesDir, bytes).isSuccess)
+
+        assertTrue("userdb 不在包内，不能被删", userdb.exists())
+        assertTrue("build 产物不在包内，不能被删", built.exists())
+        assertTrue("default.yaml 不在包内，不能被删", defaultYaml.exists())
+        assertEquals("patch:", File(filesDir, "rime/default.custom.yaml").readText())
+    }
+
+    @Test
+    fun `restore failure leaves target dir untouched`() {
+        val filesDir = tempDir.newFolder("files")
+        val existing = File(filesDir, "rime/default.custom.yaml").apply {
+            parentFile!!.mkdirs()
+            writeText("原内容")
+        }
+        // 包内混入绝对路径条目 → 解包阶段就失败
+        val bytes = zipOfText(
+            mapOf(
+                "default.custom.yaml" to "新内容",
+                "/etc/evil.txt" to "boom"
+            )
+        )
+
+        val result = restore(filesDir, bytes)
+
+        assertTrue(result.isFailure)
+        assertEquals("恢复失败时目标文件必须保持原样", "原内容", existing.readText())
+        assertTrue(!File(filesDir, ".restore-staging").exists())
+    }
+
+    @Test
+    fun `restore writes manifest and keeps user data routed after commit`() {
+        val filesDir = tempDir.newFolder("files")
+        val orderText = "你\tni\t100\n"
+        val bytes = zipOfText(
+            mapOf(
+                "${BackupManager.META_PREFIX}${BackupManager.MANIFEST_ENTRY}" to
+                    """{"formatVersion":${BackupManager.FORMAT_VERSION}}""",
+                "candidate_order.txt" to orderText,
+                "${BackupManager.META_PREFIX}settings.json" to """{"ascii_mode":{"t":"b","v":true}}"""
+            )
+        )
+        var orderWritten: String? = null
+
+        val result = BackupManager.restoreArchive(
+            filesDir,
+            { name, json -> restoredPrefs[name] = json.toString(Charsets.UTF_8) },
+            bytes,
+            userDataWriter = { _, text ->
+                orderWritten = text
+                true
+            }
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(orderText, orderWritten)
+        assertTrue(restoredPrefs.containsKey("kime_settings"))
     }
 }
