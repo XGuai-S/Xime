@@ -28,19 +28,28 @@ internal object ClipboardProbePolicy {
     }
 
     /**
-     * @param seenInPanel 面板库里是否已存在**同文本**条目（null 表示从未见过）
-     * @param consumed    该条目是否已被上屏消费（仅 [seenInPanel] 不为 null 时有效）
+     * @param seenInPanel 面板库里是否已存在**同文本**条目
+     * @param consumed    该条目是否已被上屏消费（仅 [seenInPanel] 为 true 时有效）
      * @param changedSinceRecord 本进程内系统监听器是否报告过剪贴板变更
      *   （后台读不到内容时，回调本身仍能证明剪贴板变了）
+     * @param stillVisible 该条目是否仍在候选栏的展示窗口内（未过期）
      */
     fun decide(
         seenInPanel: Boolean,
         consumed: Boolean,
         changedSinceRecord: Boolean,
+        stillVisible: Boolean = true,
     ): Action {
         // 面板里从没见过这段内容 → 一定是新内容。涵盖「复制时本进程还没起来」
         // 的场景：那时监听器不会回调、changedSinceRecord 为 false，但内容确实是新的。
         if (!seenInPanel) return Action.RECORD
+
+        // 见过、已验证过、但**已经滑出候选栏展示窗口**（复制后隔了一段时间才弹键盘）：
+        // 必须刷新时间戳让它重新进窗口，否则用户会说「复制了内容有时候不显示」。
+        // 这条以前没有，是「未消费就跳过」的隐含假设错误 ——
+        // 「未消费」只说明用户还没用它，「没过期」才是「它现在就在候选栏里」。
+        if (!consumed && !stillVisible) return Action.RECORD
+
         // 见过但剪贴板没变过 → 这是同一份旧剪贴板，重复入库只会刷新时间戳
         if (!changedSinceRecord) return Action.SKIP
         // 变过 + 仍在展示（未消费）→ 已在候选栏，无需再造一次变更事件

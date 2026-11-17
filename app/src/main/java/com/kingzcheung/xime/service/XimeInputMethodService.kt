@@ -1485,7 +1485,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private fun startClipboardCandidatesCollection() {
     ensureClipboardManagerInitialized()
     try {
-        val items = clipboardManager.getRecentItems(30)
+        val items = clipboardManager.getRecentItems()
         recentClipboardItemsState.value = items
         if (canShowClipboardInCandidateBar()) showClipboardCandidates(items)
     } catch (e: Exception) {
@@ -1495,16 +1495,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     clipboardCollectorJob?.cancel()
     clipboardCollectorJob = serviceScope.launch {
         clipboardManager.clipboardItems.collect { _ ->
-            val items = clipboardManager.getRecentItems(30)
+            val items = clipboardManager.getRecentItems()
             recentClipboardItemsState.value = items
             // 刚上屏过一条：本次变更若只是「标记已消费」引起的回声就跳过。
             // 判据是「列表里有没有基线之外的新 id」——用户上屏后马上又复制了新内容时，
             // 必须照常展示，不能被抑制逻辑吃掉。
             if (suppressClipboardCandidateAutoShow) {
+                val freshCount = items.count { it.timestamp > suppressSince }
                 val show = com.kingzcheung.xime.clipboard.ClipboardCandidateEchoPolicy.shouldShow(
                     suppressed = true,
-                    currentItemIds = items.map { it.id },
-                    baselineIds = suppressBaselineIds,
+                    freshItemCount = freshCount,
                 )
                 if (!show) return@collect
                 suppressClipboardCandidateAutoShow = false
@@ -1557,9 +1557,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * `selectClipboardImage` 之前（消费标记之前），保证「上屏即消失」的观感。
      */
     internal fun closeClipboardCandidateBar() {
-        // 记下当前所有已知条目：随后 Flow 发射时，只要列表里出现这之外的新 id，
-        // 说明用户确实又复制了新内容，必须照常展示，不能被上屏抑制吃掉。
-        suppressBaselineIds = clipboardManager.clipboardItems.value.mapTo(mutableSetOf()) { it.id }
+        // 记下上屏时刻：随后 Flow 发射时，只有「这一刻之后才复制的内容」值得展示，
+        // 之前的条目（含刚落库的）都算回声，不能重新推回候选栏。
+        suppressSince = System.currentTimeMillis()
         suppressClipboardCandidateAutoShow = true
         synchronized(showingClipboardIds) { showingClipboardIds.clear() }
         recentClipboardItemsState.value = emptyList()
@@ -4437,9 +4437,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     @Volatile
     internal var suppressClipboardCandidateAutoShow = false
 
-    /** 抑制开始时已知的条目 id 快照：只有「全是老条目」的回声才抑制，新内容照常展示。 */
+    /**
+     * 抑制开始时刻（= 上屏时刻）。
+     *
+     * 判据用时间而不是 id 快照：入库与上屏是两个异步链路，先后不保证。
+     * 若用「当时已知 id 集合」做基线，刚在上屏前一刻落库的新内容会落进基线里，
+     * 随后被误判成回声而跳过展示 —— 用户看到的就是「复制了新内容有时候不显示」。
+     * 上屏之后再复制的内容，timestamp 必然晚于本时刻，不会被误杀。
+     */
     @Volatile
-    private var suppressBaselineIds: Set<Long> = emptySet()
+    private var suppressSince = 0L
 
 
     /** 组合窗口保留的最大字数（按码点）：与 combo_max_chars 同量级，多留一点供长词后缀。 */

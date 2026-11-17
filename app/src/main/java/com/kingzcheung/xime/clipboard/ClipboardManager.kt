@@ -817,10 +817,17 @@ class ClipboardManager private constructor(private val context: Context) {
             return
         }
         val known = _clipboardItems.value.firstOrNull { it.text == text }
+        // 「还在候选栏窗口内」与「未被消费」是两件事：复制后隔一段时间才弹出键盘时，
+        // 条目可能未消费但已超出展示窗口，此时必须重新入库让它回到候选栏。
+        // 判据必须与 [getRecentItems] 的展示窗口一致（CANDIDATE_WINDOW_MS），
+        // 否则会出现「判定说在窗口里、候选栏实际已把它过滤掉」的自相矛盾。
+        val stillVisible = known != null &&
+            System.currentTimeMillis() - known.timestamp < CANDIDATE_WINDOW_MS
         val decision = ClipboardProbePolicy.decide(
             seenInPanel = known != null,
             consumed = known?.consumed == true,
             changedSinceRecord = clipboardChangedSinceRecord,
+            stillVisible = stillVisible,
         )
         if (decision == ClipboardProbePolicy.Action.SKIP) {
             FileLogger.d(TAG, "补采跳过 id=${known?.id}（未变更的旧剪贴板或已在候选栏）")
@@ -833,6 +840,31 @@ class ClipboardManager private constructor(private val context: Context) {
         addItem(text)
     }
 
+    /**
+     * 防抖：同一条文本在极短时间内被重复提交时只入库一次。
+     *
+     * 为什么会重复：监听回调与「键盘弹出补采」是两条独立路径，同一次复制可能两边
+     * 都判定为「需要入库」，真机日志里表现为同一条文本在 8 毫秒内「入库」两次。
+     * 库里有文本唯一约束不会产生重复行，但会多一次 revive（刷新 timestamp）
+     * 与一次多余的 `clipboardChanged` 发射，表现为候选栏被无谓打断。
+     */
+    @Volatile
+    private var lastAddText: String? = null
+    @Volatile
+    private var lastAddAt = 0L
+    private val ADD_DEBOUNCE_MS = 500L
+
+    /**
+     * 剪贴板条目在候选栏的**展示窗口**（毫秒）。
+     *
+     * 用户要求是「复制后每次进入输入框都展示，直到被消费」。但纯按 consumed 判定会让
+     * 很久以前的条目无限期挂着（实测会把前一天的复制内容也推上候选栏）。
+     * 折中为 30 分钟：覆盖「复制 → 切应用 → 回来粘贴」的真实节奏，
+     * 又不会让陈旧内容常驻。旧实现是 30 秒 —— 太短，复制完切个应用回来就没了，
+     * 这是「复制了内容有时候不在候选栏显示」的主因之一。
+     */
+    internal val CANDIDATE_WINDOW_MS = 30 * 60 * 1000L
+
     fun addItem(text: String) {
         if (text.isBlank()) return
         // 超大文本（几 MB 的 JSON/日志）会把整串写进 Room + StateFlow + 候选栏，
@@ -841,6 +873,13 @@ class ClipboardManager private constructor(private val context: Context) {
             FileLogger.w(TAG, "剪贴板文本超长 len=${text.length}（上限 $MAX_TEXT_CHARS），未入库")
             return
         }
+        val now = System.currentTimeMillis()
+        if (text == lastAddText && now - lastAddAt < ADD_DEBOUNCE_MS) {
+            FileLogger.d(TAG, "剪贴板入库去抖：同文本 500ms 内重复提交，跳过")
+            return
+        }
+        lastAddText = text
+        lastAddAt = now
         scope.launch {
             runCatching {
                 dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
@@ -1022,17 +1061,35 @@ class ClipboardManager private constructor(private val context: Context) {
     }
 
     /**
-     * 候选栏展示的最近剪贴板项（[seconds] 秒窗口内且未消费）。
+     * 候选栏展示的剪贴板项：**最近若干条未消费的条目**。
+     *
+     * 展示判据是 `consumed`（用户点选上屏后不再显示）+ 一个**宽松的**时间窗口
+     * [CANDIDATE_WINDOW_MS]（30 分钟）+ 条数上限 [maxItems]。
+     *
+     * 旧实现的时间窗口是 30 秒，等于「复制后超过 30 秒没弹键盘就不再提示」。
+     * 真实场景极易触发：复制 → 切到别的应用 → 过一会儿才点输入框，内容就"消失"了。
+     * 用户反馈的「复制了内容有时候不在候选栏显示」主要就是这条。
+     * 放宽到 30 分钟后，又用 [maxItems] 和窗口一起挡住「昨天的内容常驻候选栏」。
      *
      * 文本与**图片一并返回**（决策 D9：图片候选与文本候选同栏混排，图片条目 `text` 为空串）：
      * 返回顺序即候选栏索引顺序，调用方按 index 取用，**此处不可再过滤**，否则索引错位。
      * 图片点选走 [selectClipboardImage][com.kingzcheung.xime.service.ImeTextCommit.selectClipboardImage]。
      */
-    fun getRecentItems(seconds: Int = 30): List<ClipboardItem> {
+    fun getRecentItems(
+        maxItems: Int = 5,
+        withinMs: Long = CANDIDATE_WINDOW_MS,
+    ): List<ClipboardItem> {
         val now = System.currentTimeMillis()
-        val cutoff = now - seconds * 1000L
-        // 用户点选上屏后标记 consumed 不再显示
-        return _clipboardItems.value.filter { it.timestamp >= cutoff && !it.consumed }
+        // 两个约束缺一不可：
+        // - consumed：用户点选上屏后不再显示（这是主要语义）；
+        // - withinMs：复制后很久都没用的条目不该无限期挂在候选栏上。
+        //   窗口从 30 秒放宽到 30 分钟 —— 30 秒太短，复制完切个应用回来就没了，
+        //   这正是「复制了内容有时候不显示」的主因；30 分钟足够覆盖「复制→切应用→
+        //   回来粘贴」的真实节奏，又不会让昨天的内容一直挂着。
+        return _clipboardItems.value.asSequence()
+            .filter { !it.consumed && now - it.timestamp < withinMs }
+            .take(maxItems)
+            .toList()
     }
 
     /**
