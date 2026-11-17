@@ -787,6 +787,20 @@ class ClipboardManager private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * 剪贴板条目置顶开关。
+     *
+     * 置顶的语义与「快捷发送置顶」不同：这里是真的固定——置顶条目永不被
+     * 数量上限/图片配额淘汰（DAO 的 trimUnpinned / trimImages 都带 isPinned = 0），
+     * 且在列表中排在未置顶项之前（observeAll 的 ORDER BY isPinned DESC）。
+     */
+    fun togglePinClipboardItem(id: Long) {
+        scope.launch {
+            val current = dao.findById(id) ?: return@launch
+            dao.setPinned(id, !current.isPinned)
+        }
+    }
+
     fun updateQuickSendItem(id: Long, newText: String, newCode: String = ""): Boolean {
         if (newText.isBlank()) return false
         val index = _quickSendItems.value.indexOfFirst { it.id == id }

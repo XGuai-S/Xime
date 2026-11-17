@@ -674,6 +674,10 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         clipboardManager.removeFromQuickSend(id)
     }
 
+    fun togglePinClipboardItem(id: Long) {
+        clipboardManager.togglePinClipboardItem(id)
+    }
+
     fun togglePinQuickSend(id: Long) {
         clipboardManager.togglePinQuickSend(id)
     }

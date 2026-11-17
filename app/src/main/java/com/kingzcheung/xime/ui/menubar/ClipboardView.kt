@@ -8,6 +8,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -467,27 +470,42 @@ fun ClipboardView(
                         Spacer(modifier = Modifier.width(6.dp))
                         // 纯 Compose 展示（整行可点由外层 Row 处理）。
                         // 键盘按键通过离屏 EditText 接收后同步到这里。
-                        // 光标：离屏 EditText 不参与布局，系统插入符不会画到这里，
-                        // 所以搜索态自绘一个闪烁插入符，否则看不出焦点已经进入搜索框。
-                        if (searchKeyboardActive && searchQuery.isEmpty()) {
+                        // 三个元素互斥出现，避免搜索框里同时挤着占位文案、关键词和候选词：
+                        //   1) 有关键词 → 显示关键词（+ 后面的闪烁插入符）
+                        //   2) 搜索态且已嵌入首选 → 只显示预览候选（占位文案让位）
+                        //   3) 都不满足 → 占位文案「搜索剪贴板内容」
+                        // 插入符只在「搜索态且搜索词为空」时前置，作为焦点已进搜索框的视觉提示
+                        // （离屏 EditText 不参与布局，系统插入符画不到这里）。
+                        val hasEmbedded = searchKeyboardActive && embeddedCandidate.isNotEmpty()
+                        val showQuery = searchQuery.isNotEmpty()
+                        if (searchKeyboardActive && !showQuery && !hasEmbedded) {
                             SearchCaret(color = textColor)
                             Spacer(modifier = Modifier.width(3.dp))
                         }
-                        Text(
-                            text = searchQuery.ifEmpty { "搜索剪贴板内容" },
-                            color = if (searchQuery.isEmpty()) subTextColor else textColor,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        // 候选首词嵌入（与宿主输入框同名功能一致）：搜索态下把将要上屏的词
-                        // 以浅色跟在关键词后面预览，纯展示、不写入搜索词。
-                        if (searchKeyboardActive && embeddedCandidate.isNotEmpty()) {
-                            Spacer(modifier = Modifier.width(4.dp))
+                        if (showQuery) {
+                            Text(
+                                text = searchQuery,
+                                color = textColor,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        } else if (hasEmbedded) {
+                            // 候选首词嵌入（与宿主输入框同名功能一致）：把将要上屏的词
+                            // 以浅色预览，纯展示、不写入搜索词。
                             Text(
                                 text = embeddedCandidate,
                                 color = accentColor.copy(alpha = 0.85f),
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        } else {
+                            Text(
+                                text = "搜索剪贴板内容",
+                                color = subTextColor,
                                 fontSize = 13.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -743,6 +761,13 @@ fun ClipboardView(
                     // 图片条目：拆词/快捷发送无意义（文本操作），只剩多选 + 删除
                     listOf(
                         LongPressMenuEntry(
+                            icon = Icons.Default.PushPin,
+                            label = if (anchor.item.isPinned) "取消置顶" else "置顶",
+                            onClick = {
+                                viewModel.togglePinClipboardItem(anchor.item.id)
+                            }
+                        ),
+                        LongPressMenuEntry(
                             icon = Icons.Default.DoneAll,
                             label = "多选",
                             onClick = {
@@ -761,6 +786,13 @@ fun ClipboardView(
                     )
                 } else {
                     listOf(
+                        LongPressMenuEntry(
+                            icon = Icons.Default.PushPin,
+                            label = if (anchor.item.isPinned) "取消置顶" else "置顶",
+                            onClick = {
+                                viewModel.togglePinClipboardItem(anchor.item.id)
+                            }
+                        ),
                         LongPressMenuEntry(
                             icon = Icons.Default.ContentCut,
                             label = "拆词",
@@ -1379,28 +1411,40 @@ private fun MenuCard(
     cardBgColor: Color,
     onDismiss: () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = cardBgColor
-    ) {
-        Column(modifier = Modifier.padding(vertical = 6.dp)) {
-            menuItems.forEachIndexed { index, entry ->
-                if (index > 0) {
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+    // 菜单项随功能增加会变多（置顶/拆词/快捷/多选/删除…），面板高度又受键盘窗口限制。
+    // 这里给卡片一个"不超过可用高度"的约束 + 竖向滚动，保证每一项都点得到，
+    // 而不是被 Row 的居中布局裁在可视区外（旧实现直接溢出，底下几项看不见）。
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val maxCardHeight = maxHeight
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = maxCardHeight),
+            shape = RoundedCornerShape(12.dp),
+            color = cardBgColor
+        ) {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 6.dp)
+            ) {
+                menuItems.forEachIndexed { index, entry ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                        )
+                    }
+                    LongPressMenuItem(
+                        icon = entry.icon,
+                        label = entry.label,
+                        tint = entry.tint ?: MaterialTheme.colorScheme.onSurface,
+                        onClick = {
+                            onDismiss()
+                            entry.onClick()
+                        }
                     )
                 }
-                LongPressMenuItem(
-                    icon = entry.icon,
-                    label = entry.label,
-                    tint = entry.tint ?: MaterialTheme.colorScheme.onSurface,
-                    onClick = {
-                        onDismiss()
-                        entry.onClick()
-                    }
-                )
             }
         }
     }

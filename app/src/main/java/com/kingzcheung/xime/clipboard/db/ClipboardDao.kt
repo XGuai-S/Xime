@@ -10,7 +10,16 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ClipboardDao {
 
-    @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 0 ORDER BY timestamp DESC")
+    /**
+     * 剪贴板列表：**置顶优先**，其余按时间倒序。
+     *
+     * 排序放在 SQL 里而不是 UI 层：列表直接照抄这个顺序渲染，
+     * 各消费方（面板、候选栏、导出）拿到的顺序天然一致，不会各自排序漂移。
+     */
+    @Query(
+        "SELECT * FROM clipboard_entries WHERE isQuickSend = 0 " +
+            "ORDER BY isPinned DESC, timestamp DESC"
+    )
     fun observeAll(): Flow<List<ClipboardEntry>>
 
     @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 1 ORDER BY timestamp DESC")
@@ -99,6 +108,10 @@ interface ClipboardDao {
 
     @Query("UPDATE clipboard_entries SET text = :text, code = :code, timestamp = :now WHERE id = :id")
     suspend fun updateQuickSendItem(id: Long, text: String, code: String, now: Long)
+
+    /** 置顶开关（仅剪贴板条目）：置顶项永不被数量/容量淘汰，且在面板里排最前。 */
+    @Query("UPDATE clipboard_entries SET isPinned = :pinned WHERE id = :id AND isQuickSend = 0")
+    suspend fun setPinned(id: Long, pinned: Boolean)
 
     @Query("UPDATE clipboard_entries SET consumed = 1 WHERE id = :id")
     suspend fun markConsumed(id: Long)
