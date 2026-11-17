@@ -164,7 +164,16 @@ fun ClipboardView(
         embeddedCandidateState != null
     ) {
         val cand = embeddedCandidateState.value
-        if (cand.isComposing) cand.candidates.firstOrNull().orEmpty() else ""
+        // 两个前提一起判：
+        //   isComposing —— 必须处于组合态，否则上一轮已上屏的候选会一直挂在搜索框上；
+        //   inputText 非空 —— 自动上屏（四码唯一）后引擎会短暂保留候选列表但编码已清，
+        //     只看 isComposing 会让「刚上屏的那个词」在下一码开始前继续显示，
+        //     看起来像嵌入首选卡住了。编码清零即视为本轮结束，立刻撤下预览。
+        if (cand.isComposing && cand.inputText.isNotEmpty()) {
+            cand.candidates.firstOrNull().orEmpty()
+        } else {
+            ""
+        }
     } else {
         ""
     }
@@ -470,20 +479,23 @@ fun ClipboardView(
                         Spacer(modifier = Modifier.width(6.dp))
                         // 纯 Compose 展示（整行可点由外层 Row 处理）。
                         // 键盘按键通过离屏 EditText 接收后同步到这里。
-                        // 三个元素互斥出现，避免搜索框里同时挤着占位文案、关键词和候选词：
-                        //   1) 有关键词 → 显示关键词（+ 后面的闪烁插入符）
-                        //   2) 搜索态且已嵌入首选 → 只显示预览候选（占位文案让位）
-                        //   3) 都不满足 → 占位文案「搜索剪贴板内容」
-                        // 插入符只在「搜索态且搜索词为空」时前置，作为焦点已进搜索框的视觉提示
-                        // （离屏 EditText 不参与布局，系统插入符画不到这里）。
+                        // 搜索词与嵌入首选是**两段并列内容**，不是互斥关系：
+                        //   · 中文输入时拼音进 Rime 组合，searchQuery 不变；
+                        //   · 四码唯一自动上屏后，上屏的词写进离屏 EditText，searchQuery 变成非空，
+                        //     再按下一码时组合重新开始——此时必须同时显示「已上屏的词 + 新的首候选」。
+                        // 早前把两者做成互斥分支，导致「自动上屏后下一码的嵌入首选凭空消失」。
+                        // 占位文案只在两者都为空时出现（搜索态有候选预览时不该再摆一句提示）。
                         val hasEmbedded = searchKeyboardActive && embeddedCandidate.isNotEmpty()
                         val showQuery = searchQuery.isNotEmpty()
-                        if (searchKeyboardActive && !showQuery && !hasEmbedded) {
+                        val showPlaceholder = !showQuery && !hasEmbedded
+                        if (searchKeyboardActive && showPlaceholder) {
+                            // 插入符前置：离屏 EditText 不参与布局，系统插入符画不到这里，
+                            // 这是「焦点已进搜索框」的唯一视觉提示。
                             SearchCaret(color = textColor)
                             Spacer(modifier = Modifier.width(3.dp))
                         }
-                        if (showQuery) {
-                            Text(
+                        when {
+                            showQuery -> Text(
                                 text = searchQuery,
                                 color = textColor,
                                 fontSize = 13.sp,
@@ -491,21 +503,22 @@ fun ClipboardView(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
-                        } else if (hasEmbedded) {
-                            // 候选首词嵌入（与宿主输入框同名功能一致）：把将要上屏的词
-                            // 以浅色预览，纯展示、不写入搜索词。
-                            Text(
-                                text = embeddedCandidate,
-                                color = accentColor.copy(alpha = 0.85f),
+                            showPlaceholder -> Text(
+                                text = "搜索剪贴板内容",
+                                color = subTextColor,
                                 fontSize = 13.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
-                        } else {
+                        }
+                        if (hasEmbedded) {
+                            // 候选首词嵌入（与宿主输入框同名功能一致）：接在搜索词后面以主题色
+                            // 预览将要上屏的词，纯展示、不写入 searchQuery，也不影响过滤结果。
+                            if (showQuery) Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "搜索剪贴板内容",
-                                color = subTextColor,
+                                text = embeddedCandidate,
+                                color = accentColor.copy(alpha = 0.85f),
                                 fontSize = 13.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
