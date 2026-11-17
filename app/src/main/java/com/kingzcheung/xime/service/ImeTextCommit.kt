@@ -123,7 +123,12 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
             false
         }
     }
-    internal fun selectClipboardItem(text: String) {
+    /**
+     * 剪贴板候选点选上屏。
+     *
+     * @param id 被点选条目的 id（有则按 id 精确标记已消费；null 走按文本兜底匹配）
+     */
+    internal fun selectClipboardItem(text: String, id: Long? = null) {
         if (service.candidateState.value.isComposing) {
             service.keyRouter.postRimeJob {
                 service.rimeEngine.clearComposition()
@@ -132,8 +137,20 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
                 }
             }
         }
-        // 标记为已消费：候选栏/剪贴板点选上屏后不再重复出现在候选栏
-        service.clipboardManager.markConsumed(text)
+        // 先关掉候选栏的剪贴板展示态（并抑制随后的 consumed 落库回声），
+        // 否则「标记已消费 → 数据库 Flow 再发一次 → collector 判定候选栏空闲 →
+        // 把剩下的条目又推回来」会让用户看到「上屏了还在候选栏显示」。
+        service.closeClipboardCandidateBar()
+        // 标记为已消费：候选栏/剪贴板点选上屏后不再重复出现在候选栏。
+        // 优先按 id 精确标记 —— 本条上屏后会把内容写回系统剪贴板（下一次 copyToSystemClipboard），
+        // 若此刻按文本「最近一条未消费」重新查找，可能标到另一行（文本相同的新行），
+        // 被点的那行仍是 consumed=0，于是下次进输入框它又出现（用户 2026-11 反馈）。
+        val itemId = id
+        if (itemId != null) {
+            service.clipboardManager.markConsumedExact(itemId)
+        } else {
+            service.clipboardManager.markConsumed(text)
+        }
         // 粘贴不计打字统计（不投 text_committed），联想照常
         service.commitPastedText(text)
         service.clipboardManager.copyToSystemClipboard(text)
@@ -151,6 +168,7 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
      * 强行补偿只会把用户引到别的页面或触发系统隐私弹窗，反而干扰正常应用。
      */
     internal fun selectClipboardImage(item: ClipboardItem) {
+        service.closeClipboardCandidateBar()
         service.clipboardManager.markConsumedById(item.id)
         val file = service.clipboardManager.imageFileOf(item)
         if (file == null) {

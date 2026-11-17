@@ -708,7 +708,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 if (clipboardItem.isImage) {
                     service.textCommit.selectClipboardImage(clipboardItem)
                 } else {
-                    service.textCommit.selectClipboardItem(clipboardItem.text)
+                    service.textCommit.selectClipboardItem(clipboardItem.text, clipboardItem.id)
                 }
                 service.candidateState.value = service.candidateState.value.copy(
                     isShowingRecentClipboard = false,
@@ -2284,7 +2284,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             if (item.isImage) {
                 service.textCommit.selectClipboardImage(item)
             } else {
-                service.textCommit.selectClipboardItem(item.text)
+                service.textCommit.selectClipboardItem(item.text, item.id)
             }
             service.candidateState.value = service.candidateState.value.copy(
                 isShowingRecentClipboard = false,

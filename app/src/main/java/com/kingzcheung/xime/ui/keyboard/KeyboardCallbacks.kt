@@ -35,7 +35,13 @@ data class KeyboardCallbacks(
     val onClearAssociation: (() -> Unit)? = null,
     val onToggleDarkMode: (() -> Unit)? = null,
     val onClipboard: (() -> Unit)? = null,
-    val onClipboardSelect: ((String) -> Unit)? = null,
+    /**
+     * 剪贴板条目点选上屏。
+     *
+     * 第二参数是条目 id：有 id 时按 id 精确标记「已消费」，避免上屏后按文本重新匹配
+     * 时标到同文本的另一行（那行仍是未消费，下次进输入框又出现）。
+     */
+    val onClipboardSelect: ((text: String, id: Long?) -> Unit)? = null,
     /**
      * 剪贴板**图片**条目点选：服务层先尝试 `commitContent` 直插宿主，
      * 宿主不支持图片 MIME 时降级为写入系统剪贴板并提示用户长按输入框粘贴。

@@ -245,6 +245,11 @@ class ClipboardManager private constructor(private val context: Context) {
                     if (selfText != null) {
                         selfWrittenText = null
                         if (selfText == text) {
+                            // 这条变更**已经处理过了**（就是本应用自己写回的），必须清标志：
+                            // 留着它的话，下一次 onWindowShown 补采会认为「剪贴板变过」，
+                            // 于是绕过「未变更旧剪贴板」的拦截，把刚上屏的那条又复活一遍 ——
+                            // 表现就是「点选上屏后，候选栏里它又出现」。
+                            clipboardChangedSinceRecord = false
                             FileLogger.d(TAG, "Self-written text clip, skip capture")
                             return
                         }
@@ -1032,7 +1037,13 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /**
      * 标记指定文本的剪贴板条目为"已消费"（候选栏不再显示）。
-     * 匹配最近一条未消费的相同文本，避免影响历史重复条目。
+     *
+     * 按 id 更新，而不是按文本再查一遍：调用方（[com.kingzcheung.xime.service.ImeTextCommit]）
+     * 手里本来就有被点选条目的 id。旧实现按文本 `maxByOrNull { timestamp }` 兜底匹配，
+     * 上屏时会把该内容写回系统剪贴板，如果此刻恰好又插入了同文本的新行（revive/补采竞态），
+     * 就会标到**另一行**上——被点的那行仍是 consumed=0，下次进输入框继续显示。
+     *
+     * 保留文本入参：调用点较多，且需要兼容「没拿到 id」的旧调用路径。
      */
     fun markConsumed(text: String) {
         scope.launch {
@@ -1040,6 +1051,18 @@ class ClipboardManager private constructor(private val context: Context) {
                 .filter { it.text == text && !it.consumed }
                 .maxByOrNull { it.timestamp } ?: return@launch
             dao.markConsumed(item.id)
+        }
+    }
+
+    /**
+     * 按 id 精确标记已消费（剪贴板候选点选上屏的主路径）。
+     *
+     * 与 [markConsumed] 的区别：不重新按文本查找，直接用点选时的 id，
+     * 避免「文本相同的新行」把标记吃掉。
+     */
+    fun markConsumedExact(id: Long) {
+        scope.launch {
+            dao.markConsumed(id)
         }
     }
 

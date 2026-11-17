@@ -643,7 +643,7 @@ fun KeyboardView(
                     },
                     onInputTextClick = {
                         if (candidateState.value.inputText.isNotEmpty()) {
-                            callbacks.onClipboardSelect?.invoke(candidateState.value.inputText)
+                            callbacks.onClipboardSelect?.invoke(candidateState.value.inputText, null)
                         }
                     },
                     onAssociationSelect = { index ->
@@ -1617,7 +1617,10 @@ fun KeyboardView(
                         keyBgColor = keyBgColor,
                         viewModel = viewModel,
                         onSelectItem = { text ->
-                            callbacks.onClipboardSelect?.invoke(text)
+                            // 精确到 id：该文本可能同时存在多行（历史重复），
+                            // 只标被点的这一行才不会「上屏后仍在候选栏显示」
+                            val id = state.clipboardItems.firstOrNull { it.text == text }?.id
+                            callbacks.onClipboardSelect?.invoke(text, id)
                             viewModel.closeOverlay()
                         },
                         onSelectImage = { item ->

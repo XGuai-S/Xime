@@ -1497,6 +1497,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         clipboardManager.clipboardItems.collect { _ ->
             val items = clipboardManager.getRecentItems(30)
             recentClipboardItemsState.value = items
+            // 刚上屏过一条：本次变更若只是「标记已消费」引起的回声就跳过。
+            // 判据是「列表里有没有基线之外的新 id」——用户上屏后马上又复制了新内容时，
+            // 必须照常展示，不能被抑制逻辑吃掉。
+            if (suppressClipboardCandidateAutoShow) {
+                val show = com.kingzcheung.xime.clipboard.ClipboardCandidateEchoPolicy.shouldShow(
+                    suppressed = true,
+                    currentItemIds = items.map { it.id },
+                    baselineIds = suppressBaselineIds,
+                )
+                if (!show) return@collect
+                suppressClipboardCandidateAutoShow = false
+            }
             // 新复制内容 / 状态刷新：候选栏空闲时展示（正在打字则不抢占）
             if (!canShowClipboardInCandidateBar()) return@collect
             showClipboardCandidates(items)
@@ -1539,12 +1551,38 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     /**
+     * 剪贴板条目已被点选上屏：关闭候选栏的剪贴板展示态，并抑制回声重开。
+     *
+     * 调用点在 [com.kingzcheung.xime.service.ImeTextCommit.selectClipboardItem] /
+     * `selectClipboardImage` 之前（消费标记之前），保证「上屏即消失」的观感。
+     */
+    internal fun closeClipboardCandidateBar() {
+        // 记下当前所有已知条目：随后 Flow 发射时，只要列表里出现这之外的新 id，
+        // 说明用户确实又复制了新内容，必须照常展示，不能被上屏抑制吃掉。
+        suppressBaselineIds = clipboardManager.clipboardItems.value.mapTo(mutableSetOf()) { it.id }
+        suppressClipboardCandidateAutoShow = true
+        synchronized(showingClipboardIds) { showingClipboardIds.clear() }
+        recentClipboardItemsState.value = emptyList()
+        val cs = candidateState.value
+        if (cs.isShowingRecentClipboard) {
+            candidateState.value = cs.copy(
+                candidates = emptyList(),
+                candidateComments = emptyList(),
+                isShowingRecentClipboard = false,
+                candidateActions = emptyList(),
+            )
+        }
+    }
+
+    /**
      * 用户按键盘产生了实际输入：把当前正展示的剪贴板条目全部标记消费。
      *
      * 调用点在按键主路径（见 ImeKeyRouter）——只在**真正输入字符**时触发，
      * 切换应用/展开面板不会调到这里，因此不会误清。
      */
     internal fun markShowingClipboardConsumed() {
+        // 用户开始打字：此前「上屏后抑制重开」的使命结束，恢复正常展示逻辑
+        suppressClipboardCandidateAutoShow = false
         val ids = synchronized(showingClipboardIds) { showingClipboardIds.toList() }
         if (ids.isEmpty()) return
         showingClipboardIds.clear()
@@ -4383,6 +4421,25 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * - 只切应用、没敲键盘 → 下次进输入框仍展示（这是期望行为）。
      */
     internal val showingClipboardIds = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
+
+    /**
+     * 剪贴板条目刚被点选上屏：候选栏的剪贴板展示态已被主动关闭，
+     * 不要让随后到来的 `clipboardItems` 变更把它重新打开。
+     *
+     * 为什么需要：点选上屏会对该条目标记 consumed，而 `clipboardItems` 是数据库 Flow，
+     * consumed 落库后必然再发射一次。`startClipboardCandidatesCollection` 的 collector
+     * 只要判定「候选栏空闲」就调 [showClipboardCandidates]，于是过滤掉刚上屏那条后的
+     * 剩余条目（同批里其它未消费项）又被推回候选栏——用户看到的就是
+     * 「上屏了，候选栏里还在显示」（用户 2026-11 反馈）。
+     *
+     * 置位后由「用户下一次真实按键输入」或「新的剪贴板内容」清除。
+     */
+    @Volatile
+    internal var suppressClipboardCandidateAutoShow = false
+
+    /** 抑制开始时已知的条目 id 快照：只有「全是老条目」的回声才抑制，新内容照常展示。 */
+    @Volatile
+    private var suppressBaselineIds: Set<Long> = emptySet()
 
 
     /** 组合窗口保留的最大字数（按码点）：与 combo_max_chars 同量级，多留一点供长词后缀。 */
