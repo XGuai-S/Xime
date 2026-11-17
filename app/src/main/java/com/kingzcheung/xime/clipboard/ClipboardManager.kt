@@ -116,6 +116,8 @@ class ClipboardManager private constructor(private val context: Context) {
     private var selfClipboardImagePath: String? = null
 
     private val clipboardListener = AndroidClipboardManager.OnPrimaryClipChangedListener {
+        // 回调即代表剪贴板变了；即使随后因后台限制读不到内容，这个事实也要留给补采用。
+        clipboardChangedSinceRecord = true
         readClipboard()
     }
 
@@ -133,6 +135,43 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /** 单条文本剪贴板入库上限（字符）。超长内容（日志/JSON）不入库。 */
     private val MAX_TEXT_CHARS = 100_000
+
+    /**
+     * 本次 [readClipboard] 的触发来源。
+     *
+     * 系统剪贴板监听回调 = 用户真的复制了东西，应当「复活」同文本条目（重置 consumed、
+     * 刷新时间戳），让它重新进候选栏。
+     *
+     * [PROBE] = [captureCurrentClipboardNow] 在键盘弹出时补采，目的是捡回「复制时本进程
+     * 没有焦点、primaryClip 返回 null」而漏掉的内容。它读到的大多是**早就入过库的旧内容**，
+     * 若也走复活路径，就变成「每次弹出键盘都把上次那条重新激活一遍」——用户看到的是
+     * 复制内容在候选栏反复出现（且 consumed 永远回不去 1）。
+     */
+    private enum class CaptureSource { LISTENER, PROBE }
+
+    @Volatile
+    private var currentCaptureSource = CaptureSource.LISTENER
+
+    /**
+     * 系统剪贴板自「上次成功记录」以来是否发生过变更。
+     *
+     * 由 [clipboardListener] 置位——**监听回调本身就能证明剪贴板变了**，哪怕后台限制让
+     * `primaryClip` 返回 null、我们读不到内容。补采（[captureCurrentClipboardNow]）据此判断
+     * 读到的是「用户刚复制、但当时读不到的新内容」还是「一直没变过的旧剪贴板」：
+     * 后者绝不能再走 revive，否则每次弹出键盘都会把同一条旧内容重新激活，表现为
+     * 复制内容在候选栏反复出现。
+     */
+    @Volatile
+    private var clipboardChangedSinceRecord = false
+
+    /**
+     * 上次处理过的图片剪贴板 URI（字符串形式）。
+     *
+     * 图片没有「已入库列表」可按内容廉价比对（要读盘 + 算 hash），而补采每次键盘弹出都会
+     * 命中同一份系统剪贴板。用原样 URI 做最外层比较：没变就连读盘都省掉。
+     */
+    @Volatile
+    private var lastSeenImageUri: String? = null
 
     /**
      * 采集系统剪贴板。
@@ -173,6 +212,19 @@ class ClipboardManager private constructor(private val context: Context) {
                         FileLogger.d(TAG, "Image capture disabled by settings, skip")
                         return
                     }
+                    // 补采路径读到的是没变更过的旧图片剪贴板：连读盘都不必做。
+                    // 旧实现会一路走到 addImage，命中同 hash 时 updateTimestamp + emit，
+                    // 于是候选栏里那张图的时间戳被反复刷新、永远不过期 —— 与文本同样的
+                    // 「反复出现」，代价还多出一次整图读盘与 hash 计算。
+                    if (currentCaptureSource == CaptureSource.PROBE &&
+                        !clipboardChangedSinceRecord &&
+                        lastSeenImageUri == imageUri.toString()
+                    ) {
+                        FileLogger.d(TAG, "补采命中未变更的旧图片剪贴板，跳过")
+                        return
+                    }
+                    clipboardChangedSinceRecord = false
+                    lastSeenImageUri = imageUri.toString()
                     captureImage(imageUri, description)
                     return
                 }
@@ -197,7 +249,13 @@ class ClipboardManager private constructor(private val context: Context) {
                             return
                         }
                     }
-                    addItem(text)
+                    if (currentCaptureSource == CaptureSource.PROBE) {
+                        recordProbeText(text)
+                    } else {
+                        // 监听路径：这次变更已经被如实记录，补采不必再处理它
+                        clipboardChangedSinceRecord = false
+                        addItem(text)
+                    }
                     return
                 }
             }
@@ -506,9 +564,6 @@ class ClipboardManager private constructor(private val context: Context) {
     private val _quickSendItems = MutableStateFlow<List<ClipboardItem>>(emptyList())
     val quickSendItems: StateFlow<List<ClipboardItem>> = _quickSendItems.asStateFlow()
 
-    private val _recentItems = MutableStateFlow<List<ClipboardItem>>(emptyList())
-    val recentItems: StateFlow<List<ClipboardItem>> = _recentItems.asStateFlow()
-
     /** 本地剪贴板变更事件流（新增/更新条目时发射，供剪贴板同步等外部消费）。 */
     private val _clipboardChanged = MutableSharedFlow<ClipboardItem>(extraBufferCapacity = 16)
     val clipboardChanged: SharedFlow<ClipboardItem> = _clipboardChanged.asSharedFlow()
@@ -520,7 +575,6 @@ class ClipboardManager private constructor(private val context: Context) {
         scope.launch {
             dao.observeAll().collect { entries ->
                 _clipboardItems.value = orderForPanel(entries)
-                updateRecentItems()
             }
         }
         scope.launch {
@@ -594,15 +648,6 @@ class ClipboardManager private constructor(private val context: Context) {
             compareByDescending<ClipboardEntry> { it.isPinned }.thenByDescending { it.timestamp }
         )
         return (listOf(newest) + rest).map { it.toClipboardItem() }
-    }
-
-    private fun updateRecentItems() {
-        val now = System.currentTimeMillis()
-        val cutoff = now - 10 * 1000L
-        // 候选栏只投递文本条目：图片条目无文本可上屏，且其消费路径是剪贴板面板点选
-        _recentItems.value = _clipboardItems.value.filter {
-            it.timestamp >= cutoff && !it.isImage
-        }
     }
 
     private fun deserializeItems(json: String): List<ClipboardItem> {
@@ -716,12 +761,17 @@ class ClipboardManager private constructor(private val context: Context) {
      * 幂等：同一内容由 [addItem] 的 upsertAndTrim 按文本去重，重复采集不会产生新行。
      */
     fun captureCurrentClipboardNow() {
-        readClipboard()
+        currentCaptureSource = CaptureSource.PROBE
+        try {
+            readClipboard()
+        } finally {
+            currentCaptureSource = CaptureSource.LISTENER
+        }
     }
 
     fun ensureListening() {
         startListening()
-        FileLogger.e(TAG, "Clipboard listener ensured (listening=$isListeningToSystemClipboard)")
+        FileLogger.i(TAG, "Clipboard listener ensured (listening=$isListeningToSystemClipboard)")
     }
 
     /** 注销系统剪贴板监听（服务销毁时调用；下次由 [ensureListening] 重新挂上）。 */
@@ -731,12 +781,59 @@ class ClipboardManager private constructor(private val context: Context) {
         isListeningToSystemClipboard = false
     }
 
+    /**
+     * 补采命中文本时的入库判定。
+     *
+     * 键盘每次弹出都会补采一次（Android 10+ 后台读不到剪贴板，只有键盘可见时可靠），
+     * 所以这里必须区分「用户刚复制的新内容」与「一直没变过的旧剪贴板」——后者若也入库，
+     * 等于每弹一次键盘就把同一条旧内容 revive 一遍：timestamp 被刷新 → 永远落在 30 秒
+     * 窗口内 → 候选栏反复出现。日志表现就是同一条 len=5 在 20 分钟内「入库」7 次。
+     *
+     * 判据用三条事实，而不是模糊的时间窗口：
+     * - [clipboardChangedSinceRecord]：本进程内监听器是否报告过变更（后台读不到内容时，
+     *   回调本身仍能证明剪贴板变了）；
+     * - 面板里是否已有同文本条目（`known`）；
+     * - 该条目是否已被消费（`consumed`）。
+     *
+     * 四种组合：
+     * | known | 变过 | 动作 |
+     * |-------|------|------|
+     * | null  | 任意 | 入库 —— 面板里从没见过这段内容（含「复制时本进程还没起来」的场景，
+     * |       |      |   此时监听器不会回调、标志为 false，但内容确实是新的） |
+     * | 有    | 否   | 跳过 —— 旧剪贴板，重复入库只会无谓刷新时间戳 |
+     * | 有    | 是   | 未消费 → 跳过（已在候选栏）；已消费 → 入库复活（用户又复制了同一段） |
+     */
+    private fun recordProbeText(text: String) {
+        if (text.isBlank()) return
+        if (text.length > MAX_TEXT_CHARS) {
+            // 超长文本在补采路径同样丢弃，但要留痕：这里以前用 android.util.Log，
+            // 默认日志级别下不落盘，用户只看到「复制了没进面板」而无从排查。
+            FileLogger.w(TAG, "补采命中超长文本 len=${text.length}，未入库")
+            return
+        }
+        val known = _clipboardItems.value.firstOrNull { it.text == text }
+        val decision = ClipboardProbePolicy.decide(
+            seenInPanel = known != null,
+            consumed = known?.consumed == true,
+            changedSinceRecord = clipboardChangedSinceRecord,
+        )
+        if (decision == ClipboardProbePolicy.Action.SKIP) {
+            FileLogger.d(TAG, "补采跳过 id=${known?.id}（未变更的旧剪贴板或已在候选栏）")
+            return
+        }
+        clipboardChangedSinceRecord = false
+        if (known != null) {
+            FileLogger.d(TAG, "补采命中已消费条目 id=${known.id}，按重新复制复活")
+        }
+        addItem(text)
+    }
+
     fun addItem(text: String) {
         if (text.isBlank()) return
         // 超大文本（几 MB 的 JSON/日志）会把整串写进 Room + StateFlow + 候选栏，
         // 直接卡 UI 帧；超过上限不入库。
         if (text.length > MAX_TEXT_CHARS) {
-            Log.w(TAG, "Clipboard text too large (${text.length} chars), skip")
+            FileLogger.w(TAG, "剪贴板文本超长 len=${text.length}（上限 $MAX_TEXT_CHARS），未入库")
             return
         }
         scope.launch {
@@ -748,7 +845,7 @@ class ClipboardManager private constructor(private val context: Context) {
                 FileLogger.e(TAG, "剪贴板入库失败: len=${text.length}", it)
                 return@launch
             }
-            FileLogger.e(TAG, "剪贴板入库: len=${text.length}")
+            FileLogger.i(TAG, "剪贴板入库: len=${text.length}")
             _clipboardChanged.emit(
                 ClipboardItem(
                     text = text,

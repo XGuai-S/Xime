@@ -1563,7 +1563,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private fun initClipboardManager() {
         // 这条是「剪贴板功能是否真的跑起来」的唯一入口标记：默认日志级别下
         // android.util.Log 不落盘，用户报「复制没进面板」时完全无从判断是否走到这里。
-        FileLogger.e(TAG, "initClipboardManager: starting")
+        FileLogger.i(TAG, "initClipboardManager: starting")
         try {
             clipboardManager = ClipboardManager.getInstance(this)
             // 单例在本进程只构造一次，而 onDestroy 会 release() 摘掉系统监听；
@@ -1591,7 +1591,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     )
                 }
             }
-            FileLogger.e(TAG, "initClipboardManager: done, listening=${clipboardManager.isListeningToSystemClipboard}")
+            FileLogger.i(TAG, "initClipboardManager: done, listening=${clipboardManager.isListeningToSystemClipboard}")
             startClipboardSyncIfEnabled()
             serviceScope.launch {
                 PluginManager.pluginInstancesFlow.collect {
