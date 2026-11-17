@@ -434,14 +434,24 @@ object BackupManager {
             val manifestsDir = SchemaManifestManager.getManifestsDir(filesDir)
             var entryCount = 0
             var dictSnapshotCount = 0
+            // 总量守卫：备份包是**外部输入**（用户从任意来源选的 zip / 远端下载的包），
+            // 恶意或损坏的包可以是 zip 炸弹（单个高压缩比条目、或数万小条目）。
+            // 无上限时 readBytes() 直接打爆常驻的输入法进程，或者把 /data 写满。
+            var totalBytes = 0L
             ZipInputStream(rawInput).use { zis ->
                 while (true) {
                     val entry = zis.nextEntry ?: break
                     if (entry.isDirectory) continue
                     val name = entry.name
+                    entryCount++
+                    if (entryCount > MAX_ENTRY_COUNT) {
+                        return Result.failure(
+                            Exception("备份包条目过多（> $MAX_ENTRY_COUNT），已中止")
+                        )
+                    }
                     if (name.startsWith(META_PREFIX)) {
                         val rel = name.removePrefix(META_PREFIX)
-                        val data = zis.readBytes()
+                        val data = zis.readBounded(MAX_META_ENTRY_BYTES)
                         when {
                             rel == "settings.json" -> prefsRestorer(PREFS_NAME_SETTINGS, data)
                             rel.startsWith("plugin_configs/") && rel.endsWith(".json") -> {
@@ -478,7 +488,7 @@ object BackupManager {
                             )
                             else -> { /* 未知元数据条目跳过（向前兼容） */ }
                         }
-                        entryCount++
+                        // 条目计数已在循环开头统一累加（含条目数上限守卫），此处不再重复
                         zis.closeEntry()
                         continue
                     }
@@ -512,7 +522,6 @@ object BackupManager {
                         if (!routed) {
                             File(filesDir, relName).writeText(text)
                         }
-                        entryCount++
                         zis.closeEntry()
                         continue
                     }
@@ -522,14 +531,26 @@ object BackupManager {
                             target.parentFile?.mkdirs()
                             target.writeText(text)
                         }
-                        entryCount++
                         zis.closeEntry()
                         continue
                     }
                     target.parentFile?.mkdirs()
-                    target.outputStream().use { zis.copyTo(it) }
+                    // 流式写入（不整包进内存），但累计总量防写满磁盘
+                    target.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = zis.read(buf)
+                            if (n < 0) break
+                            totalBytes += n
+                            if (totalBytes > MAX_TOTAL_BYTES) {
+                                return Result.failure(
+                                    Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
+                                )
+                            }
+                            out.write(buf, 0, n)
+                        }
+                    }
                     if (name.startsWith("sync/") && name.endsWith(".userdb.txt")) dictSnapshotCount++
-                    entryCount++
                     zis.closeEntry()
                 }
             }
@@ -543,6 +564,34 @@ object BackupManager {
     /** 元数据 id 安全性：非空且不含路径分隔符（防 marketplace/manifests 目录穿越）。 */
     private fun isSafeId(id: String): Boolean =
         id.isNotBlank() && !id.contains('/') && !id.contains('\\') && id != "." && id != ".."
+
+    /** 备份包条目数上限（正常完整备份约数百个文件，留足余量）。 */
+    private const val MAX_ENTRY_COUNT = 20_000
+
+    /** 单个 META 条目（settings.json / plugin_configs / manifests）的大小上限。 */
+    private const val MAX_META_ENTRY_BYTES = 32L * 1024 * 1024
+
+    /** 解压后总字节上限（防 zip 炸弹写满磁盘）。 */
+    private const val MAX_TOTAL_BYTES = 1_024L * 1024 * 1024
+
+    /**
+     * 有界读取一个 zip 条目：超过 [max] 直接抛异常中止恢复。
+     *
+     * 不能改用 `readBytes()`：它对高压缩比条目会一次性分配完整解压大小。
+     */
+    private fun java.util.zip.ZipInputStream.readBounded(max: Long): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = read(buf)
+            if (n < 0) break
+            total += n
+            if (total > max) throw java.io.IOException("备份包单条目超过 $max 字节上限")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
 
     /** 目标必须落在 baseDir 内（防元数据条目穿越），否则抛异常中止恢复。 */
     private fun writeChecked(target: File, baseDir: File, data: ByteArray) {

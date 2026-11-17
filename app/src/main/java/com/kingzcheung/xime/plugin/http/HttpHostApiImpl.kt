@@ -44,12 +44,26 @@ class HttpHostApiImpl(
 
         /** 流式拷贝缓冲（与 Okio 段大小一致，避免逐字节调用）。 */
         private const val COPY_BUFFER_BYTES = 64 * 1024
+
+        /**
+         * `host.http.request` 单次内联响应的上限（8MB）。
+         *
+         * 超过就走 `host.http.download`（流式落盘到 blob，不进 JS 堆）：
+         * 插件可以请求任意 URL，无上限时一个几百 MB 的响应就能把常驻的输入法进程打爆。
+         */
+        private const val MAX_INLINE_BODY_BYTES: Long = 8L * 1024 * 1024
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        // **禁止自动跟随重定向**：授权（NetworkPolicy 白名单）只校验首个 URL 的 host，
+        // 若服务端返回 302 → http://attacker/，OkHttp 会静默把请求（含 Authorization
+        // 头与 body）发到未授权域名，等于绕过整个插件网络授权机制。
+        // 重定向交回插件自行决定：它会在下一跳再次经过 authorize()。
+        .followRedirects(false)
+        .followSslRedirects(false)
         .addInterceptor { chain ->
             val request = chain.request()
             Log.d(TAG, "[$pluginId] >>> ${request.method} ${request.url}")
@@ -248,10 +262,27 @@ class HttpHostApiImpl(
         headers.entries.firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }?.value
             ?: "application/octet-stream"
 
+    /**
+     * 响应转交插件侧。
+     *
+     * 加大小上限：`body.bytes()` 会把整个响应读进堆，插件请求一个几百 MB 的文件即可
+     * 让输入法常驻进程 OOM。大文件应走 `host.http.download` 的 blob 通道（流式落盘）。
+     */
     private fun toHttpResponse(response: Response): HttpResponse {
         val headers = HashMap<String, String>()
         response.headers.forEach { (k, v) -> headers[k] = v }
+        val declared = response.body.contentLength()
+        if (declared > MAX_INLINE_BODY_BYTES) {
+            throw java.io.IOException(
+                "响应体过大（${declared} 字节，上限 $MAX_INLINE_BODY_BYTES），请改用 host.http.download"
+            )
+        }
         val bytes = response.body.bytes()
+        if (bytes.size > MAX_INLINE_BODY_BYTES) {
+            throw java.io.IOException(
+                "响应体过大（${bytes.size} 字节，上限 $MAX_INLINE_BODY_BYTES），请改用 host.http.download"
+            )
+        }
         return HttpResponse(
             status = response.code,
             headers = headers,

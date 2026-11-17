@@ -301,6 +301,19 @@ object PromptBuilder {
         return "<chat_context>\n${sanitizedLines.joinToString("\n")}\n</chat_context>\n"
     }
 
+    /**
+     * 进入 XML 包裹块的动态文本统一转义。
+     *
+     * 为什么必须有：prompt 用 `<selected_text>…</selected_text>` 这类标签界定「数据区」，
+     * 模型据此区分数据与指令。若用户选中的文本本身就含 `</selected_text>`，数据块会被
+     * 提前闭合，后续内容就被当成指令执行；而语音编辑的结果会被 commitPipelineOutput /
+     * replaceFullEditorTextSafely **直接上屏**，等于让用户输入的内容污染自己的输入。
+     * chat_context / editor_draft / user_bottom_line 早已走这个转义，只有
+     * selected_text / voice_instruction / raw_speech_transcript 漏了。
+     */
+    private fun esc(s: String): String =
+        ChatScreenContextExtractor.sanitizeChatContextTagEscape(s)
+
     fun buildSpeakToEditPrompts(
         selectedText: String,
         voiceInstruction: String,
@@ -314,9 +327,9 @@ object PromptBuilder {
             append(sceneBlock)
             append(dictBlock)
             append("<selected_text>\n")
-            append(selectedText)
+            append(esc(selectedText))
             append("\n</selected_text>\n\n<voice_instruction>\n")
-            append(voiceInstruction)
+            append(esc(voiceInstruction))
             append("\n</voice_instruction>\n\n请直接输出替换后的文本结果：")
         }
 
@@ -338,7 +351,7 @@ object PromptBuilder {
             append(sceneBlock)
             append(dictBlock)
             append("<raw_speech_transcript>\n")
-            append(rawSpeech)
+            append(esc(rawSpeech))
             append("\n</raw_speech_transcript>\n\n请直接输出【$cleanLang】译文：")
         }
 

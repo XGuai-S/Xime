@@ -268,6 +268,24 @@ class WavAudioRecorder(private val context: Context) {
             try {
                 while (isActive) {
                     val readCount = record.read(shortBuf, 0, shortBuf.size)
+                    // read() 返回 0 或负数时**必须处理**，否则是紧循环：
+                    // 负数代表设备错误（ERROR_INVALID_OPERATION=-3 / ERROR_DEAD_OBJECT=-6 /
+                    // ERROR_BAD_VALUE=-2），常见于录音中被系统收回麦克风（来电、另一个应用
+                    // 申请 MIC、Android 14+ 后台 FGS 抢占）。
+                    // 旧实现只判 >0，负值/零值直接进入下一轮 → 单核 100% 占用并持续耗电，
+                    // 同时波形与计时冻结，用户完全看不出出错。
+                    if (readCount < 0) {
+                        com.kingzcheung.xime.util.FileLogger.e(
+                            "WavAudioRecorder",
+                            "AudioRecord.read 返回 $readCount（录音设备失效），中止本次录音"
+                        )
+                        break
+                    }
+                    if (readCount == 0) {
+                        // 暂无数据（正常抖动）：让出线程，不占满 CPU
+                        kotlinx.coroutines.delay(20)
+                        continue
+                    }
                     if (readCount > 0) {
                         val now = System.currentTimeMillis()
                         if (now < ignoreAudioUntilMs) {

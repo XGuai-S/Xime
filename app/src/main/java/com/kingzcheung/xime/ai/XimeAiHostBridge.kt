@@ -2,6 +2,7 @@ package com.kingzcheung.xime.ai
 
 import android.app.Application
 import android.view.inputmethod.InputConnection
+import com.kingzcheung.xime.ai.audio.WavAudioRecorder
 import com.kingzcheung.xime.ai.data.HistoryRetention
 import com.kingzcheung.xime.ai.ime.ImeHostCallbacks
 import com.kingzcheung.xime.ai.ime.ImeUiState
@@ -145,10 +146,34 @@ class XimeAiHostBridge(
         runCatching { com.kingzcheung.xime.clipboard.ClipboardManager.getInstance(app).copyToSystemClipboard(text) }
     }
 
-    override fun archiveWavForHistory(wavFile: File, retention: HistoryRetention): File = wavFile
+    /**
+     * 归档本次录音，返回**已归档**文件的路径（历史记录据此回放）。
+     *
+     * 旧实现 `= wavFile` 是空实现：直接把缓存里的 `last_typefree_voice.wav` 返回给历史记录，
+     * 而该文件每次录音都会被 `setLength(0)` 覆盖 —— 于是历史里所有条目都指向同一份文件，
+     * 点开任意一条播放的都是「最近一次」录音（串音）。录音器那边本来就有完整实现
+     * （复制到 files/voice_history/voice_<ts>_<rand>.wav + 保留期清理），这里直接委托即可。
+     */
+    override fun archiveWavForHistory(wavFile: File, retention: HistoryRetention): File =
+        runCatching {
+            WavAudioRecorder.archiveWavForHistory(app.filesDir, wavFile, retention)
+        }.getOrElse { wavFile }
 
+    /**
+     * 「上一次录音」文件 —— 必须与录音器实际写入的路径一致。
+     *
+     * 旧实现指向 `ai_last_recording.wav`，但全仓库没有任何地方写这个文件名（录音器写的是
+     * `last_typefree_voice.wav`），导致 `hasRetryWavFile()` 恒为 false：
+     * 错误态永远不提供「重试」，`retryLastAudio()` 恒走「未找到可重试的最近录音文件」。
+     * 统一委托给录音器，避免两处各写一份文件名再次漂移。
+     */
     override fun getLastRecordingWavFile(): File =
-        File(app.cacheDir, "ai_last_recording.wav")
+        WavAudioRecorder.getLastRecordingFile(app)
 
-    override fun hasRetryWavFile(): Boolean = getLastRecordingWavFile().exists()
+    /** 只有存在且大于 WAV 头（44 字节）才算有可重试的有效录音。 */
+    override fun hasRetryWavFile(): Boolean =
+        runCatching {
+            val f = getLastRecordingWavFile()
+            f.exists() && f.length() > 44L
+        }.getOrDefault(false)
 }

@@ -140,11 +140,33 @@ class PluginsSettingsViewModel(application: Application) : AndroidViewModel(appl
         }
     }
     
+    /**
+     * 启用 / 禁用插件。
+     *
+     * 必须**同时**写 registry 与 prefs，且 registry 才是权威源：
+     * `PluginLifecycleManager.loadEnabledPlugins()` 启动时只读 `registry.enabled`，
+     * 而旧实现这里只写了 `SettingsPreferences`（prefs 里的 `plugin_enabled_<id>`），
+     * 于是「在插件中心关掉插件 → 重启应用」之后插件**仍会被实例化并执行 JS**
+     * （建 WS/SSE、后台定时器、按 manifest 读剪贴板），只是业务调用被上层过滤掉 ——
+     * 用户以为自己关掉了，实际代码还在跑。
+     *
+     * prefs 那份保留：其它读取路径（如按能力取插件、备份设置页的单选）仍在用它。
+     */
     fun setPluginEnabled(pluginId: String, enabled: Boolean) {
+        // prefs 同步写：UI 立即反映，且其它读取路径不受影响
         SettingsPreferences.setPluginEnabled(context, pluginId, enabled)
-        
+
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                // registry 是启动加载的唯一权威源，必须同步更新（内部含 flushToDisk）
+                runCatching { PluginManager.setPluginEnabled(pluginId, enabled) }
+                    .onFailure {
+                        com.kingzcheung.xime.util.FileLogger.e(
+                            "PluginsVM",
+                            "写插件注册表失败 id=$pluginId enabled=$enabled（重启后该状态会丢失）",
+                            it
+                        )
+                    }
                 if (enabled) {
                     PluginManager.launchPlugin(pluginId)
                 } else {
