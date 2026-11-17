@@ -867,12 +867,24 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     val isLetter = key.matches(LETTER_REGEX)
                     val isChineseMode = !service.uiState.value.isAsciiMode
                     if (isLetter && isChineseMode) {
-                        // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进面板输入框。
+                        // 中文模式：字母进 Rime 拼音组合，候选栏选词后经 commitText 重定向进
+                        // 面板/搜索框（commitTextSilently 按 clipboardSearchFocused 分流）。
                         // 入队处理，保持与普通按键同一串行通道（原实现直接在主线程阻塞等锁）。
                         val keyCode = key.lowercase()[0].code
                         postRimeJob {
                             val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
-                            if (result.processed) sendTransformedResult(result)
+                            if (result.processed) {
+                                // 引擎自动上屏（四码唯一、简繁转换等）的增量必须照常提交：
+                                // 主流程在 sendTransformedResult 之前就是这么做的（见
+                                // handleNormalEngineKey）。这里漏掉会让「四码唯一自动上屏」在
+                                // 面板/搜索态直接失效——按键被消费、字却没进输入框。
+                                val committed = result.committedText
+                                if (committed.isNotEmpty()) {
+                                    service.markCandidateSelection(committed)
+                                    withContext(Dispatchers.Main) { service.commitText(committed) }
+                                }
+                                sendTransformedResult(result)
+                            }
                         }
                         return true
                     }

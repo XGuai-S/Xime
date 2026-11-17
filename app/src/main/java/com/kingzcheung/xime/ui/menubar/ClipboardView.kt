@@ -1049,6 +1049,7 @@ fun ClipboardTabContent(
                 if (item.isImage) {
                     ClipboardImageCard(
                         item = item,
+                        isPinned = item.isPinned,
                         highlighted = highlighted,
                         bgColor = itemBgColor,
                         textColor = textColor,
@@ -1066,6 +1067,7 @@ fun ClipboardTabContent(
                     GridItemCard(
                         text = item.text,
                         queryTokens = queryTokens,
+                        isPinned = item.isPinned,
                         highlighted = highlighted,
                         bgColor = itemBgColor,
                         textColor = textColor,
@@ -1100,6 +1102,8 @@ internal fun clipboardImageLabel(item: ClipboardItem): String {
 @Composable
 fun ClipboardImageCard(
     item: ClipboardItem,
+    /** 置顶条目：右上角挂一枚图钉角标。 */
+    isPinned: Boolean = false,
     highlighted: Boolean,
     bgColor: Color,
     textColor: Color,
@@ -1169,6 +1173,24 @@ fun ClipboardImageCard(
                 )
             }
         }
+        // 置顶角标：缩略图与占位两条路径共用（画在缩略图之上，带底色保证可读）
+        if (isPinned) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(accentColor.copy(alpha = 0.85f))
+                    .padding(1.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PushPin,
+                    contentDescription = "已置顶",
+                    tint = Color.White,
+                    modifier = Modifier.size(10.dp)
+                )
+            }
+        }
     }
 }
 
@@ -1177,6 +1199,8 @@ fun GridItemCard(
     text: String,
     /** 搜索关键词：命中片段用强调色 + 半粗显示，一眼看出为什么匹配。 */
     queryTokens: List<String> = emptyList(),
+    /** 置顶条目：右上角挂一枚图钉角标（列表已按置顶优先排序，这里补可视化标识）。 */
+    isPinned: Boolean = false,
     highlighted: Boolean,
     bgColor: Color,
     textColor: Color,
@@ -1220,14 +1244,27 @@ fun GridItemCard(
         val annotated = remember(text, queryTokens, accentColor) {
             highlightMatches(text, queryTokens, accentColor)
         }
-        Text(
-            text = annotated,
-            color = textColor,
-            fontSize = 14.sp,
-            lineHeight = 19.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        // 置顶角标：卡片高度只有 62dp，图钉画在文本块右上角（Box 叠放，不额外占行高）
+        Box {
+            Text(
+                text = annotated,
+                color = textColor,
+                fontSize = 14.sp,
+                lineHeight = 19.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (isPinned) {
+                Icon(
+                    imageVector = Icons.Default.PushPin,
+                    contentDescription = "已置顶",
+                    tint = accentColor,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(12.dp)
+                )
+            }
+        }
     }
 }
 
