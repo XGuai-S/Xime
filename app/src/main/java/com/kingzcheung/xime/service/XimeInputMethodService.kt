@@ -1528,9 +1528,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
     
     private fun initClipboardManager() {
-        Log.d(TAG, "initClipboardManager: Starting initialization...")
+        // 这条是「剪贴板功能是否真的跑起来」的唯一入口标记：默认日志级别下
+        // android.util.Log 不落盘，用户报「复制没进面板」时完全无从判断是否走到这里。
+        FileLogger.e(TAG, "initClipboardManager: starting")
         try {
             clipboardManager = ClipboardManager.getInstance(this)
+            // 单例在本进程只构造一次，而 onDestroy 会 release() 摘掉系统监听；
+            // 服务重建（切输入法 / 被系统回收 / OTA 后重启服务）必须重新挂上，
+            // 否则剪贴板采集永久失效且无任何日志痕迹。
+            clipboardManager.ensureListening()
             clipboardItemsState.value = clipboardManager.clipboardItems.value
             quickSendItemsState.value = clipboardManager.quickSendItems.value
 
@@ -1552,6 +1558,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     )
                 }
             }
+            FileLogger.e(TAG, "initClipboardManager: done, listening=${clipboardManager.isListeningToSystemClipboard}")
             startClipboardSyncIfEnabled()
             serviceScope.launch {
                 PluginManager.pluginInstancesFlow.collect {
@@ -3773,6 +3780,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         window?.window?.decorView?.post {
             KeyboardThemes.refreshDynamicSchemes(this)
             clipboardSyncBridge?.pullOnce()
+            // 键盘刚弹出 = 输入法现在有窗口焦点，是唯一可靠的剪贴板读取时机。
+            // 用户在别的 App 里点复制时本进程没有焦点，OnPrimaryClipChangedListener
+            // 虽被回调但 primaryClip 返回 null（Android 10+ 后台读限制），
+            // 内容就丢了。这里补采一次把那一段捡回来（addItem 按文本去重，不会重复入库）。
+            if (::clipboardManager.isInitialized) {
+                clipboardManager.captureCurrentClipboardNow()
+            }
         }
     }
     

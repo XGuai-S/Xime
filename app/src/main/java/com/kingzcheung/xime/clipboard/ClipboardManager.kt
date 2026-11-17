@@ -16,6 +16,7 @@ import com.kingzcheung.xime.clipboard.db.ClipboardDatabase
 import com.kingzcheung.xime.clipboard.db.ClipboardEntry
 import com.kingzcheung.xime.plugin.core.api.ClipboardProfile
 import com.kingzcheung.xime.settings.SettingsPreferences
+import com.kingzcheung.xime.util.FileLogger
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -143,12 +144,17 @@ class ClipboardManager private constructor(private val context: Context) {
     private fun readClipboard() {
         try {
             val clipData = androidClipboardManager.primaryClip
+            // 关键诊断：后台读剪贴板在 Android 10+ 会返回 null（非焦点应用）。
+            // 这条日志是「复制了没进面板」唯一可定位的线索，必须写进 xime 日志文件。
+            if (clipData == null) {
+                FileLogger.e(TAG, "primaryClip=null（后台限制或剪贴板为空）")
+            }
             if (clipData != null && clipData.itemCount > 0) {
                 val description = clipData.description
 
                 // 敏感剪贴板（密码管理器等，API 33+ 系统标记）不入库
                 if (isSensitiveClip(description)) {
-                    Log.d(TAG, "Sensitive clip ignored")
+                    FileLogger.d(TAG, "Sensitive clip ignored")
                     clearSelfClipboardImage()
                     return
                 }
@@ -157,14 +163,14 @@ class ClipboardManager private constructor(private val context: Context) {
                 if (imageUri != null) {
                     // 本应用自己写回的图片（FileProvider URI）：已入库，跳过采集避免重复读盘
                     if (isSelfProviderUri(imageUri)) {
-                        Log.d(TAG, "Self-written image clip, skip capture")
+                        FileLogger.d(TAG, "Self-written image clip, skip capture")
                         return
                     }
                     // 非文本剪贴板：此前写回的系统剪贴板图片保护集失效
                     clearSelfClipboardImage()
                     // 设置页关闭"收集图片"时，图片剪贴板整体跳过（文本分支不受影响）
                     if (!SettingsPreferences.isClipboardImageCaptureEnabled(context)) {
-                        Log.d(TAG, "Image capture disabled by settings, skip")
+                        FileLogger.d(TAG, "Image capture disabled by settings, skip")
                         return
                     }
                     captureImage(imageUri, description)
@@ -187,7 +193,7 @@ class ClipboardManager private constructor(private val context: Context) {
                     if (selfText != null) {
                         selfWrittenText = null
                         if (selfText == text) {
-                            Log.d(TAG, "Self-written text clip, skip capture")
+                            FileLogger.d(TAG, "Self-written text clip, skip capture")
                             return
                         }
                     }
@@ -197,11 +203,11 @@ class ClipboardManager private constructor(private val context: Context) {
             }
             // 不做兜底重试（用户约定）：延迟重试会与真实回调交错，把一次性
             // selfWrittenText 标记提前吃掉，导致自写内容被重新入库。
-            Log.w(TAG, "Clipboard read returned no usable item")
+            FileLogger.w(TAG, "Clipboard read returned no usable item")
         } catch (e: SecurityException) {
-            Log.w(TAG, "Cannot read clipboard: missing permission", e)
+            FileLogger.w(TAG, "Cannot read clipboard: missing permission", e)
         } catch (e: Exception) {
-            Log.e(TAG, "Unexpected error reading clipboard", e)
+            FileLogger.e(TAG, "Unexpected error reading clipboard", e)
         }
     }
 
@@ -660,8 +666,10 @@ class ClipboardManager private constructor(private val context: Context) {
         private set
 
     /**
-     * 注册系统剪贴板变化监听（采集入口，单例仅在 init 调用一次）。
+     * 注册系统剪贴板变化监听。
+     *
      * 幂等：系统侧重复注册同一 listener 会让每次剪贴板变化回调两次。
+     * 除 init 外，[ensureListening] 也会调用它（服务重建后必须重新挂上）。
      */
     private fun startListening() {
         if (isListeningToSystemClipboard) return
@@ -669,7 +677,33 @@ class ClipboardManager private constructor(private val context: Context) {
         isListeningToSystemClipboard = true
     }
 
-    /** 注销系统剪贴板监听（服务销毁时调用）。 */
+    /**
+     * 确保监听已注册（可重复调用）。输入法服务每次重建都会调用：
+     * 单例在本进程内只构造一次，而 [release] 在服务销毁时会把监听摘掉；
+     * 若不在这里补回来，切一次输入法/被系统回收后**剪贴板采集永久失效**
+     * （真机症状：复制任何内容都不进剪贴板面板，且没有任何日志）。
+     */
+    /**
+     * 主动补采一次系统剪贴板。
+     *
+     * 为什么需要：Android 10+ 限制「非焦点应用读剪贴板」，监听器虽然会回调，
+     * 但回调发生时输入法窗口往往还没显示（用户刚在别的 App 里点复制），
+     * `primaryClip` 直接返回 null → 内容丢失。
+     * 键盘弹出时输入法已获得焦点，是唯一可靠的读取时机，于是在 [onWindowShown]
+     * 等可见性回调里补采一次，把"复制时没读到"的内容捡回来。
+     *
+     * 幂等：同一内容由 [addItem] 的 upsertAndTrim 按文本去重，重复采集不会产生新行。
+     */
+    fun captureCurrentClipboardNow() {
+        readClipboard()
+    }
+
+    fun ensureListening() {
+        startListening()
+        FileLogger.e(TAG, "Clipboard listener ensured (listening=$isListeningToSystemClipboard)")
+    }
+
+    /** 注销系统剪贴板监听（服务销毁时调用；下次由 [ensureListening] 重新挂上）。 */
     fun release() {
         if (!isListeningToSystemClipboard) return
         runCatching { androidClipboardManager.removePrimaryClipChangedListener(clipboardListener) }
@@ -685,7 +719,15 @@ class ClipboardManager private constructor(private val context: Context) {
             return
         }
         scope.launch {
-            dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+            runCatching {
+                dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+            }.onFailure {
+                // 入库失败必须留痕：用户只会看到"复制了没进面板"，无从判断是采集没触发
+                // 还是写库失败。写进 xime 日志文件才可排查。
+                FileLogger.e(TAG, "剪贴板入库失败: len=${text.length}", it)
+                return@launch
+            }
+            FileLogger.e(TAG, "剪贴板入库: len=${text.length}")
             _clipboardChanged.emit(
                 ClipboardItem(
                     text = text,

@@ -1032,11 +1032,7 @@ fun ClipboardTabContent(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // 置顶区与普通区之间的分隔：列表按 isPinned DESC 排序，用户在首个非置顶项
-            // 之前看到一条分割线，才知道"上面这些是固定住的、不会被新内容顶掉"。
-            // 放在 item 内部（而不是插入虚拟行）可以避免破坏 key 稳定与 index%2 的左右列判定。
             itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
-                val showPinnedDivider = index > 0 && items[index - 1].isPinned && !item.isPinned
                 // 图片文件解析含磁盘 IO：条目重组很频繁，按条目 id 缓存一次即可。
                 val itemFile = remember(item.id) { imageFileOf?.invoke(item) }
                 val highlighted = isMultiSelect && item.id in selectedIds
@@ -1061,27 +1057,6 @@ fun ClipboardTabContent(
                         val ok = ClipboardDragSender.startDragAndDrop(view, item, imageFileOf?.invoke(item))
                         if (ok) onDragSendStarted?.invoke()
                         ok
-                    }
-                }
-                Column(modifier = Modifier.fillMaxWidth()) {
-                if (showPinnedDivider) {
-                    // 跨两列的分隔线：Text 提示 + 细线，明确标示置顶区结束
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "普通",
-                            color = subTextColor,
-                            fontSize = 10.sp
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        HorizontalDivider(
-                            modifier = Modifier.weight(1f),
-                            color = subTextColor.copy(alpha = 0.35f)
-                        )
                     }
                 }
                 if (item.isImage) {
@@ -1118,11 +1093,18 @@ fun ClipboardTabContent(
                         onStartDrag = onStartDrag,
                     )
                 }
-                }
             }
         }
     }
 }
+
+/**
+ * 置顶条目的行首标记字形。
+ *
+ * 选 U+2691（⚑ BLACK FLAG）而不是 `📌`：后者在多数 ROM 上按彩色 emoji 渲染，
+ * 会撑高行距并破坏 14sp 正文的单色协调；⚑ 是单色等宽字形，跟正文混排不跳。
+ */
+private const val PIN_GLYPH = "⚑"
 
 /** 空回调：非多选态占位，使 tolerantClick 保持长按等待但不执行动作。 */
 private val noOpCallback: () -> Unit = {}
@@ -1284,28 +1266,32 @@ fun GridItemCard(
         val annotated = remember(text, queryTokens, accentColor) {
             highlightMatches(text, queryTokens, accentColor)
         }
-        // 置顶标识放在**文字行首**（Row 内联），不做浮层：
-        // 浮层叠在右上角会盖住换行后的字（截图里「1.01」「商业中心」都被图钉压住）。
-        // 行首内联只占 12dp + 4dp 间距，且不会与任何字形重叠。
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (isPinned) {
-                Icon(
-                    imageVector = Icons.Default.PushPin,
-                    contentDescription = "已置顶",
-                    tint = accentColor,
-                    modifier = Modifier.size(11.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
+        // 置顶标识：图钉直接作为文本的第一个字符（AnnotatedString 前缀），
+        // 不用 Row 并排也不用浮层。并排会把可用宽度让出一截（长文本被挤成三行），
+        // 浮层又会盖住换行后的字——作为字形前缀参与排版，两者都不会发生。
+        val withPin = remember(annotated, isPinned, accentColor) {
+            if (!isPinned) {
+                annotated
+            } else {
+                buildAnnotatedString {
+                    pushStyle(
+                        SpanStyle(color = accentColor)
+                    )
+                    append(PIN_GLYPH)
+                    pop()
+                    append(' ')
+                    append(annotated)
+                }
             }
-            Text(
-                text = annotated,
-                color = textColor,
-                fontSize = 14.sp,
-                lineHeight = 19.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
         }
+        Text(
+            text = withPin,
+            color = textColor,
+            fontSize = 14.sp,
+            lineHeight = 19.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
