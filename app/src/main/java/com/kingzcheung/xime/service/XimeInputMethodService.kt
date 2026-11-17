@@ -425,6 +425,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *  主线程写（onStartInput）、key-processing 线程与 UI 组合同步读，必须 volatile。 */
     @Volatile
     private var editorSecret: Boolean = false
+
+
     /** 宿主声明"不要个性化学习"：不记词频/造词/按键日志，但联想与候选照常。 */
     @Volatile
     private var editorNoLearn: Boolean = false
@@ -1436,19 +1438,37 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * false，用户正打字时突然被替换成剪贴板条目，表现为「复制的文字/图片反复出现在
      * 候选栏」（每复制一次、每进一个输入框都来一次）。
      */
+    /**
+     * 剪贴板候选是否允许占据候选栏。
+     *
+     * 只判两件事：用户正在组字（有编码/组合态）时绝不让路；候选栏不是空闲态（已是
+     * 剪贴板展示）时由 [showClipboardCandidates] 自己判断是否刷新。
+     *
+     * 为什么需要这条闸门：旧实现只要剪贴板一变就无条件覆盖候选栏并把 isComposing 置
+     * false，用户正打字时突然被替换成剪贴板条目，表现为「复制的文字/图片反复出现在
+     * 候选栏」（每复制一次、每进一个输入框都来一次）。
+     *
+     * 密码框限制已按用户指示移除（2026-11-18）：此前的 `TYPE_NULL` 误判导致
+     * Compose 输入框（Eta、阅读器等）剪贴板候选永远不显示。注意这是用户知情后的选择：
+     * 密码框里剪贴板内容会明文挂在候选栏上。
+     */
     private fun canShowClipboardInCandidateBar(): Boolean {
-        // 密码框不显示剪贴板：从密码管理器复制来的密码会以明文挂在候选栏上
-        // （共享屏幕、投屏、肩窥可见），且点错会把旧密码提交进当前框。
-        if (isSecretEditor()) return false
         val cs = candidateState.value
         // 正在组字（有编码或组合态）／有联想候选 → 剪贴板不得抢占
-        if (cs.isComposing) return false
-        if (cs.inputText.isNotEmpty()) return false
+        if (cs.isComposing) {
+            FileLogger.d(TAG, "剪贴板候选不展示：正在组字")
+            return false
+        }
+        if (cs.inputText.isNotEmpty()) {
+            FileLogger.d(TAG, "剪贴板候选不展示：候选栏有编码 inputText=${cs.inputText}")
+            return false
+        }
         return true
     }
 
     /** 把 [items] 写进候选栏剪贴板展示态（空则退回空闲态）。调用方须已过 [canShowClipboardInCandidateBar]。 */
     private fun showClipboardCandidates(items: List<com.kingzcheung.xime.clipboard.ClipboardItem>) {
+        FileLogger.d(TAG, "剪贴板候选展示：count=${items.size} ids=${items.map { it.id }}")
         recentClipboardItemsState.value = items
         // 记录当前展示的条目 id，供按键输入后统一标记消费
         synchronized(showingClipboardIds) {
@@ -1486,6 +1506,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     ensureClipboardManagerInitialized()
     try {
         val items = clipboardManager.getRecentItems()
+        FileLogger.d(TAG, "剪贴板候选初始化：count=${items.size} ids=${items.map { it.id }}")
         recentClipboardItemsState.value = items
         if (canShowClipboardInCandidateBar()) showClipboardCandidates(items)
     } catch (e: Exception) {
@@ -1506,7 +1527,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     suppressed = true,
                     freshItemCount = freshCount,
                 )
-                if (!show) return@collect
+                if (!show) {
+                    FileLogger.d(TAG, "剪贴板候选不展示：上屏回声抑制中（count=${items.size} fresh=$freshCount）")
+                    return@collect
+                }
                 suppressClipboardCandidateAutoShow = false
             }
             // 新复制内容 / 状态刷新：候选栏空闲时展示（正在打字则不抢占）
