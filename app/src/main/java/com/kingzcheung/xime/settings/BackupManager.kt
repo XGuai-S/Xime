@@ -185,13 +185,16 @@ object BackupManager {
      *
      * @return 成功 true；失败返回错误消息
      */
-    suspend fun restore(context: Context, plugin: BackupPlugin, id: String): Result<Unit> {
+    suspend fun restore(context: Context, plugin: BackupPlugin, id: String): Result<Unit> =
+        backupMutex.withLock {
+        // 恢复必须与备份互斥：否则 AutoBackup 的定时检查可能在「恢复写到一半」时
+        // 把半新半旧的 rime 目录打包上传，覆盖掉云端唯一一份好备份。
         val download = plugin.pullBackup(id)
             ?: run {
                 FileLogger.w(TAG, "从远端下载备份包失败（id=$id）")
-                return Result.failure(Exception("下载备份包失败"))
+                return@withLock Result.failure(Exception("下载备份包失败"))
             }
-        return try {
+        return@withLock try {
             val outcome = restoreFromArchive(context, download.file)
             if (outcome.isSuccess) {
                 FileLogger.i(TAG, "备份恢复完成：${outcome.getOrNull()}")
@@ -203,21 +206,25 @@ object BackupManager {
             // 恢复完释放落盘句柄（删除宿主缓存文件；幂等）
             plugin.releaseBackup(download.blobId)
         }
-    }
+        }
 
     /**
      * 从本地文件导入完整方案包（覆盖式恢复；[isBackupPackage] 判定后的入口）。
      *
      * 大包不走内存：先流式拷进 cacheDir 临时文件再解包，用完删除。
      */
-    suspend fun importLocal(context: Context, uri: android.net.Uri): Result<Unit> {
-        val temp = File(File(context.cacheDir, "local-import").apply { mkdirs() }, "package.zip")
-        return try {
+    suspend fun importLocal(context: Context, uri: android.net.Uri): Result<Unit> =
+        backupMutex.withLock {
+        // 与 restore 同理：导入也是覆盖式写入 files/rime、files/plugins 与 prefs，
+        // 必须与自动备份互斥，且临时文件用唯一名（旧实现固定叫 package.zip，
+        // 两次导入并发会互相踩）。
+        val temp = File.createTempFile("local-import-", ".zip", context.cacheDir)
+        return@withLock try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 temp.outputStream().use { output -> input.copyTo(output) }
-            } ?: return Result.failure(Exception("无法读取所选文件"))
+            } ?: return@withLock Result.failure(Exception("无法读取所选文件"))
             if (!isBackupPackage(temp)) {
-                return Result.failure(
+                return@withLock Result.failure(
                     IllegalArgumentException("这不是完整方案包（缺少 ${META_PREFIX} 元数据）；词条快照请用「导入快照」")
                 )
             }
@@ -228,7 +235,7 @@ object BackupManager {
         } finally {
             temp.delete()
         }
-    }
+        }
 
     /** 判定一个 zip 是否是本应用的备份包（看中央目录里有没有 `_xime_backup/` 条目，不解压）。 */
     fun isBackupPackage(archive: File): Boolean {
@@ -445,7 +452,17 @@ object BackupManager {
                             }
                             rel == "plugins.xml" -> writeChecked(File(filesDir, "plugins.xml"), filesDir, data)
                             // v3 插件注册表（安装记录 + 启用状态）：与插件包同档（完整方案）
-                            rel == "plugins.json" -> writeChecked(File(filesDir, "plugins.json"), filesDir, data)
+                            // H2：恢复备份不等于信任备份。
+                            // 包内 plugins.json 带着 enabled=true 与安装记录，PluginLifecycleManager
+                            // 只在启动时按 registry.enabled 加载 → 恢复一个第三方给的「完整方案包」
+                            // 就等于装了一堆会自启的 JS 插件；再叠加同包里的 plugin_net_auth_*，
+                            // 攻击者域名还直接处于「用户已授权」状态，完全绕过插件中心与网络授权 UI。
+                            // 这里强制把每个插件置为未启用，由用户恢复后自行确认开启。
+                            rel == "plugins.json" -> writeChecked(
+                                File(filesDir, "plugins.json"),
+                                filesDir,
+                                disableAllPluginsInRegistry(data)
+                            )
                             // 方案清单（文件所有权/校验）：完整方案档随方案本体一起恢复
                             rel == SCHEME_REGISTRY_ENTRY -> writeChecked(
                                 SchemaManifestManager.getRegistryFile(filesDir), filesDir, data
@@ -580,11 +597,31 @@ object BackupManager {
         return root.toString()
     }
 
+    /**
+     * 恢复时必须丢弃的设置键（H2）。
+     *
+     * 这些键代表「用户对某个插件/域名的显式授权」或「安全开关」，
+     * 让它们随备份包一起还原，等于让备份包自行授予权限：
+     * - `plugin_net_auth_*` / `plugin_net_pending_*`：插件网络域名白名单
+     * - `plugin_enabled_*`：插件启用状态（与 registry 双写，见生命周期加载逻辑）
+     * - `plugin_dev_mode*`：插件开发模式（会放开 exported 安装入口）
+     * 恢复后一律回到「未授权」，由用户在插件中心逐条重新确认。
+     */
+    private val RESTORE_PREFS_SENSITIVE_KEY = Regex(
+        "^plugin_(net_auth|net_pending|enabled|dev_mode)"
+    )
+
     /** 按 [prefsToJson] 的类型标注恢复 prefs（合并写，不删除备份中不存在的新增键）。 */
     fun restorePrefsJson(prefs: SharedPreferences, json: ByteArray) {
         val root = org.json.JSONObject(json.toString(Charsets.UTF_8))
         val editor = prefs.edit()
+        var skipped = 0
         for (key in root.keys()) {
+            // 敏感授权键不随包恢复：备份包不可信，不能让它自带权限。
+            if (RESTORE_PREFS_SENSITIVE_KEY.containsMatchIn(key)) {
+                skipped++
+                continue
+            }
             val entry = root.optJSONObject(key) ?: continue
             when (entry.optString("t")) {
                 "b" -> editor.putBoolean(key, entry.getBoolean("v"))
@@ -599,6 +636,37 @@ object BackupManager {
             }
         }
         editor.apply()
+        if (skipped > 0) {
+            FileLogger.w(TAG, "恢复设置：已跳过 $skipped 个插件授权/启用类敏感键（需用户重新确认）")
+        }
+    }
+
+    /**
+     * 把插件注册表里所有插件的 `enabled` 置为 false（H2）。
+     *
+     * 解析失败时返回**空注册表**（= 该备份包里的插件一个都不装），
+     * 宁可让用户重装插件，也不让一个损坏/伪造的 registry 变成自启入口。
+     */
+    private fun disableAllPluginsInRegistry(data: ByteArray): ByteArray {
+        return try {
+            val json = org.json.JSONObject(String(data, Charsets.UTF_8))
+            val array = json.optJSONArray("plugins")
+            var count = 0
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val p = array.optJSONObject(i) ?: continue
+                    if (p.optBoolean("enabled", false)) count++
+                    p.put("enabled", false)
+                }
+            }
+            if (count > 0) {
+                FileLogger.w(TAG, "恢复插件注册表：已将 $count 个插件置为未启用，需用户重新开启")
+            }
+            json.toString().toByteArray(Charsets.UTF_8)
+        } catch (e: Exception) {
+            FileLogger.e(TAG, "恢复插件注册表解析失败，改为空注册表（不安装任何插件）", e)
+            "{}".toByteArray(Charsets.UTF_8)
+        }
     }
 
     /**

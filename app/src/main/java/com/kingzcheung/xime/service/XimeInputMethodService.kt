@@ -247,7 +247,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
         }
         serviceScope.launch(Dispatchers.Main) {
-            uiEventChannel.consumeEach { work -> work() }
+            uiEventChannel.consumeEach { work ->
+                // 必须在这一层兜住：serviceScope 是 SupervisorJob + Main 且没有
+                // CoroutineExceptionHandler，UI 刷新里任何异常（宿主 InputConnection 抛
+                // DeadObjectException、setComposingText 到已销毁的编辑框、插件 transform
+                // 内部抛错）都会冒泡到线程默认处理器 → 输入法进程直接崩溃。
+                // 更严重的是：consumeEach 一旦因异常终止，之后所有候选栏刷新永久失效
+                // （直到服务重建），表现为「打字没候选」。所以这里吞掉异常继续消费。
+                try {
+                    work()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    FileLogger.e(TAG, "ui event failed, keep consuming", t)
+                }
+            }
         }
     }
     
@@ -1011,6 +1025,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         registerSharedPrefsListener()
         
         initRimeEngine()
+
+        // H6：按键日志必须与「密码框 / 不学习输入框」联动。commitTextSilently 那边早已
+        // 用 editorSecret 屏蔽了 recordCommit，但 recordTap（每键明文）与 recordComposition
+        // （含本次上屏增量）走的是同一个 jsonl 文件，过去没有任何守卫 → 在支付/银行卡/
+        // 验证码框打字时按键序列会明文落盘。判定下沉到日志入口，避免每个调用点各自记得。
+        KeyTapLogger.secretProvider = { editorSecret || editorNoLearn }
         
         serviceScope.launch(Dispatchers.IO) {
             try {

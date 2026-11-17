@@ -288,10 +288,21 @@ class ClipboardSyncBridge(
             return
         }
 
+        // 远端内容不受本机采集上限约束，先按同一把尺子拦一道：
+        // 超长文本既写不进系统剪贴板（TransactionTooLarge），也会让下游整条链路白跑。
+        if (remote.text.length > 100_000) {
+            FileLogger.w(TAG, "远端文本超长，丢弃 len=${remote.text.length}")
+            return
+        }
         Log.d(TAG, "Remote changed, writing to local clipboard")
+        // 去重状态只在真正写入成功后才登记：写失败（或内容超限）时若先置位，
+        // 同一条内容下次会被误判为「已同步」而永不重试。
+        if (!clipboardManager.copyToSystemClipboard(remote.text)) {
+            FileLogger.w(TAG, "写回系统剪贴板失败，放弃本次去重登记")
+            return
+        }
         textLastHash = remoteHash
         textSelfWritten = remoteHash
-        clipboardManager.copyToSystemClipboard(remote.text)
     }
 
     /**

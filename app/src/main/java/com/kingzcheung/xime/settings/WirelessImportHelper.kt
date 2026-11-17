@@ -86,16 +86,54 @@ class WirelessImportHelper(private val context: Context) {
         } ?: 0
     }
 
+    /**
+     * 本次会话的一次性访问令牌（H1）。
+     *
+     * 无线导入把整个 `filesDir`（含 `plugins/`、`rime/`、`logs/`、`schemas/`）暴露成一个
+     * HTTP 服务，而它默认监听 0.0.0.0 —— 同 Wi-Fi 的任何设备都能直接访问：
+     *   GET  /tree|/read|/download  → 拉走词库、插件脚本、日志
+     *   POST /delete                → 删任意文件
+     *   POST /upload                → 装 .xipk 插件（= 代码执行）
+     * 因此所有路由强制校验令牌；令牌随每次 start() 重新生成、stop() 即失效。
+     * 二维码里的 URL 带上 `?t=`，前端后续请求再从 URL 读取并放进请求头。
+     */
+    @Volatile
+    private var sessionToken: String? = null
+
+    /** 当前会话令牌（供前端从 URL 取到后回传；未启动时为 null）。 */
+    fun currentToken(): String? = sessionToken
+
+    /** 校验请求是否携带正确令牌。 */
+    private fun isAuthorized(call: io.ktor.server.application.ApplicationCall): Boolean {
+        val expected = sessionToken ?: return false
+        val fromHeader = call.request.headers[TOKEN_HEADER]
+        val fromQuery = call.request.queryParameters["t"]
+        return expected == fromHeader || expected == fromQuery
+    }
+
     fun start(port: Int): String? {
         if (server != null) return null
         val ip = getLocalIpAddress() ?: return null
-        val url = "http://$ip:$port"
+        val token = java.util.UUID.randomUUID().toString().replace("-", "")
+        sessionToken = token
+        val url = "http://$ip:$port/?t=$token"
 
         // watchPaths 置空：ktor 的 stop() 会无条件 cleanupWatcher()，访问 lazy watcher 会在
         // Android 上凭空创建再销毁一个平台 WatchService（自动重载并未启用），其 finalizer
         // 随 GC 抛 ClosedWatchServiceException 刷日志；置空后该路径完全不触发。
         server = embeddedServer(CIO, port = port, watchPaths = emptyList()) {
             routing {
+                // 鉴权拦截：除首页与静态资源（本身无数据，且首页需要靠 URL 里的 token 引导）
+                // 之外，一律要求令牌。放在路由最前面，任何新增接口默认受保护。
+                intercept(io.ktor.server.application.ApplicationCallPipeline.Plugins) {
+                    val path = call.request.path()
+                    val isStatic = path == "/" || path.startsWith("/assets/")
+                    if (!isStatic && !isAuthorized(call)) {
+                        Log.w(TAG, "Wireless import: unauthorized ${call.request.httpMethod.value} $path")
+                        call.respond(HttpStatusCode.Unauthorized)
+                        finish()
+                    }
+                }
                 // React 前端：index.html 与静态资源打包在 assets/www/
                 get("/") {
                     serveAsset(call, "www/index.html")
@@ -125,6 +163,12 @@ class WirelessImportHelper(private val context: Context) {
                     if (f == null || !f.isFile) {
                         call.respondText("""{"error":"File not found"}""",
                             ContentType.Application.Json, HttpStatusCode.NotFound)
+                    } else if (f.length() > MAX_INLINE_READ_BYTES) {
+                        // 文本预览只服务小文件；大文件走 /download 流式下载，
+                        // 否则一次 readBytes 就能把输入法进程打爆（filesDir 里有数十 MB 的模型/词库）。
+                        call.respondText(
+                            """{"error":"File too large, use /download"}""",
+                            ContentType.Application.Json, HttpStatusCode.PayloadTooLarge)
                     } else {
                         val text = f.readBytes().toString(Charsets.UTF_8)
                         call.respondText(text, ContentType.Text.Plain, HttpStatusCode.OK)
@@ -172,6 +216,8 @@ class WirelessImportHelper(private val context: Context) {
     }
 
     fun stop() {
+        // 令牌随服务一起失效：下次 start() 会重新生成，旧二维码立即作废
+        sessionToken = null
         server?.stop(1000, 2000)
         server = null
         Log.i(TAG, "Server stopped")
@@ -452,5 +498,11 @@ private fun buildNode(file: File): FileNode {
 
     companion object {
         private const val TAG = "WirelessImport"
+
+        /** 携带会话令牌的请求头（二维码 URL 里用 `?t=` 传递，前端转成这个头）。 */
+        private const val TOKEN_HEADER = "X-Xime-Token"
+
+        /** `/read` 内联预览的大小上限：超过就走 `/download` 流式下载，避免整文件进内存。 */
+        private const val MAX_INLINE_READ_BYTES: Long = 2L * 1024 * 1024
     }
 }

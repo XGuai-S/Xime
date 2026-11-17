@@ -498,6 +498,27 @@ class XimeAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /**
+     * 解析当前屏幕上「真正处于活动状态的应用窗口」包名。
+     *
+     * 用于截屏 OCR 的归属校验（见 [captureByScreenshotOnly] 的 H4 段）：
+     * 无障碍树拿不到目标应用时，仍要确认屏幕画面属于谁，否则会把别的应用内容截走。
+     *
+     * 只认 `TYPE_APPLICATION` 且 `isActive` 的窗口；输入法自己的窗口、系统弹窗、
+     * 通知栏等一律不算（返回空串时调用方按「无法判定」放行，保持原行为）。
+     */
+    private fun resolveActiveApplicationWindowPackage(): String {
+        return try {
+            windows?.firstOrNull { window ->
+                window.isActive &&
+                    window.type == android.view.WindowManager.LayoutParams.TYPE_APPLICATION
+            }?.root?.packageName?.toString().orEmpty()
+        } catch (_: Throwable) {
+            // 部分 ROM 上 windows 会抛异常：拿不到就返回空，交由调用方按「无法判定」处理
+            ""
+        }
+    }
+
     private suspend fun captureByScreenshotOnly(
         expectedPackage: String,
         settings: AppSettings,
@@ -508,12 +529,51 @@ class XimeAccessibilityService : AccessibilityService() {
         isFullScreenPeek: Boolean
     ): ViewportCaptureOutcome? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+
+        // ── H3：用户同意与总开关必须与 a11y 路径同口径 ──
+        // 这个函数是「门控软失败」的回退入口（活动窗口是 IME 自己 / 归属校验没通过），
+        // 过去只判了无痕/密码/黑名单，**没有判总开关与披露同意**，于是用户在首次弹窗点过
+        // 「不同意」之后，只要点 ✦ 军师就仍会走这条路：整屏截屏 → OCR → 上传第三方模型。
+        // 同意必须在这里再判一次，否则「拒绝」形同虚设。
+        if (!settings.chatContextReplyEnabled || !settings.chatContextDisclosureAccepted) {
+            com.kingzcheung.xime.util.FileLogger.d(
+                "XimeA11y",
+                "jev ocr-only: blocked (replyEnabled=${settings.chatContextReplyEnabled} " +
+                    "disclosureAccepted=${settings.chatContextDisclosureAccepted})"
+            )
+            return null
+        }
+        if (forJevCopilot && !settings.jevCopilotEnabled) {
+            com.kingzcheung.xime.util.FileLogger.d("XimeA11y", "jev ocr-only: blocked (jev disabled)")
+            return null
+        }
+
         // 隐私门控先判：无痕/密码/关闭上下文/黑名单一律不截
         if (isIncognitoMode || settings.manualIncognitoMode || isPasswordInput ||
             ignoreChatContextForTurn ||
             ChatScreenContextExtractor.isSensitiveBlacklistedPackage(expectedPackage)
         ) {
             com.kingzcheung.xime.util.FileLogger.d("XimeA11y", "jev ocr-only: blocked by privacy gate")
+            return null
+        }
+
+        // ── H4：屏幕归属校验 ──
+        // 截屏拿的是「整块屏幕」，与 a11y 的 activePkg 校验无关。走到这里恰恰是因为
+        // 归属校验没通过，所以必须自己再确认一次屏幕上到底是谁：
+        //   ① expectedPackage —— 目标会话仍在前台，只是 a11y 树拿不到（正常回退场景）；
+        //   ② 本应用包名     —— IME / overlay 抢了焦点，屏幕画面仍是目标 App（正常回退场景）；
+        //   其他第三方包名    —— 用户此刻在别的应用里（系统弹窗、分屏、悬浮窗、切应用），
+        //                       截到的内容与目标会话无关，必须拒绝，否则会跨应用上传屏幕文字，
+        //                       而且黑名单是按 expectedPackage 判的，对真正的前台应用无效。
+        val onScreenPkg = resolveActiveApplicationWindowPackage()
+        if (onScreenPkg.isNotEmpty() &&
+            onScreenPkg != expectedPackage &&
+            onScreenPkg != packageName
+        ) {
+            com.kingzcheung.xime.util.FileLogger.d(
+                "XimeA11y",
+                "jev ocr-only: blocked by window ownership (onScreen=$onScreenPkg expected=$expectedPackage)"
+            )
             return null
         }
         val bitmap = withTimeoutOrNull(1200L) {

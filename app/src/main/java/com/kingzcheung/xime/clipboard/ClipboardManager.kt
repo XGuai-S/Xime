@@ -881,11 +881,35 @@ class ClipboardManager private constructor(private val context: Context) {
         }
     }
 
-    fun copyToSystemClipboard(text: String) {
+    /**
+     * 把文本写回系统剪贴板。
+     *
+     * 两个防护（此前都没有，可由远端同步内容直接触发进程崩溃）：
+     * 1. **长度闸**：与采集侧同一把尺子 [MAX_TEXT_CHARS]。同步拉取的远端文本不受
+     *    本地采集上限约束，几 MB 的 blob 会直接抛 TransactionTooLargeException。
+     * 2. **异常兜底**：setPrimaryClip 会抛 TransactionTooLargeException /
+     *    SecurityException / IllegalStateException（部分 ROM 在无焦点时拦截）。
+     *    调用方 ClipboardSyncBridge 的协程没有异常处理器，裸抛 = 输入法进程崩溃。
+     *    失败时必须回滚 selfWrittenText，否则这个残留标记会把下一次**真实**的同文本
+     *    复制误判为自写而丢弃。
+     *
+     * @return true 表示已成功写入系统剪贴板
+     */
+    fun copyToSystemClipboard(text: String): Boolean {
+        if (text.length > MAX_TEXT_CHARS) {
+            FileLogger.w(TAG, "拒绝写回超长文本 len=${text.length}（上限 $MAX_TEXT_CHARS）")
+            return false
+        }
         // 先打标记再写：监听回调是异步的，必须先置位才能拦住自我采集
         selfWrittenText = text
-        val clip = ClipData.newPlainText("kime_clipboard", text)
-        androidClipboardManager.setPrimaryClip(clip)
+        return try {
+            androidClipboardManager.setPrimaryClip(ClipData.newPlainText("kime_clipboard", text))
+            true
+        } catch (e: Exception) {
+            selfWrittenText = null
+            FileLogger.w(TAG, "setPrimaryClip 失败 len=${text.length}: ${e.message}", e)
+            false
+        }
     }
 
     fun getCurrentClipboardText(): String? {

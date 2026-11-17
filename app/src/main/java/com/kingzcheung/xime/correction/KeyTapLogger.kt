@@ -68,7 +68,7 @@ object KeyTapLogger {
         density: Float,
     ) {
         val kb = keyboardBounds
-        if (enabled) {
+        if (!shouldSkip()) {
             write("tap") {
                 put("key", key)
                 put("lx", localX)
@@ -102,6 +102,28 @@ object KeyTapLogger {
         }
     }
 
+    /**
+     * 当前是否处于「不该记按键」的输入框（密码框 / 要求不学习的框）。
+     *
+     * 由 XimeInputMethodService 注入（它持有当前 EditorInfo 的判定结果）。
+     * 放在日志入口统一判定，而不是让每个调用点各自记得——过去 recordTap /
+     * recordComposition 就因为没有这道守卫，把密码框的按键序列明文写进了
+     * files/logs/key_tap.jsonl。
+     */
+    @Volatile
+    internal var secretProvider: (() -> Boolean)? = null
+
+    /** 统一守卫：关闭 / 敏感输入框 / 探针异常 一律不记。 */
+    private fun shouldSkip(): Boolean {
+        if (!enabled) return true
+        return try {
+            secretProvider?.invoke() == true
+        } catch (_: Throwable) {
+            // 判定本身抛异常时按「敏感」处理：宁可少记，不能泄漏
+            true
+        }
+    }
+
     /** 记录一次 Rime 组合快照（每个键处理后的输入串/候选/上屏增量）。 */
     fun recordComposition(
         input: String,
@@ -110,7 +132,7 @@ object KeyTapLogger {
         ascii: Boolean,
         candidates: List<Pair<String, String>>,
     ) {
-        if (!enabled) return
+        if (shouldSkip()) return
         write("cmp") {
             put("in", input.take(MAX_TEXT))
             put("pre", preedit.take(MAX_TEXT))
@@ -130,7 +152,7 @@ object KeyTapLogger {
     /** 记录一次退格（`input` 为退格前输入串，`pendingEnglish` 为英文待上屏文本）。 */
     fun recordDelete(input: String, pendingEnglish: String) {
         CorrectionPriors.clear()  // 邻键纠错：退格后按键序列与编码不再对应，先验作废
-        if (!enabled) return
+        if (shouldSkip()) return
         write("del") {
             put("in", input.take(MAX_TEXT))
             put("pe", pendingEnglish.take(MAX_TEXT))
@@ -140,7 +162,7 @@ object KeyTapLogger {
     /** 记录一次上屏。 */
     fun recordCommit(text: String, isPaste: Boolean) {
         CorrectionPriors.clear()  // 邻键纠错：上屏后按键序列重新开始
-        if (!enabled || text.isEmpty()) return
+        if (shouldSkip() || text.isEmpty()) return
         write("commit") {
             put("tx", text.take(256))
             put("p", isPaste)
