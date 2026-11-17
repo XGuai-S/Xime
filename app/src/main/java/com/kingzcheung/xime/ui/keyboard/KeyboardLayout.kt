@@ -209,15 +209,18 @@ fun KeyboardLayout(
     // 监听手势配置版本号，部署后强制刷新键帽显示
     val cfgVer by KeysConfigHelper.configVersion.collectAsState()
 
-    val bubbleData = rememberSwipeBubbleDrawData(
-        swipeState = swipeBubble.state,
-        keyBounds = swipeBubble.keyBounds,
-        keyBackgroundColor = bubbleBgColor,
-        keyTextColor = keyTextColor,
-        accentColor = specialKeyTextColor,
-        keyWidth = if (swipeBubble.state.isSwiping || swipeBubble.state.isPressed) swipeBubble.keyBounds.width else 0f,
-        keyboardWidth = keyboardBounds.width
-    )
+    // ── P1：气泡数据不再在**本** composable 里读取 ──
+    //
+    // 旧实现在这里直接读 `swipeBubble.state` / `swipeBubble.keyBounds`（都是 mutableStateOf），
+    // 读取被记进本函数的重组作用域。KeyButton 每次按下 + 抬起都会 update 一次 SwipeState
+    // （pressedText / isPressed 变化，data class equals 判不等），于是**每敲一键就让整个
+    // KeyboardLayout 重组 2 次**：QwertyRowEnv 重建、5 行 × 40 个键的 composable 全跑、
+    // 未 remember 的滑动 lambda 全重分配 —— 正好抵消 KeyboardLayoutScreen 里
+    // 「参数最小化后打字期可跳过键盘区重组」的设计。
+    //
+    // 改法：把读取与计算下沉到 SwipeBubbleHost 这个只负责绘制的子 composable，
+    // 让 State 读取只订阅在它自己的作用域里；键盘主体因此不再随按键重组。
+    // 绘制仍然在同一个 Box 的 drawWithContent 里完成，坐标语义完全不变。
 
     val isLandscape = !isFloatingMode && LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp
     val useLandscapeSplitKeyboard = isLandscape && landscapeSplitKeyboardEnabled
@@ -254,12 +257,18 @@ fun KeyboardLayout(
                 // 按键坐标日志需要键盘矩形做跨设备归一化
                 KeyTapLogger.keyboardBounds = keyboardBounds
             }
-            .drawWithContent {
-                drawContent()
-                bubbleData?.let { drawSwipeBubble(it) }
-            }
             .padding(bottom = if (isFloatingMode || isLandscape) {0.dp} else {0.dp})
     ) {
+        // P1：气泡 State 的订阅被限制在这个子层内，键盘主体传入 content，
+        // 不观察 swipeBubble，因此按键时不会连带重组整棵键面子树。
+        SwipeBubbleOverlay(
+            controller = swipeBubble,
+            keyboardWidth = keyboardBounds.width,
+            keyBackgroundColor = bubbleBgColor,
+            keyTextColor = keyTextColor,
+            accentColor = specialKeyTextColor,
+            modifier = Modifier.fillMaxSize(),
+        ) {
             if (useLandscapeSplitKeyboard) {
             LandscapeKeyboardContent(
                 onKeyPress = onKeyPress,
@@ -401,7 +410,52 @@ fun KeyboardLayout(
             }
         }
     }
+        }  // SwipeBubbleOverlay content
+    }
+}
 
+/**
+ * P1：把气泡 State 的读取隔离到一个独立 composable。
+ *
+ * 为什么要单独抽出来：气泡数据依赖 `SwipeBubbleController.state/keyBounds`（都是
+ * `mutableStateOf`）。若在 [KeyboardLayout] 的函数体里读取，读取会记进键盘主体的重组
+ * 作用域 —— 而 KeyButton 每次按下与抬起都会 update 一次 SwipeState，结果**每敲一个键就让
+ * 整个键盘重组 2 次**（QwertyRowEnv 重建 + 5 行 × 40 键全跑），把 KeyboardLayoutScreen 里
+ * 「打字期跳过键盘区重组」的优化全部抵消。
+ *
+ * 这里把 State 读取与绘制数据计算固定在本 composable 自己的作用域里，变化只让本层重组 +
+ * 重绘；键盘主体内容通过 [content] 传入，不被观察到 State，因而不会被牵连重组。
+ * 绘制仍发生在同一个 Box 的 drawWithContent 中，坐标语义不变。
+ */
+@Composable
+private fun SwipeBubbleOverlay(
+    controller: SwipeBubbleController,
+    keyboardWidth: Float,
+    keyBackgroundColor: Color,
+    keyTextColor: Color,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    // 只在本作用域读取 State —— 订阅范围止于此
+    val swipeState = controller.state
+    val keyBounds = controller.keyBounds
+    val bubbleData = rememberSwipeBubbleDrawData(
+        swipeState = swipeState,
+        keyBounds = keyBounds,
+        keyBackgroundColor = keyBackgroundColor,
+        keyTextColor = keyTextColor,
+        accentColor = accentColor,
+        keyWidth = if (swipeState.isSwiping || swipeState.isPressed) keyBounds.width else 0f,
+        keyboardWidth = keyboardWidth,
+    )
+    Box(
+        modifier = modifier.drawWithContent {
+            drawContent()
+            bubbleData?.let { drawSwipeBubble(it) }
+        }
+    ) {
+        content()
     }
 }
 

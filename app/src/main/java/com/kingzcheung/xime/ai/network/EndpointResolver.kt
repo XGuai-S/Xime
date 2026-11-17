@@ -237,6 +237,34 @@ object EndpointResolver {
         return origin.takeIf { it.length > hostStart }
     }
 
+    /**
+     * 该地址是否是「公网 + 明文 HTTP」——最需要告警的组合。
+     *
+     * 应用允许明文是为了支持**局域网自建**服务（Ollama / 自建网关），但把 apiKey
+     * 与录音、聊天上下文发到**公网明文**地址时，同链路任何一跳都能直接读走。
+     * 局域网/回环地址不算风险（流量不出网段），返回 false。
+     *
+     * 供设置页显示警示、以及请求前写日志，便于用户自查配置。
+     */
+    fun isInsecurePublicUrl(url: String): Boolean {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return false
+        val lower = trimmed.lowercase()
+        // 非明文（https / wss）没有该风险
+        val isCleartext = lower.startsWith("http://") || lower.startsWith("ws://")
+        if (!isCleartext) return false
+        // 回环 / 局域网 / 模拟器宿主机：流量不出网段
+        val host = lower.substringAfter("://", "").substringBefore('/').substringBefore(':')
+        if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "10.0.2.2") return false
+        if (host.startsWith("192.168.") || host.startsWith("10.")) return false
+        if (host.startsWith("172.")) {
+            // 172.16.0.0 – 172.31.255.255 是私有段
+            val second = host.split('.').getOrNull(1)?.toIntOrNull()
+            if (second != null && second in 16..31) return false
+        }
+        return true
+    }
+
     const val DEFAULT_DASHSCOPE_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
     const val DEFAULT_VOLCENGINE_SAUC_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
     const val GEMINI_LIVE_WS_PATH =

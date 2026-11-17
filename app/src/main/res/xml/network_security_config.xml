@@ -1,4 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?><!--
+   明文 HTTP 策略。
+
+   为什么仍然允许（而不是一刀切 false）：
+   本应用支持用户自填 baseUrl 接入**局域网内自建**的 LLM / ASR 服务（Ollama
+   http://192.168.x.x:11434、自建网关 http://10.0.0.5 等）。这类地址没有证书，
+   关闭明文会让功能直接不可用，而这是本项目明确支持的用法。
+
+   风险与缓解：
+   - 明文下 Authorization: Bearer <apiKey>、录音与文本内容可被同网段嗅探；
+   - 因此对**公网明文**地址给出显式告警（见 EndpointResolver.isInsecurePublicUrl
+     与设置页提示），引导用户改用 https；
+   - 插件网络访问另有 NetworkPolicy 域名白名单约束。
+-->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

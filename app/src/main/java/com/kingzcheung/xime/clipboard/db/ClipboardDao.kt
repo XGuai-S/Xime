@@ -115,6 +115,18 @@ interface ClipboardDao {
     @Query("UPDATE clipboard_entries SET consumed = 1 WHERE id = :id")
     suspend fun markConsumed(id: Long)
 
+    /**
+     * 去重命中时的「复活」更新：刷新时间戳 **并把 consumed 复位为 0**。
+     *
+     * 为什么需要：`consumed` 表示「这一条已经被上屏消费过」，候选栏只显示未消费项
+     * （getRecentItems 里 filter !consumed）。旧实现去重命中只 updateTimestamp，
+     * `consumed` 永远停在 1 —— 用户从任意 App **再次复制同一段文本**时，面板里能看到
+     * 也能排到最前，但候选栏永远不会再提示，日志还全绿（走的是成功的 updateTimestamp
+     * 分支），极难定位。图片条目同理（markConsumedById 之后同一张图再复制仍带 consumed）。
+     */
+    @Query("UPDATE clipboard_entries SET timestamp = :timestamp, consumed = 0 WHERE id = :id")
+    suspend fun revive(id: Long, timestamp: Long)
+
     @Query("DELETE FROM clipboard_entries")
     suspend fun deleteAll()
 
@@ -122,7 +134,8 @@ interface ClipboardDao {
     suspend fun upsertAndTrim(text: String, now: Long, maxItems: Int) {
         val existing = findByText(text)
         if (existing != null) {
-            updateTimestamp(existing.id, now)
+            // 复活而不是单纯刷新时间：同一内容再次复制要重新进候选栏（见 revive 注释）
+            revive(existing.id, now)
         } else {
             insert(ClipboardEntry(text = text, timestamp = now))
             val unpinned = countUnpinned()
@@ -142,7 +155,8 @@ interface ClipboardDao {
     suspend fun upsertImage(entry: ClipboardEntry) {
         val existing = findImageByHash(entry.imageHash)
         if (existing != null) {
-            updateTimestamp(existing.id, entry.timestamp)
+            // 同一张图再次复制同样要复活（consumed 复位），与文本路径一致
+            revive(existing.id, entry.timestamp)
         } else {
             insert(entry)
         }

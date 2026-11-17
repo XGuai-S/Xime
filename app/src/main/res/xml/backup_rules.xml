@@ -1,13 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   备份规则（API 30 及以下）。
+
+   核心原则：**用户数据留在本机**。剪贴板历史、语音转写、录音、模型、词库编译产物
+   都不属于「换个手机也要带过去」的设置类数据，而且会把 25MB 云备份配额撑爆
+   （词库 + 模型单个数十 MB，超配额时整包备份会直接失败，不只是跳过该项）。
+   跨设备迁移请走「完整备份 / 剪贴板同步」这两条显式路径。
 -->
 <full-backup-content>
-    <!-- 剪贴板图片目录（files/clipboard_images，上限 100MB）必须排除：
-         云备份配额仅 25MB，纳入会挤掉其它数据；图片属可重建的本机临时数据，
-         跨设备迁移走剪贴板同步插件而非 Auto Backup。 -->
+    <!-- 剪贴板图片：可重建，且体积大 -->
     <exclude domain="file" path="clipboard_images/" />
+    <!-- 语音历史录音：含口述原文，隐私敏感 -->
+    <exclude domain="file" path="voice_history/" />
+    <!-- 离线 ASR / 联想模型：体积大、可重下 -->
+    <exclude domain="file" path="models/" />
+    <!-- rime 编译产物：可由源文件重新部署生成 -->
+    <exclude domain="file" path="rime/build/" />
+    <!-- 插件市场元数据缓存 -->
+    <exclude domain="file" path="market/" />
+    <!-- 日志：含输入会话痕迹，不随备份迁移 -->
+    <exclude domain="file" path="logs/" />
+    <!-- 剪贴板数据库：明文历史，含可能的密码/验证码（系统标记覆盖不全） -->
+    <exclude domain="database" path="clipboard.db" />
+    <exclude domain="database" path="clipboard.db-shm" />
+    <exclude domain="database" path="clipboard.db-wal" />
+    <!-- AI 语音历史（含原始转写与润色结果）与密钥密文（跨设备无法解密） -->
+    <exclude domain="sharedpref" path="typefree_ime_prefs.xml" />
+    <exclude domain="sharedpref" path="typefree_secure_secrets.xml" />
 </full-backup-content>

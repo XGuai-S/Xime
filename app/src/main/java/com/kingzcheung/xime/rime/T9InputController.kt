@@ -75,7 +75,13 @@ class T9InputController(
     /**
      * UI 刷新代际号：每次发起刷新自增。异步 post 到达 Main 时若代际已过期则丢弃，
      * 防止「同步刷新（如右选）→ 旧的异步刷新 post 后执行」把 UI 回退到旧状态。
+     *
+     * **必须 @Volatile**：自增发生在后台线程（refreshOnBackground），校验发生在主线程
+     * （mainHandler.post 内）。`post` 只对「入队前」的写建立 happens-before，后台随后
+     * 的自增与主线程读取之间没有同步 —— 主线程可能读到旧值，于是把过期候选写回 UI，
+     * 正是这个代际号要防的「旧刷新覆盖新状态」。
      */
+    @Volatile
     private var uiGeneration = 0
 
     /** 长按退格合并锁/状态：同一时刻至多一个退格 job，累积请求由 [pendingDeleteCount] 记录。 */

@@ -1,14 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   数据提取规则（API 31+，取代 backup_rules.xml）。
+
+   与 backup_rules.xml 保持同一套排除项：云备份与设备间迁移都不带走
+   剪贴板历史 / 语音转写 / 录音 / 模型 / 编译产物 —— 它们要么隐私敏感、
+   要么体积会把 25MB 配额撑爆（超配额是**整包失败**，不是跳过单项）。
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- 同 backup_rules.xml：剪贴板图片目录排除在云备份之外 -->
         <exclude domain="file" path="clipboard_images/" />
+        <exclude domain="file" path="voice_history/" />
+        <exclude domain="file" path="models/" />
+        <exclude domain="file" path="rime/build/" />
+        <exclude domain="file" path="market/" />
+        <exclude domain="file" path="logs/" />
+        <exclude domain="database" path="clipboard.db" />
+        <exclude domain="database" path="clipboard.db-shm" />
+        <exclude domain="database" path="clipboard.db-wal" />
+        <exclude domain="sharedpref" path="typefree_ime_prefs.xml" />
+        <exclude domain="sharedpref" path="typefree_secure_secrets.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="clipboard_images/" />
+        <exclude domain="file" path="voice_history/" />
+        <exclude domain="file" path="models/" />
+        <exclude domain="file" path="rime/build/" />
+        <exclude domain="file" path="market/" />
+        <exclude domain="file" path="logs/" />
+        <exclude domain="database" path="clipboard.db" />
+        <exclude domain="database" path="clipboard.db-shm" />
+        <exclude domain="database" path="clipboard.db-wal" />
+        <exclude domain="sharedpref" path="typefree_ime_prefs.xml" />
+        <exclude domain="sharedpref" path="typefree_secure_secrets.xml" />
     </device-transfer>
 </data-extraction-rules>

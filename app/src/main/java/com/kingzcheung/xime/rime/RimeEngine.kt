@@ -932,15 +932,25 @@ class RimeEngine {
     }
 
     /** 写 user.yaml 用户状态字符串（auto_save，自动落盘）。 */
+    /**
+     * 写 user.yaml 用户状态字符串。
+     *
+     * **必须持 rimeLock**：native 侧会 `user_config_open → config_set_* → config_close`，
+     * 对全局 librime Config 组件树做写操作。本类的不变量是「所有 native 调用通过
+     * rimeLock 同步」，而方案切换/按键处理（processKey、getProcessResult）都持同一把锁 ——
+     * 裸调会让配置写与引擎读写并发（与历史上 setPageSize / switchSchema 的 SIGSEGV 同类）。
+     * 用 tryLocked：拿不到锁时放弃本次写入而不是阻塞 UI 点击线程，丢一次开关状态
+     * 远好于主线程卡住（下次切换会重新写入）。
+     */
     fun setUserConfigString(key: String, value: String) {
         if (!isInitialized) return
-        nativeSetUserConfigString(key, value)
+        tryLocked(Unit) { nativeSetUserConfigString(key, value) }
     }
 
-    /** 写 user.yaml 用户状态布尔值（auto_save，自动落盘）。 */
+    /** 写 user.yaml 用户状态布尔值（auto_save，自动落盘）。锁要求同 [setUserConfigString]。 */
     fun setUserConfigBool(key: String, value: Boolean) {
         if (!isInitialized) return
-        nativeSetUserConfigBool(key, value)
+        tryLocked(Unit) { nativeSetUserConfigBool(key, value) }
     }
 
     /** 运行时切换 JNI verbose 日志（仅 Debug 构建生效，Release 为空操作）。 */
