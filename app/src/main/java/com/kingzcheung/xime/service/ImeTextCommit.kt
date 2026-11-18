@@ -29,12 +29,24 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
         val currentTextBeforeCursor = service.currentInputConnection?.getTextBeforeCursor(1000, 0)?.toString() ?: ""
         val currentLength = currentTextBeforeCursor.length
         
-        val charsToDelete = currentLength - service.voiceRecognitionHandler.textLengthBeforeVoiceInput
-        
+        // 双向钳制：差值可能因 textLengthBeforeVoiceInput 未同步而异常大，
+        // 也可能为负（用户手工删过），两者都不该导致「删过头」或空循环。
+        val charsToDelete = (currentLength - service.voiceRecognitionHandler.textLengthBeforeVoiceInput)
+            .coerceIn(0, currentLength)
+
         if (charsToDelete > 0) {
-            for (i in 0 until charsToDelete) {
-                service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
-                service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+            // 一次 deleteSurroundingText 替代逐字符发 DEL 键。
+            //
+            // 旧实现每字符发 DOWN+UP 两个跨进程调用：语音输入 200 字后点撤销 =
+            // 400 次 Binder 往返 + 宿主 200 次重排，主线程冻结数百 ms 到数秒，
+            // 宿主 undo 栈也被塞满。同文件的 deleteClipboardChars 已经是正确写法。
+            val deleted = service.currentInputConnection?.deleteSurroundingText(charsToDelete, 0)
+            if (deleted == false) {
+                // 宿主不支持批量删除时退回逐字符（保底可用，但只在少数宿主发生）
+                for (i in 0 until charsToDelete) {
+                    service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                    service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                }
             }
         }
         

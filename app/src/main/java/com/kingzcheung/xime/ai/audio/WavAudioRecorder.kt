@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import com.kingzcheung.xime.util.FileLogger
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -179,6 +180,30 @@ class WavAudioRecorder(private val context: Context) {
         if (recordingJob?.isActive == true) {
             return Result.success(Unit)
         }
+        // 清理上一轮遗留的 AudioRecord 实例。
+        //
+        // 为什么必须有这一步：上面的早退条件只看 job 是否活跃，而 job 可能已因
+        // scope 取消、录音循环异常 break 等原因结束，但 audioRecord 从未 release()。
+        // 那样新调用会直接 `audioRecord = record` 覆盖引用，旧实例永久泄漏且仍处于
+        // RECORDING 状态——麦克风与音频焦点被抓着不放：其他应用录音失败、
+        // 系统麦克风指示灯常亮、下次录音抢不到焦点录成静音。
+        val staleRecord = audioRecord
+        if (staleRecord != null) {
+            try {
+                if (staleRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    staleRecord.stop()
+                }
+            } catch (e: Exception) {
+                FileLogger.w("WavAudioRecorder", "startRecording: 停止遗留 AudioRecord 失败", e)
+            }
+            try {
+                staleRecord.release()
+            } catch (e: Exception) {
+                FileLogger.w("WavAudioRecorder", "startRecording: 释放遗留 AudioRecord 失败", e)
+            }
+            FileLogger.w("WavAudioRecorder", "startRecording: 已释放上一轮遗留的 AudioRecord")
+        }
+        audioRecord = null
 
         val minBufSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,

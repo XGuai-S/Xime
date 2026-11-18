@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.kingzcheung.xime.ai.audio.AacAudioCompressor
+import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.ai.audio.WavAudioRecorder
 import com.kingzcheung.xime.ai.data.AppSettings
 import com.kingzcheung.xime.ai.data.DiscoveredModelItem
@@ -3242,6 +3243,34 @@ class AiPipelineEngine(
             return if (cfg.size() > 0) cfg else null
         }
 
+        /**
+         * 单次模型响应允许的最大字符数（约 8MB UTF-8）。
+         *
+         * 远超任何正常 chat completion 响应（实测最大也就几十 KB），
+         * 只用来兜住「上游返回 HTML 错误页 / 中转站返回巨量数据」这类异常。
+         */
+        private const val MAX_MODEL_RESPONSE_CHARS = 8 * 1024 * 1024
+
+        /**
+         * 有界读取字符流：最多读 [maxChars] 个字符，超出即停止。
+         *
+         * 不用 `reader.readText()`：它对未知长度的响应会一直读到 EOF 并整串驻留内存。
+         */
+        private fun readBoundedChars(reader: java.io.BufferedReader, maxChars: Int): String {
+            if (maxChars <= 0) return ""
+            val sb = StringBuilder()
+            val buf = CharArray(8192)
+            while (sb.length < maxChars) {
+                val n = reader.read(buf, 0, minOf(buf.size, maxChars - sb.length))
+                if (n < 0) break
+                sb.append(buf, 0, n)
+            }
+            if (sb.length >= maxChars) {
+                FileLogger.w("AiPipelineEngine", "模型响应超过上限 ${maxChars} 字符，已截断")
+            }
+            return sb.toString()
+        }
+
         internal fun readOpenAiStreamOrBufferedJson(
             reader: java.io.BufferedReader?,
             onThinkingStarted: (() -> Unit)? = null,
@@ -3259,7 +3288,10 @@ class AiPipelineEngine(
             if (firstNonBlank == null) throw IOException("模型返回结果为空")
             val trimmedStart = firstNonBlank.trimStart()
             if (trimmedStart.startsWith("{") || trimmedStart.startsWith("[")) {
-                val rest = reader.readText()
+                // 有界读取：这里拿到的是「非 SSE 的 JSON 响应」，但上游可能是任意网关，
+                // 返回一页 HTML 或几百 MB 时 readText() 会直接把常驻的输入法进程打爆
+                // （被杀后用户当场失去键盘，比任何功能异常都严重）。
+                val rest = readBoundedChars(reader, MAX_MODEL_RESPONSE_CHARS - firstNonBlank.length)
                 val fullBody = if (rest.isEmpty()) firstNonBlank else "$firstNonBlank\n$rest"
                 val parsed = parseOpenAiChatResponse(fullBody)
                 val usage = extractUsageDiagnostics(fullBody)
@@ -3294,7 +3326,11 @@ class AiPipelineEngine(
                                     ?.asString
                                     .orEmpty()
                                 if (contentDelta.isNotEmpty()) {
-                                    rawAcc.append(contentDelta)
+                                    // 累加器上限：上游持续推流（或恶意中转站）时
+                                    // StringBuilder 会无界增长，同样会 OOM。
+                                    if (rawAcc.length < MAX_MODEL_RESPONSE_CHARS) {
+                                        rawAcc.append(contentDelta)
+                                    }
                                     val accStr = rawAcc.toString()
                                     val hasUnclosedThink = accStr.contains("<think>", ignoreCase = true) &&
                                         !accStr.contains("</think>", ignoreCase = true)

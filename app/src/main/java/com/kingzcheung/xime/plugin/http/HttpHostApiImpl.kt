@@ -66,7 +66,9 @@ class HttpHostApiImpl(
         .followSslRedirects(false)
         .addInterceptor { chain ->
             val request = chain.request()
-            Log.d(TAG, "[$pluginId] >>> ${request.method} ${request.url}")
+            // 只记脱敏后的 URL：插件的 URL 由 JS 自行拼接，S3 预签名 / OAuth /
+            // 多数中转站会把凭据放在 query，整条 URL 进 logcat 就等于凭据长期留痕。
+            Log.d(TAG, "[$pluginId] >>> ${request.method} ${sanitizeUrl(request.url.toString())}")
             val start = System.currentTimeMillis()
             try {
                 val resp = chain.proceed(request)
@@ -234,16 +236,41 @@ class HttpHostApiImpl(
             call.execute().use(read)
         } catch (e: Exception) {
             lastErrorMsg = e.message ?: "request failed"
-            Log.e(TAG, "[$pluginId] HTTP $method $url failed", e)
+            val safeUrl = sanitizeUrl(url)
+            Log.e(TAG, "[$pluginId] HTTP $method $safeUrl failed", e)
             PluginErrorLog.logError(
                 pluginId,
-                "HTTP 请求失败 ($method $url)",
+                "HTTP 请求失败 ($method $safeUrl)",
                 e.message ?: "request failed",
                 e,
                 category = com.kingzcheung.xime.plugin.core.security.ErrorCategory.HTTP_ERROR
             )
             null
         }
+    }
+
+    /**
+     * 日志与错误库用的 URL 脱敏：**丢弃 query 与 fragment**。
+     *
+     * 为什么必须脱敏：插件自行拼接 URL，S3 预签名 URL（`X-Amz-Signature=`）、
+     * WebDAV 带 token、OAuth 的 `access_token=`、以及各种中转站的 `?key=` 全都把
+     * 凭据放在 query 里。宿主把整条 URL 写进 logcat（release 也写）和插件错误日志文件，
+     * 用户一旦把日志发给开发者排障，云端备份/S3 凭据即外泄。
+     *
+     * 保留 scheme + host + path，足以定位「哪个请求失败」，且不含凭据。
+     * userinfo 也一并剥离（`user:pass@host` 形态）。
+     */
+    private fun sanitizeUrl(raw: String): String {
+        val noQuery = raw.substringBefore('?').substringBefore('#')
+        // 剥离 userinfo：scheme://user:pass@host → scheme://host
+        val schemeEnd = noQuery.indexOf("://")
+        if (schemeEnd < 0) return noQuery
+        val head = noQuery.substring(0, schemeEnd + 3)
+        val rest = noQuery.substring(schemeEnd + 3)
+        val at = rest.indexOf('@')
+        val cleaned = if (at >= 0) rest.substring(at + 1) else rest
+        val hasQuery = raw.contains('?') || raw.contains('#')
+        return head + cleaned + if (hasQuery) "?***" else ""
     }
 
     private fun effectiveClient(timeoutMillis: Int?): OkHttpClient =
@@ -277,10 +304,23 @@ class HttpHostApiImpl(
                 "响应体过大（${declared} 字节，上限 $MAX_INLINE_BODY_BYTES），请改用 host.http.download"
             )
         }
-        val bytes = response.body.bytes()
+        // 用流式有界读取，不能 body.bytes()：
+        // Transfer-Encoding: chunked、网关去掉 Content-Length、gzip 后长度未知时
+        // contentLength() 返回 -1，上面那次判断必然通过，随后 bytes() 会无界增长
+        // 到读完整个响应才发现超限——此时 OOM 已经发生。
+        val bytes = response.body.source().use { source ->
+            // request(n) 只保证「缓冲到 n 字节」，不会把超限部分读进内存
+            source.request(MAX_INLINE_BODY_BYTES + 1)
+            if (source.buffer.size > MAX_INLINE_BODY_BYTES) {
+                throw java.io.IOException(
+                    "响应体过大（超过 $MAX_INLINE_BODY_BYTES 字节），请改用 host.http.download"
+                )
+            }
+            source.readByteArray()
+        }
         if (bytes.size > MAX_INLINE_BODY_BYTES) {
             throw java.io.IOException(
-                "响应体过大（${bytes.size} 字节，上限 $MAX_INLINE_BODY_BYTES），请改用 host.http.download"
+                "响应体过大（超过 $MAX_INLINE_BODY_BYTES 字节），请改用 host.http.download"
             )
         }
         return HttpResponse(
