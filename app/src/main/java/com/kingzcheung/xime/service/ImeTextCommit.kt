@@ -90,15 +90,33 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
                 )
             }
 
-            val cacheDir = File(service.cacheDir, "emoji_cache")
-            if (!cacheDir.exists()) {
-                cacheDir.mkdirs()
-            }
-            
-            val cacheFile = File(cacheDir, imageFile.name)
-            FileInputStream(imageFile).use { input ->
-                cacheFile.outputStream().use { output ->
-                    input.copyTo(output)
+            // 关键优化：只有当源文件不在 FileProvider 声明的根目录下时才复制。
+            //
+            // 旧实现无条件把图片整份 copyTo 到 cacheDir/emoji_cache —— 这一步在**主线程**上
+            // （commitImage 由表情面板点选回调直接调用），一张 2~4MB 的图片就是十几毫秒的
+            // 主线程 IO，键盘当场掉帧。而 filepaths.xml 里已经声明了
+            // `<files-path path="."/>` 与 `<cache-path path="emoji_cache/"/>`：
+            // 剪贴板图片（files/clipboard_images/）与插件表情（files/plugins/...）本来就能
+            // 直接生成 content URI，压根不需要这份副本。副本还会在 emoji_cache 里堆积，
+            // 靠 7 天回收才消掉。
+            val providerReady = resolveProviderReadyFile(imageFile)
+            val cacheFile = if (providerReady != null) {
+                providerReady
+            } else {
+                val cacheDir = File(service.cacheDir, "emoji_cache")
+                if (!cacheDir.exists()) {
+                    cacheDir.mkdirs()
+                }
+                File(cacheDir, imageFile.name).also { target ->
+                    FileInputStream(imageFile).use { input ->
+                        target.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    FileLogger.i(
+                        XimeInputMethodService.TAG,
+                        "commitImage: source outside provider roots, copied ${imageFile.length()}B -> ${target.absolutePath}",
+                    )
                 }
             }
             
@@ -266,6 +284,32 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
             declared == "*/*" ||
                 declared.equals(mimeType, ignoreCase = true) ||
                 (declared.endsWith("/*") && mimeType.startsWith(declared.removeSuffix("/*"), ignoreCase = true))
+        }
+    }
+
+    /**
+     * 源文件是否已落在 FileProvider 可服务的根目录内（是则返回规范化文件，否则 null）。
+     *
+     * 判据必须与 `res/xml/filepaths.xml` 的声明保持一致：
+     *  - `<files-path name="files" path="."/>` → filesDir 整棵子树
+     *  - `<cache-path name="emoji_cache" path="emoji_cache/"/>` → cacheDir/emoji_cache
+     *  - `<cache-path name="log_export" path="log_export/"/>` → 与图片无关，不参与判定
+     *
+     * 用 canonicalPath 比较：否则 `files/../cache/x.png` 这类路径会被误判成「已在 filesDir 下」，
+     * 最后 FileProvider 抛 IllegalArgumentException 再走 MediaBridge 兜底（多一次无谓写入）。
+     */
+    private fun resolveProviderReadyFile(imageFile: File): File? {
+        return try {
+            val canonical = imageFile.canonicalFile
+            val filesRoot = service.filesDir.canonicalFile
+            val emojiCacheRoot = File(service.cacheDir, "emoji_cache").canonicalFile
+            when {
+                canonical.startsWith(filesRoot) || canonical.startsWith(emojiCacheRoot) -> canonical
+                else -> null
+            }
+        } catch (e: Exception) {
+            FileLogger.w(XimeInputMethodService.TAG, "resolveProviderReadyFile failed", e)
+            null
         }
     }
 

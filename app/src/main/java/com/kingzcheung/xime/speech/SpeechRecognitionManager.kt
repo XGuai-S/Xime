@@ -14,6 +14,7 @@ import com.kingzcheung.xime.plugin.ActivePluginSelection
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
+import com.kingzcheung.xime.util.MicCaptureGate
 
 class SpeechRecognitionManager(private val context: Context) {
 
@@ -27,6 +28,9 @@ class SpeechRecognitionManager(private val context: Context) {
 
         /** 停止时等待录音线程退出的超时：覆盖 backend.stop() 同步等待最终结果的耗时。 */
         private const val JOIN_TIMEOUT_MS = 5000L
+
+        /** 麦克风闸门持有者名（见 [MicCaptureGate]），同时用于给用户提示「被谁占用」。 */
+        internal const val MIC_OWNER = "键盘语音"
 
         /**
          * 停止后延迟释放后端的窗口：在线插件 stop() 只发送结束信号，最终结果由
@@ -284,7 +288,18 @@ class SpeechRecognitionManager(private val context: Context) {
 
     fun startPreStart() {
         cancelPreStart()
-        val record = createAudioRecord() ?: return
+        // 先抢麦克风闸门再建设备：抢不到就干脆不建 AudioRecord。
+        // 否则会和悬浮胶囊同时持有 AudioRecord，两路都 startRecording 成功但只有一路能读到数据，
+        // 最终两边的用户都看到「一直在转圈、识别不出字」。
+        if (!MicCaptureGate.tryAcquire(MIC_OWNER)) {
+            FileLogger.w(TAG, "预启动跳过：麦克风被 ${MicCaptureGate.currentHolder()} 占用")
+            return
+        }
+        val record = createAudioRecord()
+        if (record == null) {
+            MicCaptureGate.release(MIC_OWNER)
+            return
+        }
         record.startRecording()
         synchronized(this) {
             preStartedRecord = record
@@ -302,6 +317,10 @@ class SpeechRecognitionManager(private val context: Context) {
                 try { record.stop() } catch (_: Exception) { }
                 record.release()
             }
+        }
+        // 录音线程用同一个持有者名：录音进行中调用这里不能放开闸门，否则胶囊会插进来抢设备。
+        if (recordingThread == null) {
+            MicCaptureGate.release(MIC_OWNER)
         }
     }
 
@@ -439,7 +458,26 @@ class SpeechRecognitionManager(private val context: Context) {
         private var audioRecord: AudioRecord? = null
 
         override fun run() {
+            // 抢麦克风闸门（预启动路径已持有，这里是刷新租约）。
+            // 抢不到就直接失败并告诉用户被谁占用——比录出一段静音再让用户困惑好得多。
+            if (!MicCaptureGate.tryAcquire(MIC_OWNER)) {
+                val holder = MicCaptureGate.currentHolder()
+                preStarted?.let { stale ->
+                    try { stale.stop() } catch (_: Exception) { }
+                    try { stale.release() } catch (_: Exception) { }
+                }
+                mainHandler.post {
+                    errorCallback?.invoke(
+                        "麦克风正被「${holder ?: "其他功能"}」使用，请先结束那一边",
+                        true
+                    )
+                    setState(RecognitionState.ERROR)
+                }
+                return
+            }
+
             val audioRecord = preStarted ?: (createAudioRecord() ?: run {
+                MicCaptureGate.release(MIC_OWNER)
                 mainHandler.post {
                     errorCallback?.invoke("无法启动录音", false)
                     setState(RecognitionState.ERROR)
@@ -451,6 +489,7 @@ class SpeechRecognitionManager(private val context: Context) {
             if (!currentBackend.start()) {
                 audioRecord.stop()
                 audioRecord.release()
+                MicCaptureGate.release(MIC_OWNER)
                 mainHandler.post {
                     errorCallback?.invoke("启动引擎失败", false)
                     setState(RecognitionState.ERROR)
@@ -526,6 +565,8 @@ class SpeechRecognitionManager(private val context: Context) {
                 // forceStopAudio 可能已从外部 stop/release，这里需容错（重复释放不抛异常中断后续流程）
                 try { audioRecord.stop() } catch (_: Exception) { }
                 try { audioRecord.release() } catch (_: Exception) { }
+                // 设备真正放开后才释放闸门：先放闸门会让别的录音路径抢到还在占用的麦克风
+                MicCaptureGate.release(MIC_OWNER)
             }
 
             currentBackend.stop()
@@ -538,6 +579,9 @@ class SpeechRecognitionManager(private val context: Context) {
                 try { record.stop() } catch (_: Exception) { }
                 try { record.release() } catch (_: Exception) { }
             }
+            // 设备已由本方法强行释放，闸门同步放开：否则录音线程若卡在 backend.stop() 里，
+            // 麦克风闸门会被一直占着，胶囊那边直接报「被键盘语音占用」。
+            MicCaptureGate.release(MIC_OWNER)
         }
 
         private fun isSpeech(chunk: ByteArray): Boolean {

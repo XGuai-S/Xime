@@ -33,6 +33,15 @@ object HandwritingEngine {
     @Volatile
     private var lastReinitAttemptMs = 0L
 
+    /** 手写模型可用性检查的负结果缓存时长（见 [hasModel]）。 */
+    private const val MODEL_CHECK_NEGATIVE_TTL_MS = 3_000L
+
+    /** 最近一次 hasModel 检查的时间点与结果（正结果永久缓存）。 */
+    @Volatile
+    private var modelCheckAtMs = 0L
+    @Volatile
+    private var modelCheckPositive = false
+
     fun initialize(context: Context): Boolean {
         if (initialized && inferenceClient?.isBound() == true) return true
 
@@ -92,11 +101,33 @@ object HandwritingEngine {
 
     fun isInitialized(): Boolean = initialized
 
-    /** 手写模型是否可用（含旧版 filesDir 根目录模型迁移后检查）。 */
+    /**
+     * 手写模型是否可用（含旧版 filesDir 根目录模型迁移后检查）。
+     *
+     * **带缓存**：这个函数的调用点在 KeyboardView 的 composition 里（工具栏按钮可用性判定），
+     * 每次重组都会调一次。而它内部要跑一遍 `migrateLegacyForModel`（目录列举 + 可能的搬迁）
+     * 和两次 `File.exists()`。候选栏每敲一键就重组一次，等于把磁盘操作挂在了打字的每帧上。
+     *
+     * 缓存策略故意不对称：
+     *  - **正结果永久缓存**：模型装好之后不会自己消失，反复 stat 没有意义；
+     *  - **负结果只缓存 [MODEL_CHECK_NEGATIVE_TTL_MS]**：用户可能刚在设置里装完模型就回键盘，
+     *    永久缓存会让工具栏按钮「装了也出不来」。3s 足够覆盖连续重组，又不至于让用户困惑。
+     *
+     * 副作用说明：用户在外部删除模型文件后，本进程内仍会认为「有模型」（按钮继续显示），
+     * 点进去由 [ensureEngineReady] 失败兜底——比每次重组都访问磁盘更划算。
+     */
     fun hasModel(context: Context): Boolean {
-        ModelStorage.migrateLegacyForModel(context, "ochwpro")
-        val modelDir = ModelStorage.getModelDir(context, "ochwpro")
-        return File(modelDir, "ochwpro.onnx").exists() && File(modelDir, "char_index.json").exists()
+        if (modelCheckPositive) return true
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - modelCheckAtMs < MODEL_CHECK_NEGATIVE_TTL_MS) return false
+        val exists = runCatching {
+            ModelStorage.migrateLegacyForModel(context, "ochwpro")
+            val modelDir = ModelStorage.getModelDir(context, "ochwpro")
+            File(modelDir, "ochwpro.onnx").exists() && File(modelDir, "char_index.json").exists()
+        }.getOrDefault(false)
+        modelCheckAtMs = now
+        if (exists) modelCheckPositive = true
+        return exists
     }
 
     fun predict(

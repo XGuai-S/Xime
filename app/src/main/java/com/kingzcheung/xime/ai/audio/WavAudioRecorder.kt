@@ -33,6 +33,7 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import com.kingzcheung.xime.util.MicCaptureGate
 
 data class RecordedAudioResult(
     val wavFile: File,
@@ -205,12 +206,22 @@ class WavAudioRecorder(private val context: Context) {
         }
         audioRecord = null
 
+        // 抢麦克风闸门：与键盘语音互斥。抢不到就带着占用者名字失败，
+        // 让用户知道该先结束哪一边，而不是录出一段全零的静音再识别成空。
+        if (!MicCaptureGate.tryAcquire(MIC_OWNER)) {
+            val holder = MicCaptureGate.currentHolder()
+            return Result.failure(
+                IllegalStateException("麦克风正被「${holder ?: "其他功能"}」使用，请先结束那一边")
+            )
+        }
+
         val minBufSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBufSize <= 0) {
+            MicCaptureGate.release(MIC_OWNER)
             return Result.failure(IllegalStateException("无法初始化系统音频缓冲区"))
         }
 
@@ -224,11 +235,13 @@ class WavAudioRecorder(private val context: Context) {
                 bufferSize
             )
         } catch (e: Exception) {
+            MicCaptureGate.release(MIC_OWNER)
             return Result.failure(e)
         }
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
+            MicCaptureGate.release(MIC_OWNER)
             return Result.failure(IllegalStateException("麦克风当前被其他应用占用或初始化失败"))
         }
 
@@ -241,6 +254,7 @@ class WavAudioRecorder(private val context: Context) {
             }
         } catch (e: Exception) {
             record.release()
+            MicCaptureGate.release(MIC_OWNER)
             return Result.failure(e)
         }
 
@@ -276,6 +290,7 @@ class WavAudioRecorder(private val context: Context) {
             }
             record.release()
             audioRecord = null
+            MicCaptureGate.release(MIC_OWNER)
             return Result.failure(e)
         }
 
@@ -444,6 +459,8 @@ class WavAudioRecorder(private val context: Context) {
         } finally {
             // Immediately release transient AudioFocus so paused background music resumes right away
             abandonTransientAudioFocus()
+            // 设备已释放，闸门随之放开（放在 release 之后：先放闸门会让键盘语音抢到仍在占用的麦克风）
+            MicCaptureGate.release(MIC_OWNER)
         }
 
         _amplitudes.value = List(BAR_COUNT) { 0.08f }
@@ -526,6 +543,7 @@ class WavAudioRecorder(private val context: Context) {
             } catch (_: Exception) {
             }
             abandonTransientAudioFocus()
+            MicCaptureGate.release(MIC_OWNER)
         }
         synchronized(sessionLock) {
             runCatching { activeDiskFile?.close() }
@@ -552,6 +570,9 @@ class WavAudioRecorder(private val context: Context) {
     }
 
     companion object {
+
+        /** 麦克风闸门持有者名（见 [MicCaptureGate]）。 */
+        internal const val MIC_OWNER = "悬浮胶囊"
         const val SAMPLE_RATE = 16000
         const val WAV_HEADER_BYTES = 44
         /** 200ms slice at 16kHz 16-bit mono = 3200 samples = 6400 bytes (ideal for Doubao, DashScope & Gemini Live WS). */

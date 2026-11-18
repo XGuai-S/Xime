@@ -331,6 +331,14 @@ fun KeyboardView(
             // 数据源（展开与否即切换点）：展开态下候选栏与展开页同吃全量列表
             // （expandedCandidates，展开时服务层重新拉取）；非展开态候选栏保持
             // 引擎当前页（"每页候选词数"）
+            // 重组边界：候选栏整段包进 [CandidateBarRecompositionSlot]。
+            //
+            // 为什么：本函数（KeyboardView）体量巨大（60+ 键、工具栏、各面板都在这里）。
+            // 旧写法在**本函数作用域内**直接读 candidateState.value（展开态判定与 cs），
+            // 于是每一次候选更新（每敲一个键至少一次）都把整棵键盘的 compose 重跑一遍，
+            // 而实际变化的只有候选栏那一行。把读取挪进子 composable 的 lambda 后，
+            // 状态失效只会重启候选栏这一个 group，键位区不再跟着重组。
+            CandidateBarRecompositionSlot {
             val expandedDataMode = candidatePageExpanded &&
                 candidateState.value.expandedCandidates.isNotEmpty()
 
@@ -690,6 +698,7 @@ fun KeyboardView(
                 ),
                 inlineSuggestions = inlineSuggestions,
             )
+            }
 
             if (candidatePageExpanded) {
                 // 候选展开页：候选栏的在位展开态（顶部即真实候选栏，实时跟随编码/删除变化）。
@@ -1855,4 +1864,19 @@ private fun KeyboardViewModel.consumeShiftKey(key: String): Boolean = when (key)
         doubleTapShift(); true
     }
     else -> false
+}
+
+/**
+ * 候选栏重组边界（deferred read 槽）。
+ *
+ * 把「读候选状态 + 渲染候选栏」整段放进一个子 composable 的 lambda 里执行：
+ * 状态的读取记录在**这个 composable 自己的重启作用域**上，候选变化只会重启这里的
+ * 内容，不会连带 KeyboardView 整棵键位树重新测量/重组。
+ *
+ * 注意：必须是普通 composable 函数（不能 inline）——内联后 lambda 会回到调用方作用域，
+ * 重组边界随之消失，等于没做。
+ */
+@Composable
+private fun CandidateBarRecompositionSlot(content: @Composable () -> Unit) {
+    content()
 }

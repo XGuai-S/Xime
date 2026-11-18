@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 九键拼音输入控制器（薄包装）。
@@ -30,12 +31,13 @@ import kotlinx.coroutines.runBlocking
  * - flush 后通过 [RimeEngine.getProcessResult] 一次 JNI 拿全量结果（input/preedit/
  *   committed/翻页），替代重复的 getComposition 调用（每键 6→5 次 JNI，全部后台）。
  * - UI 更新通过 [mainHandler] 投递到 Main 线程，**后台任务完成不依赖 Main**，
- *   避免 [awaitT9Queue]（runBlocking 等待队列）与 Main 派发之间死锁。
+ *   避免「join 队列」与 Main 派发之间互相等死。
  * - **方案 B**：reset/clearAll 等清理入口不再在主线程 runBlocking 等待队列——
  *   本地 Compose 状态立即复位，C++ 清空排入同一队列（与后续按键保序，主线程零等待）。
  * - 唯一保留同步等待的入口是 onRightCandidateSelected（服务层在 keyProcessingDispatcher
- *   后台线程调用，需同步返回 full-commit 标志）：先 [awaitT9Queue] 等待队列排空，
- *   避免 pending 覆盖导致消费计算错乱——阻塞的是该后台线程，而非主线程。
+ *   后台线程调用，需同步返回 full-commit 标志）：整段消费动作作为 job 入队，
+ *   调用方线程 join 至多 2s 拿结果——阻塞的是该后台线程而非主线程，
+ *   且消费与按键/退格/左栏选择在同一条 FIFO 上，不会互相插队。
  */
 class T9InputController(
     private val rimeEngine: RimeEngine = RimeEngine.getInstance(),
@@ -50,6 +52,9 @@ class T9InputController(
         private const val TAG = "T9InputController"
         const val CLEAR_COMPOSITION_ONLY = "clear_composition"
         const val CLEAR_ALL = "clear_all"
+
+        /** 右选等待入队任务完成的上限，防止队列被卡死时把按键线程一起挂住。 */
+        private const val T9_SELECT_JOIN_TIMEOUT_MS = 2_000L
     }
 
     enum class LeftPanelState { IDLE, INPUT, SELECTION }
@@ -68,11 +73,11 @@ class T9InputController(
     private val t9Dispatcher = Dispatchers.Default.limitedParallelism(1)
     private val t9Scope = CoroutineScope(t9Dispatcher)
     /**
-     * 最近一次入队的 T9 任务，供 [awaitT9Queue] 跨线程 join。
+     * 最近一次入队的 T9 任务（排障与 join 用）。
      *
      * 必须 @Volatile：写入方是主线程（reset/clearAll）与 t9Dispatcher（按键），
-     * 读取方是服务层的 keyProcessingDispatcher（onRightCandidateSelected）。没有可见性保证时
-     * join 可能拿到更早的 job 就返回，awaitT9Queue 的「排空」保证不成立，
+     * 读取方是服务层的 keyProcessingDispatcher（onRightCandidateSelected 的 join）。没有可见性保证时
+     * join 可能拿到更早的 job 就返回，「排空」保证不成立，
      * 右选消费就会在「上一键还没 flush」的状态下执行（pending 覆盖 → 跳字/错词）。
      */
     @Volatile
@@ -110,31 +115,6 @@ class T9InputController(
     private fun enqueue(block: suspend CoroutineScope.() -> Unit) {
         val job = t9Scope.launch { block() }
         lastT9Job = job
-    }
-
-    /**
-     * 同步等待后台队列排空（仅 onRightCandidateSelected 使用）。
-     * 该方法必须且只会被**非主线程**调用（服务层 keyProcessingDispatcher），
-     * 阻塞的是该后台线程而非 UI；队列空闲时立即返回。
-     */
-    private fun awaitT9Queue() {
-        // 这条约束原本只写在注释里（"必须且只会被非主线程调用"），靠人工保证不可靠：
-        // 一旦将来有人从 Compose/主线程调到 onRightCandidateSelected，runBlocking 会
-        // 直接卡死 UI 且极难定位。这里在 debug 构建下把约束变成可执行的断言。
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            if (BuildConfig.DEBUG) {
-                throw IllegalStateException(
-                    "awaitT9Queue() 被主线程调用：runBlocking 会阻塞 UI 并可能与 Main 派发死锁",
-                )
-            }
-            // release：绝不能阻塞主线程（宁可读到稍旧的缓冲状态，也不能 ANR）
-            FileLogger.e(
-                "T9InputController",
-                "awaitT9Queue() 被主线程调用，已跳过等待以避免 ANR（需修复调用方）",
-            )
-            return
-        }
-        lastT9Job?.let { runBlocking { it.join() } }
     }
 
     /** UI 显示的缓冲区字符串 = 最近一次 flush 快照的 input（缓存，非主线程 JNI） */
@@ -360,9 +340,21 @@ class T9InputController(
 
     /**
      * 右选候选（保持同步返回值契约，供服务层判断 full/partial commit）。
-     * 由服务层在 keyProcessingDispatcher（后台线程）调用。先等待后台队列排空再执行，
-     * 避免 pending 覆盖导致消费计算错乱——阻塞的是该后台线程，不冻结主线程（方案 B）。
-     * 调频不在此进行——由服务层在 full commit 上屏后经 rimeEngine.t9Memorize 单独调用。
+     * 由服务层在 keyProcessingDispatcher（后台线程）调用。
+     *
+     * **整段必须进 t9 串行队列。** 旧实现是「先 awaitT9Queue 排空，然后直接在调用线程上
+     * 调 t9SelectCandidate / t9FlushRimeInput / updateFromRime」——排空只保证了「此刻」队列空，
+     * 紧接着的这几个 JNI 调用却飘在队列外：用户连点时，一个数字键 job 可以插到 await 与
+     * select 之间执行，于是「上一键的 processKey/flush 还没跑完，右选就已经把候选消费掉」，
+     * 表现为跳字、错词、以及 t9 pending 计数与实际引擎状态错位。
+     *
+     * 现在把整个 body 作为一个 job 入队，并在调用方线程等待它完成：
+     *  - 顺序性：右选与按键、退格、左栏选择全部在同一条 FIFO 队列上，天然不会交错；
+     *  - 契约不变：依然同步返回 full_commit 标志；
+     *  - 阻塞的只是 keyProcessingDispatcher 的后台线程（不是主线程）。
+     *
+     * 防死锁：join 带 2s 上限。若队列被某个卡死的 JNI 调用堵住，宁可让这次右选按
+     * 「未完整消费」返回并记错误日志，也不能把按键处理线程永久挂住（那等于键盘全废）。
      *
      * @param candidatePinyin 候选词拼音注释（comment），null 表示无注释候选（如 emoji）
      * @param candidateText 候选词文本，供 C++ (comment, text) 双条件定位（防同注释错码）
@@ -373,15 +365,41 @@ class T9InputController(
         candidateText: String? = null,
         candidateTextLength: Int = 0,
     ): Boolean {
-        awaitT9Queue()
-        val isFullCommit = if (candidatePinyin != null) {
-            val result = rimeEngine.t9SelectCandidate(candidatePinyin, candidateText, candidateTextLength)
-            rimeEngine.t9FlushRimeInput()
-            result
-        } else {
-            false
+        // 主线程调用是设计外的用法：入队但不阻塞等待（阻塞主线程 = ANR）
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            FileLogger.e(TAG, "onRightCandidateSelected 被主线程调用，改走异步执行以免 ANR")
+            enqueue {
+                if (candidatePinyin != null) {
+                    rimeEngine.t9SelectCandidate(candidatePinyin, candidateText, candidateTextLength)
+                    rimeEngine.t9FlushRimeInput()
+                }
+                updateFromRime()
+            }
+            return false
         }
-        updateFromRime()
+
+        var isFullCommit = false
+        val job = t9Scope.launch {
+            isFullCommit = if (candidatePinyin != null) {
+                val result = rimeEngine.t9SelectCandidate(candidatePinyin, candidateText, candidateTextLength)
+                rimeEngine.t9FlushRimeInput()
+                result
+            } else {
+                false
+            }
+            updateFromRime()
+        }
+        lastT9Job = job
+        val finished = runBlocking {
+            withTimeoutOrNull(T9_SELECT_JOIN_TIMEOUT_MS) {
+                job.join()
+                true
+            }
+        } ?: false
+        if (!finished) {
+            FileLogger.e(TAG, "onRightCandidateSelected: 入队执行超时 ${T9_SELECT_JOIN_TIMEOUT_MS}ms，按未完整消费返回")
+            return false
+        }
         return isFullCommit
     }
 
