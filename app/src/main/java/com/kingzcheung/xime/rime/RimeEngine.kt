@@ -148,6 +148,9 @@ class RimeEngine {
         /** 全局 Rime 引擎锁 — 所有 native 调用必须通过此锁同步 */
         val rimeLock = ReentrantLock()
 
+        /** 维护（部署/编译）最长等待时间：与 deployIncremental 的 180s 保持一致。 */
+        private const val DEPLOY_TIMEOUT_MS = 180_000L
+
         init {
             System.loadLibrary("rime_jni")
         }
@@ -166,7 +169,7 @@ class RimeEngine {
         fun isModuleRegistered(moduleName: String): Boolean {
             val engine = instance ?: return false
             if (!engine.isInitialized) return false
-            return engine.nativeIsModuleRegistered(moduleName)
+            return engine.isModuleRegisteredInternal(moduleName)
         }
 
         fun setDeploymentCallback(callback: (isDeploying: Boolean, message: String) -> Unit) {
@@ -278,6 +281,10 @@ class RimeEngine {
     private fun notifyDeploymentStatus(isDeploying: Boolean, message: String) {
         deploymentCallback?.invoke(isDeploying, message)
     }
+
+    /** 模块注册检查（内部入口，供 companion 调用；必须过 rimeLock）。 */
+    internal fun isModuleRegisteredInternal(moduleName: String): Boolean =
+        locked { nativeIsModuleRegistered(moduleName) }
 
     fun initialize(userDataDir: String, sharedDataDir: String) {
         if (!isInitialized) {
@@ -741,15 +748,45 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 全量部署。
+     *
+     * **不能在整个编译期间持 rimeLock**：librime 的部署是异步的（std::async 维护线程），
+     * 旧实现在 `locked { nativeDeploy() }` 里等它编译完，等于把全局锁独占 30–180 秒。
+     * 期间：
+     * - 所有按键走 `locked{}` → 排队，用户看到「键盘没反应」；
+     * - 所有查询走 `tryLocked{}` → 拿不到锁返回空 → 候选栏空白、打不出字；
+     * - 主线程上的 `updateUI → getComposition` 同样降级为空。
+     *
+     * 现在与 [deployIncremental] 完全同构：锁内只「启动」，锁外轮询，收尾短暂拿锁。
+     * 期间 rimeLock 是空闲的，输入功能正常可用（只是新配置要等部署完成后生效）。
+     */
     fun deploy(): Boolean {
         if (!isInitialized) return false
-        locked {
-            // 部署前确保 T9 补丁（含个人词库 packs 确定性名）已写入，
-            // 部署时 librime 才会编译对应的 user_<schemaId>.table.bin。
-            // 幂等：补丁已就位时 native 侧直接 skip，开销极小。
+        // 锁内：写 T9 补丁 + 启动维护，不做编译等待。
+        // 补丁写入是幂等的（已就位时 native 侧直接 skip），耗时与文件数成正比、与词库无关。
+        val started = locked {
             ensureT9SchemaPatchesForDeployedSchemas(userDataDir)
-            return nativeDeploy()
+            nativeStartMaintenance(true)
         }
+        if (!started) {
+            // 没有待编译任务，或已有维护在跑：视为成功，让调用方继续等现有维护结束
+            FileLogger.w(TAG, "deploy: startMaintenance returned false（无任务或已在维护中）")
+            return !nativeIsMaintaining()
+        }
+        // 锁外等待：这期间 rimeLock 空闲，按键/候选查询正常工作
+        var waited = 0L
+        while (nativeIsMaintaining() && waited < DEPLOY_TIMEOUT_MS) {
+            Thread.sleep(100)
+            waited += 100
+        }
+        if (nativeIsMaintaining()) {
+            FileLogger.w(TAG, "deploy: 维护超时（已等 ${waited}ms）")
+            return false
+        }
+        // 收尾：更新 last_build_time，避免下次启动误判需全量重编译。只写一个字段，短暂持锁。
+        locked { nativeUpdateLastBuildTime() }
+        return true
     }
 
     /**
@@ -888,13 +925,17 @@ class RimeEngine {
     /** 读取方案配置字符串项（librime 解析，含 custom.yaml patch 合并后的最终值）。 */
     fun getSchemaString(schemaId: String, key: String): String? {
         if (!isInitialized) return null
-        return nativeGetSchemaString(schemaId, key)
+        // librime 的 config 组件树（config_open → get_* → config_close）必须串行访问：
+        // 与部署/方案切换并发时会在 __dynamic_cast 上 SIGSEGV（tombstone_04/05/06 即此栈）。
+        // 这是查询路径，用非阻塞 tryLocked：部署期间返回 null 让调用方降级，不阻塞 UI。
+        return tryLocked(null) { nativeGetSchemaString(schemaId, key) }
     }
 
     /** 读取方案配置列表项（librime 解析，含 custom.yaml patch 合并后的最终值）。 */
     fun getSchemaList(schemaId: String, key: String): List<String> {
         if (!isInitialized) return emptyList()
-        return nativeGetSchemaList(schemaId, key)?.toList() ?: emptyList()
+        // 与 getSchemaString 同理：组件树读取必须过锁
+        return tryLocked(emptyList()) { nativeGetSchemaList(schemaId, key)?.toList() ?: emptyList() }
     }
 
     /** 读取方案自带 translator.packs 中声明的个人词库名。 */
@@ -922,13 +963,13 @@ class RimeEngine {
     /** 读取 user.yaml 用户状态字符串（如 var/previously_selected_schema）。 */
     fun getUserConfigString(key: String): String? {
         if (!isInitialized) return null
-        return nativeGetUserConfigString(key)
+        return tryLocked(null) { nativeGetUserConfigString(key) }
     }
 
     /** 读取 user.yaml 用户状态布尔值（如 var/option/ascii_mode）。 */
     fun getUserConfigBool(key: String): Boolean {
         if (!isInitialized) return false
-        return nativeGetUserConfigBool(key)
+        return tryLocked(false) { nativeGetUserConfigBool(key) }
     }
 
     /** 写 user.yaml 用户状态字符串（auto_save，自动落盘）。 */
@@ -1210,11 +1251,11 @@ class RimeEngine {
 
     fun deploySchema(schemaId: String): Boolean {
         if (!isInitialized) return false
-        return nativeDeploySchema(schemaId)
+        return locked { nativeDeploySchema(schemaId) }
     }
 
     fun updateLastBuildTime() {
         if (!isInitialized) return
-        nativeUpdateLastBuildTime()
+        locked { nativeUpdateLastBuildTime() }
     }
 }

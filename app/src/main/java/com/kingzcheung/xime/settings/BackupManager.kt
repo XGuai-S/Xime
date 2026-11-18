@@ -802,8 +802,25 @@ object BackupManager {
         }
     }
 
-    /** 清理上一次事务残留（开始新恢复前调用）。 */
+    /**
+     * 开始新恢复前清理上一次事务残留。
+     *
+     * **不能无条件删除 rollback 与 journal**：若上一次恢复在「换入」阶段被杀、还没被
+     * [recoverInterruptedRestore] 撤销就再次发起恢复，`.restore-rollback` 里装的是
+     * 恢复前的原始文件、`.restore-journal` 是撤销所需的清单。直接删掉等于把用户数据
+     * 连同回滚能力一起丢弃，之后既回不去也说不清配置为什么坏了。
+     *
+     * 正确顺序：先按 journal 撤销上一次未完成的事务（把原始文件还回去），再清 staging。
+     */
     private fun discardTransaction(staging: File, rollback: File, journal: File) {
+        if (journal.isFile) {
+            FileLogger.w(TAG, "检测到上一次未完成的恢复事务，先按 journal 回滚，再开始新的恢复")
+            // staging = File(filesDir, STAGING_DIR_NAME)，故 parentFile 即 filesDir
+            val filesDir = staging.parentFile ?: staging
+            if (!rollbackByJournal(filesDir, rollback, journal)) {
+                FileLogger.e(TAG, "上一次事务回滚不完整，原文件保留在 ${rollback.path}")
+            }
+        }
         staging.deleteRecursively()
         rollback.deleteRecursively()
         journal.delete()

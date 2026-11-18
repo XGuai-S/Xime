@@ -16,6 +16,9 @@ package com.kingzcheung.xime.plugin.core.js.ws
  */
 object NetworkPolicy {
 
+    /** 允许联网的 scheme：HTTP(S) + WebSocket（插件用 wss 连实时 ASR/LLM）。 */
+    private val ALLOWED_SCHEMES = setOf("http", "https", "ws", "wss")
+
     /** 校验 URL 是否允许访问。reason 为拒绝原因（null 表示放行）。 */
     fun check(
         url: String,
@@ -40,17 +43,43 @@ object NetworkPolicy {
         return "访问 $host 未获用户授权，请在插件中心授权"
     }
 
-    /** 从 URL 提取域名（不含端口，纯字符串解析，无 Android 依赖）。 */
+    /**
+     * 从 URL 提取域名（小写，不含端口）。
+     *
+     * **必须用权威解析器，不能手写字符串切割**。旧实现是：
+     * ```
+     * rest = url.substringAfter("://")
+     * host = rest.substringBefore(':')
+     * ```
+     * 对 `https://api.openai.com:8443@evil.com/steal` 会得到 `api.openai.com` ——
+     * 而按 WHATWG 规则（OkHttp 的实际行为）`api.openai.com:8443` 是 **userinfo**，
+     * 真实 host 是 `evil.com`。于是鉴权放行了已授权域名，请求却真的发往 evil.com，
+     * 用户已配置的 Authorization / WebDAV / S3 凭据被原样带走，UI 上还显示
+     * 「访问 api.openai.com」。这是网络隔离层的总开关失效，不是边角情况。
+     *
+     * 现在用 `java.net.URI`（语义与 OkHttp 的 HttpUrl 一致）并做三项硬约束：
+     * 1. 只接受 http/https/ws/wss —— file/gopher 等 scheme 一律拒绝；
+     * 2. **显式拒绝带 userinfo 的 URL** —— 这是上面的绕过手法，正常请求不需要它；
+     * 3. host 统一小写并去掉尾部点（`api.openai.com.` 与 `api.openai.com` 同义）。
+     *
+     * 解析失败返回 null（调用方 [check] 会因此拒绝，属 fail-closed）。
+     */
     fun extractHost(url: String): String? {
-        var rest = url
-        val schemeIdx = rest.indexOf("://")
-        if (schemeIdx >= 0) rest = rest.substring(schemeIdx + 3)
-        val pathIdx = rest.indexOf('/')
-        if (pathIdx >= 0) rest = rest.substring(0, pathIdx)
-        val queryIdx = rest.indexOf('?')
-        if (queryIdx >= 0) rest = rest.substring(0, queryIdx)
-        val host = rest.substringBefore(':')
-        return host.takeIf { it.isNotBlank() }
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return null
+        return try {
+            val uri = java.net.URI(trimmed)
+            // 允许的 scheme：HTTP(S) 与 WebSocket(ws/wss)——插件用 wss 连实时 ASR/LLM。
+            // 其余（file/gopher/ftp…）一律拒绝。
+            val scheme = uri.scheme?.lowercase()
+            if (scheme !in ALLOWED_SCHEMES) return null
+            // 带 userinfo 一律拒绝：既是绕过手法，也说明调用方在 URL 里塞了凭据
+            if (!uri.rawUserInfo.isNullOrEmpty()) return null
+            uri.host?.lowercase()?.trimEnd('.')?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            // URI 解析失败（非法字符 / 相对路径 / 缺 host）：fail-closed
+            null
+        }
     }
 
     /** 从配置值文本提取 HTTP(S) URL 的域名（非 http/https 值返回 null，供 UI 展示授权候选）。 */

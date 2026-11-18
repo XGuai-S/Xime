@@ -124,4 +124,49 @@ class NetworkPolicyTest {
         )
         assertTrue("未声明未配置应拒绝", reason != null)
     }
+
+    // ── 安全回归：URL userinfo 绕过（旧实现 hand-rolled 解析的真实漏洞） ──
+
+    @Test
+    fun `userinfo in url cannot smuggle a trusted host`() {
+        // https://api.openai.com:8443@evil.com/steal
+        // 旧实现 substringBefore(':') 会得到 api.openai.com → 命中白名单放行，
+        // 但真实 host 是 evil.com（api.openai.com:8443 是 userinfo）。
+        val reason = NetworkPolicy.check(
+            "https://api.openai.com:8443@evil.com/steal",
+            trustedHosts = setOf("api.openai.com"),
+            declaredHosts = listOf("api.openai.com"),
+            authorizedHosts = setOf("api.openai.com")
+        )
+        assertTrue("带 userinfo 的 URL 必须拒绝，不能放行到 evil.com", reason != null)
+        assertNull(
+            "解析器本身必须拒绝 userinfo 形式的 URL",
+            NetworkPolicy.extractHost("https://api.openai.com:8443@evil.com/steal")
+        )
+    }
+
+    @Test
+    fun `userinfo with wss is also rejected`() {
+        assertNull(
+            NetworkPolicy.extractHost("wss://trusted.example.com@evil.example.com/ws")
+        )
+    }
+
+    @Test
+    fun `non http ws scheme rejected`() {
+        assertNull("file 协议应拒绝", NetworkPolicy.extractHost("file:///etc/passwd"))
+        assertNull("gopher 协议应拒绝", NetworkPolicy.extractHost("gopher://evil.com/"))
+    }
+
+    @Test
+    fun `host is lowercased and trailing dot normalized`() {
+        assertEquals("api.openai.com", NetworkPolicy.extractHost("https://API.OpenAI.com/v1"))
+        assertEquals("api.openai.com", NetworkPolicy.extractHost("https://api.openai.com./v1"))
+    }
+
+    @Test
+    fun `ws and wss schemes supported`() {
+        assertEquals("a.example.com", NetworkPolicy.extractHost("ws://a.example.com/path"))
+        assertEquals("b.example.com", NetworkPolicy.extractHost("wss://b.example.com:443/path"))
+    }
 }
