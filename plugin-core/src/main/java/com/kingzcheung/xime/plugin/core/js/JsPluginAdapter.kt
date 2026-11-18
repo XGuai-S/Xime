@@ -21,8 +21,22 @@ open class JsPluginAdapter(
     protected val pluginContext: PluginContext
 ) : IPluginEntryClass, IPluginConfigurable {
 
+    /** 设置表单读取的一次慢读之后的冷却截止（避免每个组合帧都去顶 UI 线程）。 */
+    @Volatile
+    private var schemaCooldownUntil = 0L
+
     override fun getSettingsSchema(): List<UiNode> {
-        val result = runtime.call(JsPluginContract.PATH_SETTINGS_SCHEMA)
+        // 本方法在 Compose **组合期**被调用（主线程）。旧实现走 runtime.call()：
+        // 180s 超时 + poisonOnTimeout=true —— 插件初始化慢一点就把主线程卡到 ANR，
+        // 随后插件被永久标记中毒。这里改成 3s 短超时 + 不中毒，并在超时后冷却 30s，
+        // 让设置页退化成「暂时读不到表单」而不是整块键盘不可用。
+        if (System.currentTimeMillis() < schemaCooldownUntil) return emptyList()
+        val result = runtime.callWithTimeout(
+            JsPluginContract.PATH_SETTINGS_SCHEMA,
+            SCHEMA_TIMEOUT_MS,
+            poisonOnTimeout = false,
+        )
+        if (result == null) schemaCooldownUntil = System.currentTimeMillis() + SCHEMA_COOLDOWN_MS
         val list = (JsScriptRuntime.jsToKotlin(result) as? List<*>)
             ?: return emptyList()
         // 设置字段必须带 key（configStore 绑定）；无 key 的展示节点由渲染层容忍
@@ -174,5 +188,11 @@ open class JsPluginAdapter(
 
     companion object {
         private const val MAX_UI_NODES = 64
+
+        /** 设置表单读取超时：主线程组合期调用，必须远低于 ANR 阈值（5s）。 */
+        private const val SCHEMA_TIMEOUT_MS = 3_000L
+
+        /** 一次超时之后多久内不再尝试（期间返回空表单，设置页不卡）。 */
+        private const val SCHEMA_COOLDOWN_MS = 30_000L
     }
 }

@@ -284,12 +284,20 @@ object BackupManager {
 
     /** 备份包落盘 + 收尾（云端恢复与本地导入共用）。 */
     internal suspend fun restoreFromArchive(context: Context, archive: File): Result<Unit> {
+        // **必须**同时给两个 writer：xime.yaml 与候选排序/词频表这类「真源」在可见目录
+        // （/sdcard/rime/xime/…）。只写私有目录的话，读取侧（UserConfigDir.readText）
+        // 会先读到可见目录里的**旧文件**，恢复出来的配置被静默遮蔽 ——
+        // 用户看到的就是「提示恢复成功，重启后设置一点没变」。
+        // 云端恢复与本机整包导入都走这里（另一组 restoreArchive(context, …) 重载早已传了
+        // 两个 writer，只有这条主路径漏了）。
         val outcome = restoreArchiveOutcome(
             context.filesDir,
             { prefsName, json ->
                 restorePrefsJson(context.getSharedPreferences(prefsName, Context.MODE_PRIVATE), json)
             },
-            archive
+            archive,
+            visibleConfigWriter = { text -> UserConfigDir.writeCustomConfig(context, text) },
+            userDataWriter = { fileName, text -> restoreUserDataFile(context, fileName, text) },
         ).onSuccess {
             Log.i(TAG, "Restore done -> ${context.filesDir.path}")
         }.onFailure { e ->
@@ -480,6 +488,10 @@ object BackupManager {
             val pendingPrefs = mutableListOf<Pair<String, ByteArray>>()
             val pendingUserConfig = mutableListOf<Pair<String, String>>()
             val pendingUserData = mutableListOf<Pair<String, String>>()
+            // META 条目是**先读进内存再提交**的：单条上限 32MB、总量闸 1GB 都管不到
+            // 「N 条各 30MB」这种包，会把常驻的输入法进程堆直接打爆（表现为恢复时闪退）。
+            // 这里给内存累积单独设预算，超了明确失败。
+            var pendingMemBytes = 0L
             // 总量守卫：备份包是**外部输入**（用户从任意来源选的 zip / 远端下载的包），
             // 恶意或损坏的包可以是 zip 炸弹（单个高压缩比条目、或数万小条目）。
             // 无上限时 readBytes() 直接打爆常驻的输入法进程，或者把 /data 写满。
@@ -558,7 +570,11 @@ object BackupManager {
                     if (isRootedEntryName(name)) {
                         return Result.failure(Exception("备份包包含非法路径: $name"))
                     }
-                    val target = File(stagingRime, name)
+                    // 条目名必须与 plan 用同一个规范化结果：plan 记的是 relName，
+                    // 若这里用原始 name，含反斜杠或 "./" 前缀的条目会写成另一个文件名，
+                    // commitPlan 里 `!src.isFile → continue` 静默跳过，用户看到「恢复成功」但少文件。
+                    val normalizedName = name.replace('\\', '/').removePrefix("./")
+                    val target = File(stagingRime, normalizedName)
                     val canonicalRoot = stagingRime.canonicalPath + File.separator
                     if (target.canonicalPath != canonicalRoot.removeSuffix(File.separator) &&
                         !target.canonicalPath.startsWith(canonicalRoot)
@@ -568,7 +584,7 @@ object BackupManager {
                     // 用户配置改走「真源」通道（可见目录 xime.yaml），否则恢复出来的配置会被
                     // 可见目录里的旧配置静默覆盖；写入失败才退回 rime 目录，避免恢复彻底失效。
                     // 旧备份里的条目名是 xime.custom.yaml / xime.txt，同样路由过来，等于顺带完成迁移。
-                    val relName = name.replace('\\', '/').removePrefix("./")
+                    val relName = normalizedName
                     val isUserConfig = relName == UserConfigDir.UNIFIED_CONFIG_FILE ||
                         relName == UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE ||
                         relName == UserConfigDir.CUSTOM_CONFIG_FILE
@@ -585,6 +601,12 @@ object BackupManager {
                                 Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
                             )
                         }
+                        pendingMemBytes += data.size
+                        if (pendingMemBytes > MAX_PENDING_MEMORY_BYTES) {
+                            return Result.failure(
+                                Exception("备份包元数据超过 ${MAX_PENDING_MEMORY_BYTES / 1024 / 1024}MB 内存预算，已中止")
+                            )
+                        }
                         pendingUserData += relName to String(data, Charsets.UTF_8)
                         zis.closeEntry()
                         continue
@@ -595,6 +617,12 @@ object BackupManager {
                         if (totalBytes > MAX_TOTAL_BYTES) {
                             return Result.failure(
                                 Exception("备份包解压后超过 $MAX_TOTAL_BYTES 字节上限，已中止")
+                            )
+                        }
+                        pendingMemBytes += data.size
+                        if (pendingMemBytes > MAX_PENDING_MEMORY_BYTES) {
+                            return Result.failure(
+                                Exception("备份包元数据超过 ${MAX_PENDING_MEMORY_BYTES / 1024 / 1024}MB 内存预算，已中止")
                             )
                         }
                         pendingUserConfig += relName to String(data, Charsets.UTF_8)
@@ -713,32 +741,61 @@ object BackupManager {
         rollback.deleteRecursively()
         rollback.mkdirs()
         journal.writeText("")
+        // 事务日志改成「单流 + 立刻落盘」：
+        // - 旧实现每条 appendText 一次 open/close，且**先 movePath 再记录**。
+        //   movePath 与记录之间被杀 → rollback 里有原文件但日志没有 M 行 →
+        //   rollbackByJournal 永远搬不回去，用户数据就卡在半新半旧。
+        // - 现在是「先写 M 行并 fsync，再移动」，进程在任何时刻被杀，日志都至少覆盖
+        //   已经发生的移动；缓冲未落盘导致整段丢失的窗口也没了。
+        val journalOut = runCatching { java.io.FileOutputStream(journal, true) }.getOrNull()
+        fun journalLine(line: String) {
+            val out = journalOut ?: return
+            runCatching {
+                out.write(line.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+        }
+        var failure: Exception? = null
+        var skipped = 0
         try {
             for (rel in plan) {
                 val src = File(staging, rel)
-                if (!src.isFile) continue
+                if (!src.isFile) {
+                    // 计划里有、staging 里没有：说明条目名规范化不一致（历史上用原始 name
+                    // 写 staging、用 relName 记 plan）。至少要留痕，不能再静默「恢复成功」。
+                    skipped++
+                    FileLogger.w(TAG, "恢复换入：staging 缺少条目 $rel，已跳过")
+                    continue
+                }
                 val dst = File(filesDir, rel)
                 dst.parentFile?.mkdirs()
                 if (dst.exists()) {
                     val bak = File(rollback, rel)
                     bak.parentFile?.mkdirs()
+                    journalLine("M $rel\n")
                     if (!movePath(dst, bak)) throw java.io.IOException("旧文件暂存失败: $rel")
-                    journal.appendText("M $rel\n")
                 }
                 if (!movePath(src, dst)) throw java.io.IOException("换入失败: $rel")
-                journal.appendText("W $rel\n")
+                journalLine("W $rel\n")
             }
+        } catch (e: Exception) {
+            failure = e
+        } finally {
+            runCatching { journalOut?.close() }
+        }
+        if (failure == null) {
+            if (skipped > 0) FileLogger.w(TAG, "恢复完成，但有 $skipped 个条目缺失（见上方日志）")
             journal.delete()
             rollback.deleteRecursively()
             return true
-        } catch (e: Exception) {
-            FileLogger.e(TAG, "备份恢复换入失败，开始回滚", e)
-            val ok = rollbackByJournal(filesDir, rollback, journal)
-            if (!ok) {
-                FileLogger.e(TAG, "回滚不完整：${rollback.path} 保留了恢复前的原始文件")
-            }
-            return false
         }
+        FileLogger.e(TAG, "备份恢复换入失败，开始回滚", failure)
+        val ok = rollbackByJournal(filesDir, rollback, journal)
+        if (!ok) {
+            FileLogger.e(TAG, "回滚不完整：${rollback.path} 保留了恢复前的原始文件")
+        }
+        return false
     }
 
     /**
@@ -896,6 +953,9 @@ object BackupManager {
 
     /** 单个 META 条目（settings.json / plugin_configs / manifests）的大小上限。 */
     private const val MAX_META_ENTRY_BYTES = 32L * 1024 * 1024
+
+    /** 恢复时「先读进内存再提交」的 META 条目总量预算（见 pendingMemBytes）。 */
+    private const val MAX_PENDING_MEMORY_BYTES = 16L * 1024 * 1024
 
     /** 解压后总字节上限（防 zip 炸弹写满磁盘）。 */
     private const val MAX_TOTAL_BYTES = 1_024L * 1024 * 1024

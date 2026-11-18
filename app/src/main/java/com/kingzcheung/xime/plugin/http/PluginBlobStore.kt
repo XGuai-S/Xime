@@ -49,6 +49,17 @@ class PluginBlobStore(
 
     private val entries = ConcurrentHashMap<String, Entry>()
 
+    /**
+     * 「已发给调用方、尚未登记」的临时文件（canonicalPath）。
+     *
+     * 容量回收（[shrinkToLimitLocked]）按最旧优先删**未登记**文件，如果不排除这些正在写的
+     * 文件，一个并发的大文件下载就会被另一个线程的回收删掉半截 —— 插件拿到损坏文件或
+     * 下载失败，日志里只看到「回收未登记文件 N 个」。登记/释放时移出本集合。
+     */
+    private val pending = java.util.Collections.newSetFromMap(
+        ConcurrentHashMap<String, Boolean>(),
+    )
+
     /** 容量判定与回收的互斥（插件线程与主线程都会触发登记）。 */
     private val capacityLock = Any()
 
@@ -63,20 +74,27 @@ class PluginBlobStore(
     override fun createTempFile(ownerPluginId: String): File {
         rootDir.mkdirs()
         synchronized(capacityLock) { ensureCapacityForNewBlobLocked() }
-        return File(rootDir, "blob-${UUID.randomUUID()}.tmp")
+        val file = File(rootDir, "blob-${UUID.randomUUID()}.tmp")
+        runCatching { file.canonicalPath }.getOrNull()?.let { pending.add(it) }
+        return file
     }
 
     override fun register(ownerPluginId: String, file: File, owned: Boolean): String {
+        val canonical = runCatching { file.canonicalPath }.getOrNull()
+        val id = UUID.randomUUID().toString()
+        // 上限判定与写入必须在**同一个** synchronized 内：旧实现把 entries[id] = … 放在
+        // 锁外，两个并发 register 都能通过 size >= maxEntries 检查，实际可超出上限。
         synchronized(capacityLock) {
             pruneDeadEntriesLocked()
             if (entries.size >= maxEntries) {
+                canonical?.let { pending.remove(it) }
                 throw IllegalStateException(
                     "blob 句柄已达上限（$maxEntries），请先 release 不再使用的句柄"
                 )
             }
+            entries[id] = Entry(pluginId = ownerPluginId, file = file, owned = owned)
+            canonical?.let { pending.remove(it) }
         }
-        val id = UUID.randomUUID().toString()
-        entries[id] = Entry(ownerPluginId, file, owned)
         return id
     }
 
@@ -95,6 +113,7 @@ class PluginBlobStore(
 
     override fun release(id: String) {
         val entry = entries.remove(id) ?: return
+        runCatching { entry.file.canonicalPath }.getOrNull()?.let { pending.remove(it) }
         if (entry.owned && !entry.file.delete()) {
             Log.w(TAG, "blob 暂存文件删除失败: ${entry.file.name}")
         }
@@ -136,6 +155,8 @@ class PluginBlobStore(
         val registered = entries.values
             .mapNotNull { runCatching { it.file.canonicalPath }.getOrNull() }
             .toHashSet()
+        // 正在下载、还没 register 的临时文件同样不能删（见 pending 注释）。
+        registered.addAll(pending)
         var removed = 0
         for (file in files.sortedBy { it.lastModified() }) {
             if (total <= maxTotalBytes) break

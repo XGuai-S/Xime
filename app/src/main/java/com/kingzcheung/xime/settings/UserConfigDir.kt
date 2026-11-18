@@ -172,7 +172,21 @@ object UserConfigDir {
                 Log.w(TAG, "cannot create config dir: ${dir.absolutePath}")
                 return false
             }
-            File(dir, name).writeText(text)
+            // 原子替换：先写同目录临时文件 → fsync → rename。
+            // 旧实现是 File.writeText（truncate 后写），输入法常驻进程随时可能被 LMK 杀，
+            // 半截 xime.yaml 会让用户的全部键盘自定义「一夜清零」（只剩删文件回默认）。
+            val target = File(dir, name)
+            val tmp = File(dir, "$name.tmp")
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(target)) {
+                // 少数 FUSE/外置存储上 rename 会失败：退回覆盖写，至少不丢内容
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
             true
         } catch (t: Throwable) {
             Log.w(TAG, "writeText failed: $name", t)

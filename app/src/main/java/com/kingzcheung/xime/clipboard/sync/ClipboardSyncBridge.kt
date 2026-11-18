@@ -106,7 +106,30 @@ class ClipboardSyncBridge(
 
     /** 推送失败后的退避截止时间。 */
     @Volatile
-    private var retryUntil = 0L
+    /**
+     * 推送失败退避截止（文本 / 图片**各一份**）。
+     *
+     * 旧实现共用一个 retryUntil：一次图片推送失败会把随后 5 秒内的**文本**推送也默默丢掉
+     * （反之亦然），而丢弃后没有任何定时重试，只能等用户下次复制 —— 内容就静默丢了。
+     */
+    private var textRetryUntil = 0L
+    private var imageRetryUntil = 0L
+
+    /** 自写回声抑制窗口：拉取后写回本机剪贴板会触发一次 clipboardChanged。 */
+    private val selfEchoWindowMs = 5 * 60 * 1000L
+    private var textSelfWrittenAt = 0L
+    private var imageSelfWrittenAt = 0L
+
+    /**
+     * 本次变更是否是「我自己刚写回的」回声。
+     *
+     * 旧实现只比 hash、不看时间（textSelfWritten / imageSelfWritten 永不清空）：
+     * 用户在本机**真的重新复制**同一段内容时会被判成回声，此后该内容永不推送。
+     * 加窗口后既挡住拉取回声，又不影响真实复制。
+     */
+    private fun isSelfWrittenEcho(hash: String?, selfHash: String?, writtenAt: Long): Boolean =
+        hash != null && selfHash != null && hash == selfHash &&
+            System.currentTimeMillis() - writtenAt < selfEchoWindowMs
 
     /** 上次真正发起拉取的时间（pullOnce 节流基准）。 */
     @Volatile
@@ -133,7 +156,7 @@ class ClipboardSyncBridge(
                 }
                 if (item.text.isBlank()) return@onEach
                 val hash = ClipboardProfile.sha256Hex(item.text.toByteArray(Charsets.UTF_8))
-                if (hash == textSelfWritten) {
+                if (isSelfWrittenEcho(hash, textSelfWritten, textSelfWrittenAt)) {
                     Log.d(TAG, "Echo suppressed (self-written)")
                     return@onEach
                 }
@@ -182,8 +205,8 @@ class ClipboardSyncBridge(
             Log.d(TAG, "No change, skip push")
             return
         }
-        if (System.currentTimeMillis() < retryUntil) {
-            Log.d(TAG, "Push backoff active, skip")
+        if (System.currentTimeMillis() < textRetryUntil) {
+            Log.d(TAG, "Text push backoff active, skip")
             return
         }
         val profile = ClipboardProfile.fromText(text)
@@ -196,9 +219,9 @@ class ClipboardSyncBridge(
         }
         if (ok) {
             textLastHash = hash
-            retryUntil = 0L
+            textRetryUntil = 0L
         } else {
-            retryUntil = System.currentTimeMillis() + PUSH_RETRY_BACKOFF_MS
+            textRetryUntil = System.currentTimeMillis() + PUSH_RETRY_BACKOFF_MS
         }
     }
 
@@ -220,7 +243,7 @@ class ClipboardSyncBridge(
             }
             return
         }
-        if (System.currentTimeMillis() < retryUntil) {
+        if (System.currentTimeMillis() < imageRetryUntil) {
             Log.d(TAG, "Image push backoff active, skip")
             return
         }
@@ -253,10 +276,10 @@ class ClipboardSyncBridge(
         }
         if (ok) {
             imageLastHash = profile.hash
-            retryUntil = 0L
+            imageRetryUntil = 0L
             Log.d(TAG, "Image pushed (${bytes.size} bytes, ${profile.dataName})")
         } else {
-            retryUntil = System.currentTimeMillis() + PUSH_RETRY_BACKOFF_MS
+            imageRetryUntil = System.currentTimeMillis() + PUSH_RETRY_BACKOFF_MS
         }
     }
 
@@ -283,7 +306,9 @@ class ClipboardSyncBridge(
         }
 
         // 与本地当前内容相同 或 与自己写回的内容相同 → 跳过（避免循环）
-        if (remoteHash == currentHash || remoteHash == textSelfWritten) {
+        if (remoteHash == currentHash ||
+            isSelfWrittenEcho(remoteHash, textSelfWritten, textSelfWrittenAt)
+        ) {
             Log.d(TAG, "Remote unchanged vs local, skip write")
             return
         }
@@ -303,6 +328,7 @@ class ClipboardSyncBridge(
         }
         textLastHash = remoteHash
         textSelfWritten = remoteHash
+        textSelfWrittenAt = System.currentTimeMillis()
     }
 
     /**
@@ -328,13 +354,14 @@ class ClipboardSyncBridge(
             Log.e(TAG, "Remote attachment hash mismatch, discard (declared=${remote.hash}, actual=$hash)")
             return
         }
-        if (hash == imageSelfWritten || hash == imageLastHash) {
+        if (isSelfWrittenEcho(hash, imageSelfWritten, imageSelfWrittenAt) || hash == imageLastHash) {
             Log.d(TAG, "Remote attachment unchanged vs local, skip")
             return
         }
         // 先登记去重状态再入库：入库会触发 clipboardChanged，订阅者可能先于后续语句看到它
         imageLastHash = hash
         imageSelfWritten = hash
+        imageSelfWrittenAt = System.currentTimeMillis()
         val path = clipboardManager.importImageFromSync(data, remote.dataName)
         if (path == null) {
             // 落盘/入库失败：回滚去重状态，否则同内容下次会被误判为"已同步"
@@ -351,5 +378,13 @@ class ClipboardSyncBridge(
             shareCacheCopy = false,
         )
         Log.d(TAG, "Remote image written to local clipboard (copied=$copied, $hash)")
+        if (!copied) {
+            // 写回系统剪贴板失败：去重状态必须回滚，否则这条远端图片会被当成「已同步」
+            // 永不重试，用户那边永远拿不到图（本地库里却有，表现为「同步了但粘不出来」）。
+            if (imageLastHash == hash) imageLastHash = null
+            if (imageSelfWritten == hash) imageSelfWritten = null
+            imageSelfWrittenAt = 0L
+            FileLogger.w(TAG, "远端图片写回系统剪贴板失败，已回滚去重状态 (hash=$hash)")
+        }
     }
 }

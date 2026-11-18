@@ -201,6 +201,9 @@ class InstallerManager(
         private const val MAX_ARCHIVE_ENTRIES = 512
         private const val MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 
+        /** manifest.json 的解析上限（1MB；正常插件 manifest 只有几 KB）。 */
+        private const val MAX_MANIFEST_BYTES = 1024 * 1024
+
         /** 插件 id 白名单：字母/数字/下划线/连字符，点号仅作命名空间分段（禁止 .. / 空段 / /），最长 64，杜绝路径穿越。 */
         private val PLUGIN_ID_REGEX = Regex("^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$")
         private const val PLUGIN_ID_MAX_LENGTH = 64
@@ -461,6 +464,15 @@ class InstallerManager(
         }
     }
 
+    /**
+     * 卸载插件（删目录 + 注销注册表）。
+     *
+     * **调用前必须先 `PluginManager.unloadPlugin(pluginId)`**：本类在 plugin-core 内，
+     * 反向依赖 PluginManager 会成环，所以这里不做隐式卸载。忘了 unload 的后果是
+     * 已加载的 `JsScriptRuntime` 继续持有 QuickJS 引擎与 WebSocket，用户在「卸载」之后
+     * 插件仍能联网、仍能读剪贴板（= 撤销授权没生效）。当前唯一调用方
+     * （PluginsSettingsViewModel.uninstallPlugin）已按此顺序调用。
+     */
     suspend fun uninstallPlugin(pluginId: String): Boolean = withContext(Dispatchers.IO) {
         if (!isValidPluginId(pluginId)) {
             Log.e("InstallerManager", "uninstallPlugin 拒绝非法 id: $pluginId")
@@ -509,10 +521,9 @@ class InstallerManager(
                     throw IllegalArgumentException("插件包条目数超过上限（$MAX_ARCHIVE_ENTRIES）")
                 }
                 if (entry.isDirectory) continue
-                if (entry.size > 0) totalBytes += entry.size
-                if (totalBytes > MAX_ARCHIVE_TOTAL_BYTES) {
-                    throw IllegalArgumentException("插件包解压体积超过上限（${MAX_ARCHIVE_TOTAL_BYTES / 1024 / 1024}MB）")
-                }
+                // entry.size 是**声明值**：data descriptor 场景下为 -1/0，旧实现据此累加
+                // 等于完全没有总量闸，一个高压缩比包就能写满 /data。改为在下方写入时
+                // 按**实际写出字节**累计并即时拦截。
                 // Windows 打包工具可能产生 "\" 分隔的条目名，统一规范为 "/"
                 val name = entry.name.replace('\\', '/')
                 if (name.startsWith("lib/")) continue
@@ -522,7 +533,20 @@ class InstallerManager(
                 val outputFile = File(pluginDir, name)
                 outputFile.parentFile?.mkdirs()
                 zip.getInputStream(entry).use { input ->
-                    outputFile.outputStream().use { output -> input.copyTo(output) }
+                    outputFile.outputStream().use { output ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            totalBytes += n
+                            if (totalBytes > MAX_ARCHIVE_TOTAL_BYTES) {
+                                throw IllegalArgumentException(
+                                    "插件包解压体积超过上限（${MAX_ARCHIVE_TOTAL_BYTES / 1024 / 1024}MB）"
+                                )
+                            }
+                            output.write(buf, 0, n)
+                        }
+                    }
                 }
             }
         }
@@ -533,7 +557,24 @@ class InstallerManager(
             ZipFile(pluginFile).use { zip ->
                 val entry = zip.getEntry(MANIFEST_JSON)
                     ?: return PluginParseResult.Failure("插件配置解析失败（缺少 manifest.json）")
-                zip.getInputStream(entry).readBytes().toString(Charsets.UTF_8)
+                // manifest 也要有界：它可能被做成高压缩比炸弹，readBytes() 会先把整个
+                // 解压结果读进堆再解析（10MB 包体限制挡不住解压后膨胀）。
+                val limit = MAX_MANIFEST_BYTES
+                val out = java.io.ByteArrayOutputStream()
+                zip.getInputStream(entry).use { input ->
+                    val buf = ByteArray(8 * 1024)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > limit) {
+                            return PluginParseResult.Failure("manifest.json 超过 ${limit / 1024}KB 上限")
+                        }
+                        out.write(buf, 0, n)
+                    }
+                }
+                out.toString(Charsets.UTF_8.name())
             }
         } catch (e: Exception) {
             Log.e("InstallerManager", "parsePluginConfig failed", e)

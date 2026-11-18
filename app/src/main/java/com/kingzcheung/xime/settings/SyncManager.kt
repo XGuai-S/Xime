@@ -41,6 +41,15 @@ object SyncManager {
 
     private const val IMPORT_DIR_PREFIX = "imported"
 
+    /** 快照包解压的条目数上限（防御构造包 / zip bomb）。 */
+    private const val MAX_SYNC_ENTRIES = 2000
+
+    /** 快照包解压后的实际写出字节上限（按 real 写出量计，不信 entry.size 声明值）。 */
+    private const val MAX_SYNC_TOTAL_BYTES = 512L * 1024 * 1024
+
+    /** 手动导入单个快照文件的读取上限（与 UserDictIoManager.MAX_IMPORT_BYTES 同量级）。 */
+    private const val MAX_SNAPSHOT_IMPORT_BYTES = 8 * 1024 * 1024
+
     // ---------- installation id ----------
 
     /**
@@ -232,6 +241,7 @@ object SyncManager {
     private fun unpackArchiveStream(baseDir: File, rawInput: java.io.InputStream): Int {
         val canonicalBase = baseDir.canonicalPath + File.separator
         var count = 0
+        var totalBytes = 0L
         ZipInputStream(rawInput).use { zis ->
             while (true) {
                 val entry = zis.nextEntry ?: break
@@ -244,8 +254,27 @@ object SyncManager {
                 }
                 // 只落盘词库快照：其它条目既不参与合并，也不该进 sync 目录被再次打包
                 if (!rel.endsWith(SNAPSHOT_EXTENSION)) continue
+                if (count >= MAX_SYNC_ENTRIES) {
+                    throw java.io.IOException("快照包条目数超过 $MAX_SYNC_ENTRIES，已中止")
+                }
                 target.parentFile?.mkdirs()
-                target.outputStream().use { zis.copyTo(it) }
+                // 按**实际写出字节**累计（entry.size 是声明值，data descriptor 下不可信）：
+                // 包里塞一个高压缩比条目就能写满 /data，随后 packSyncDirToFile 还会把它
+                // 打包上传造成二次放大。备份包那边早有同款上限，这条路径漏了。
+                target.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = zis.read(buf)
+                        if (n < 0) break
+                        totalBytes += n
+                        if (totalBytes > MAX_SYNC_TOTAL_BYTES) {
+                            throw java.io.IOException(
+                                "快照包解压后超过 ${MAX_SYNC_TOTAL_BYTES / 1024 / 1024}MB，已中止"
+                            )
+                        }
+                        out.write(buf, 0, n)
+                    }
+                }
                 count++
             }
         }
@@ -362,8 +391,27 @@ object SyncManager {
             var snapshotFiles = 0
             var importedEntries = 0
             for (uri in uris) {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: return Result.failure(IllegalStateException("无法读取所选文件"))
+                // 有界读：旧实现 readBytes() 会把整份文件读进常驻输入法进程的堆，
+                // 用户在选择器里误选一个几百 MB 的备份/视频就直接 OOM 被杀。
+                val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+                    val sb = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(64 * 1024)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_SNAPSHOT_IMPORT_BYTES) {
+                            return Result.failure(
+                                IllegalStateException(
+                                    "文件过大（超过 ${MAX_SNAPSHOT_IMPORT_BYTES / 1024 / 1024}MB），不像是词库快照"
+                                )
+                            )
+                        }
+                        sb.write(buf, 0, n)
+                    }
+                    sb.toByteArray()
+                } ?: return Result.failure(IllegalStateException("无法读取所选文件"))
                 val raw = queryDisplayName(context, uri) ?: "snapshot.userdb.txt"
                 val safeName = raw.substringAfterLast('/').replace(Regex("[\\\\/:*?\"<>|]"), "_")
                 when (classifySnapshotFile(safeName, bytes)) {

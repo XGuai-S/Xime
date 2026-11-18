@@ -1046,11 +1046,14 @@ class JsScriptRuntime(
         block: () -> T,
     ): GuardResult<T> {
         if (poisoned || closed) return GuardResult.TimedOut
+        // 标记任务是否真的开始执行：executor 是单线程 FIFO，任务可能还在排队。
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
         val future = try {
             executor.submit(Callable {
                 // 二次判定：任务真正开始执行时运行时可能已关闭。[close] 的屏障只保证
                 // "已开始的调用"先于引擎关闭结束，不保证"提交"与"关闭"之间没有窗口。
                 if (closed) throw RuntimeClosedSignal()
+                started.set(true)
                 pendingBinaryArgs = binaries
                 try {
                     block()
@@ -1066,7 +1069,12 @@ class JsScriptRuntime(
             GuardResult.Ok(future.get(timeoutMs, TimeUnit.MILLISECONDS))
         } catch (e: TimeoutException) {
             future.cancel(true)
-            interruptAndPoison(poisonOnTimeout)
+            // 只有「确实在跑」的求值才能被中断。QuickJS 的 interruptEvaluation 是**引擎级**
+            // 中断，它不知道打断的是哪一次求值：如果本次任务还排在单线程队列里（started=false），
+            // 这一下打断的是**别人**正在执行的调用 —— 那一条会抛 QuickJsInterruptedException，
+            // 被它自己的 runGuarded 判成「我超时了」→ poisonOnTimeout=true 时直接把它标记中毒，
+            // 用户看到的是「一个健康插件突然被停用、提示疑似死循环」。
+            if (started.get() && !future.isDone) interruptAndPoison(poisonOnTimeout)
             GuardResult.TimedOut
         } catch (e: Exception) {
             future.cancel(true)
@@ -1381,12 +1389,27 @@ class JsScriptRuntime(
      * @param args 参数（null/Boolean/Int/Long/Double/String/Map/List/ByteArray/Uint8Array）
      * @return JS 返回值（已转纯 Kotlin 结构）；方法不存在 / 报错 / 超时返回 null
      */
-    fun call(name: String, vararg args: Any?): Any? {
+    fun call(name: String, vararg args: Any?): Any? =
+        callWithTimeout(name, callTimeoutMs, poisonOnTimeout = true, *args)
+
+    /**
+     * 带超时与中毒策略的调用。
+     *
+     * 给「设置页组合期」这类不能长时间阻塞 UI、且**不该因一次慢读就把插件判死**的只读调用用：
+     * 用短超时 + `poisonOnTimeout = false`。旧实现一律走 [call]（180s + 中毒），
+     * 插件只要慢一点，Compose 组合期就在主线程卡到 ANR，随后插件被永久标记中毒。
+     */
+    fun callWithTimeout(
+        name: String,
+        timeoutMs: Long,
+        poisonOnTimeout: Boolean,
+        vararg args: Any?,
+    ): Any? {
         if (!loaded || closed) return null
         return try {
             val (argsJs, binaries) = argsExpr(args.toList())
             val expr = callExpr(name, argsJs)
-            val result = runGuarded(callTimeoutMs, poisonOnTimeout = true, binaries = binaries) {
+            val result = runGuarded(timeoutMs, poisonOnTimeout = poisonOnTimeout, binaries = binaries) {
                 runBlocking { engine.evaluate<Any?>(expr, filename = entryScript) }
             }
             when (result) {

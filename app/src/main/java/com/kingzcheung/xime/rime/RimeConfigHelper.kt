@@ -113,6 +113,14 @@ object RimeConfigHelper {
                 Log.i(TAG, "Build exists, running incremental maintenance")
                 if (engine.deployIncremental()) {
                     deployed = true
+                } else if (engine.isMaintaining()) {
+                    // 维护**还在跑**（180s 超时或「已在维护中」）—— 这与「失败」完全是两件事：
+                    // librime 的编译线程此刻正在写 build/ 下的 *.bin。旧实现在这里
+                    // deleteRecursively()，会把正在写的产物删成半成品，随后 deploy() 也因
+                    // 仍在维护返回 false → 部署成果被自己抹掉，用户看到「部署完候选恒空」，
+                    // 下次启动还得全量重编数分钟。这里直接放弃本轮，保留 build 原样。
+                    FileLogger.w(TAG, "增量维护仍在进行中，本轮跳过（不删除 build 目录）")
+                    deployed = false
                 } else {
                     FileLogger.w(TAG, "Incremental maintenance failed, falling back to full deploy")
                     buildDir.deleteRecursively()

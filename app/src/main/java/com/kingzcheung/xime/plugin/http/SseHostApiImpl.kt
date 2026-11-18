@@ -38,6 +38,25 @@ class SseHostApiImpl(
 
     companion object {
         private const val TAG = "SseHostApi"
+
+        /** 单会话累计正文字符上限（防止「永不结束的流」把宿主堆吃满）。 */
+        private const val MAX_TOTAL_TEXT_CHARS = 8 * 1024 * 1024
+
+        /** 并发 SSE 会话上限（插件反复 stream 不关会导致 fd/线程耗尽）。 */
+        private const val MAX_SESSIONS = 8
+    }
+
+    /** 日志脱敏：去掉 query/fragment 与 userinfo（与 [HttpHostApiImpl] 同口径）。 */
+    private fun sanitizeUrl(raw: String): String {
+        val noQuery = raw.substringBefore('?').substringBefore('#')
+        val schemeEnd = noQuery.indexOf("://")
+        if (schemeEnd < 0) return noQuery
+        val head = noQuery.substring(0, schemeEnd + 3)
+        val rest = noQuery.substring(schemeEnd + 3)
+        val at = rest.indexOf('@')
+        val cleaned = if (at >= 0) rest.substring(at + 1) else rest
+        val hasQuery = raw.contains('?') || raw.contains('#')
+        return head + cleaned + if (hasQuery) "?***" else ""
     }
 
     /**
@@ -50,7 +69,9 @@ class SseHostApiImpl(
      */
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
+        // 不用 0（永不超时）：SSE 服务端会发心跳，120s 没有任何字节说明连接已死，
+        // 旧实现 0 会让僵死连接一直占着线程与 fd，直到进程结束。
+        .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
@@ -66,6 +87,10 @@ class SseHostApiImpl(
         @Volatile
         var closed = false
         val totalText = StringBuilder()
+
+        /** 累计正文超限标志（超限后只累加到这里为止，仍会通知插件 truncated）。 */
+        @Volatile
+        var truncated = false
     }
 
     override fun connect(
@@ -125,15 +150,30 @@ class SseHostApiImpl(
                 client
             }
 
+            if (sessions.size >= MAX_SESSIONS) {
+                lastErrorMsg = "并发 SSE 会话已达上限（$MAX_SESSIONS）"
+                Log.w(TAG, "[$pluginId] 拒绝新建 SSE 会话：已达上限 $MAX_SESSIONS")
+                return -1
+            }
             val id = nextId.getAndIncrement()
             var current: Session? = null
-            Log.d(TAG, "[$pluginId] SSE 会话 $id 建立: $url body=${body?.toString(Charsets.UTF_8)?.take(300) ?: "<空>"}")
+            // 日志脱敏：URL 的 query 里可能带 S3 预签名 / OAuth token，body 是用户输入。
+            // HttpHostApiImpl 为此专门做了 sanitizeUrl 并「release 也写」，这里不能再裸打。
+            Log.d(TAG, "[$pluginId] SSE 会话 $id 建立: ${sanitizeUrl(url)} bodyLen=${body?.size ?: 0}")
             val esListener = object : EventSourceListener() {
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                     val s = current ?: return
                     if (s.closed) return
-                    s.totalText.append(data)
-                    Log.d(TAG, "[$pluginId] SSE 会话 ${s.id} 收到事件: ${data.take(200)}")
+                    // totalText 会攒下**整条流**（只在 onClosed 时一次性交给插件）：
+                    // 一个永不结束的流就能把常驻输入法进程的堆吃满（JS 堆的 96MB 管不到宿主侧）。
+                    if (s.totalText.length + data.length <= MAX_TOTAL_TEXT_CHARS) {
+                        s.totalText.append(data)
+                    } else if (!s.truncated) {
+                        s.truncated = true
+                        Log.w(TAG, "[$pluginId] SSE 会话 ${s.id} 正文超过 $MAX_TOTAL_TEXT_CHARS 字符，后续内容丢弃")
+                    }
+                    // 事件正文是用户输入 / 模型回复，不写进 logcat（只留长度）。
+                    Log.d(TAG, "[$pluginId] SSE 会话 ${s.id} 收到事件 len=${data.length}")
                     listener.onData(data)
                 }
 

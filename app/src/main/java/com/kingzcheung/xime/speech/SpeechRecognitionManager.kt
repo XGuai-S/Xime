@@ -149,6 +149,8 @@ class SpeechRecognitionManager(private val context: Context) {
     private fun startRecording() {
         val currentBackend = synchronized(preloadLock) { backend } ?: return
         synchronized(preloadLock) { sessionId++ }
+        // 新会话开始：解除「取消后抑制结果」（见 cancelRecognition / handleResult）
+        suppressResults = false
 
         // 新会话复用后端：取消上一次会话遗留的延迟释放
         mainHandler.removeCallbacks(pendingBackendRelease)
@@ -223,6 +225,8 @@ class SpeechRecognitionManager(private val context: Context) {
 
     fun cancelRecognition() {
         Log.d(TAG, "Canceling recognition")
+        // 取消 = 用户不要这段结果：此后到达的最终包一律丢弃（见 handleResult）。
+        suppressResults = true
         val thread = recordingThread
         if (thread == null) {
             // 模型仍在后台加载中：标记取消，加载完成后不再启动录音
@@ -472,6 +476,11 @@ class SpeechRecognitionManager(private val context: Context) {
             try {
                 while (!interrupted() && !stopRequested) {
                     val nread = audioRecord.read(buffer, 0, buffer.size)
+                    if (nread == 0) {
+                        // read() 立即返回 0（静音/设备切换瞬间）时旧实现直接进入下一轮，
+                        // 变成紧循环：单核 100% 且不响应停止请求。与 WavAudioRecorder 对齐加让出。
+                        try { Thread.sleep(20) } catch (_: InterruptedException) { break }
+                    }
                     if (nread > 0) {
                         var peak = 0
                         for (i in 0 until nread) {
@@ -544,8 +553,17 @@ class SpeechRecognitionManager(private val context: Context) {
         }
     }
 
+    /** 取消后抑制结果回调：cancel 之后后端仍可能吐出最终包（旧会话的尾巴）。 */
+    @Volatile
+    private var suppressResults = false
+
     private fun handleResult(text: String) {
+        if (suppressResults) {
+            Log.d(TAG, "取消后到达的识别结果已丢弃 len=${text.length}")
+            return
+        }
         mainHandler.post {
+            if (suppressResults) return@post
             resultCallback?.invoke(text)
         }
     }

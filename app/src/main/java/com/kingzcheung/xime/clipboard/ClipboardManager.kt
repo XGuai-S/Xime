@@ -18,6 +18,7 @@ import com.kingzcheung.xime.clipboard.db.ClipboardEntry
 import com.kingzcheung.xime.plugin.core.api.ClipboardProfile
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -82,6 +83,12 @@ class ClipboardManager private constructor(private val context: Context) {
          */
         private const val ORPHAN_SWEEP_INTERVAL = 20
 
+        /** emoji_cache 保留时长（7 天）。 */
+        private const val EMOJI_CACHE_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
+
+        /** emoji_cache 总量上限（64MB）。 */
+        private const val EMOJI_CACHE_MAX_BYTES = 64L * 1024 * 1024
+
         /**
          * 同步导入图片的**绝对**上限 = 设置允许的最大单张（1–20MB 的最大值）。
          *
@@ -108,6 +115,30 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /** 图片落盘/入库/配额收敛互斥：避免并发采集时孤儿清理误删刚写入的文件。 */
     private val imageMutex = Mutex()
+
+    /** 文本入库的「查重 + 插入」串行化锁（见 addItem）。 */
+    private val textWriteMutex = Mutex()
+
+    /** `cacheDir/emoji_cache` 的保留时长与总量上限（启动自检按双阈值回收）。 */
+    private fun sweepEmojiCache() {
+        val dir = File(context.cacheDir, "emoji_cache")
+        val files = dir.listFiles()?.filter { it.isFile } ?: return
+        if (files.isEmpty()) return
+        val now = System.currentTimeMillis()
+        var total = files.sumOf { it.length() }
+        var removed = 0
+        val ordered = files.sortedBy { it.lastModified() }
+        for (file in ordered) {
+            val expired = now - file.lastModified() > EMOJI_CACHE_MAX_AGE_MS
+            if (!expired && total <= EMOJI_CACHE_MAX_BYTES) break
+            val length = file.length()
+            if (file.delete()) {
+                total -= length
+                removed++
+            }
+        }
+        if (removed > 0) Log.i(TAG, "Emoji cache swept: removed=$removed remainBytes=$total")
+    }
 
     /** 距上次孤儿清理的图片入库次数（须在 [imageMutex] 内读写）。 */
     private var capturesSinceOrphanSweep = 0
@@ -443,7 +474,7 @@ class ClipboardManager private constructor(private val context: Context) {
         height: Int,
         limits: ImageLimits,
     ): String? {
-        return imageMutex.withLock {
+        val stored = imageMutex.withLock {
             val hash = ClipboardProfile.sha256Hex(bytes)
             val mime = ClipboardImageStore.mimeForExtension(extension)
                 ?: mimeHint?.takeIf { it.startsWith("image/") }
@@ -479,9 +510,12 @@ class ClipboardManager private constructor(private val context: Context) {
             enforceImageQuotaLocked(limits, sweepOrphans = shouldSweepOrphansNow())
             // 回读入库结果（带 id；极端情况下容量超限且其余条目全受保护时可能已被淘汰）
             val row = dao.findImageByHash(hash) ?: return@withLock null
-            _clipboardChanged.emit(row.toClipboardItem())
-            row.imagePath
-        }
+            row.imagePath to row.toClipboardItem()
+        } ?: return null
+        // emit 放到锁外：订阅者（同步插件）会做网络 IO，锁内 emit 等于用一把图片锁
+        // 去等别人的网络往返（配合上面的 DROP_OLDEST 才彻底不阻塞）。
+        _clipboardChanged.emit(stored.second)
+        return stored.first
     }
 
     /**
@@ -654,7 +688,18 @@ class ClipboardManager private constructor(private val context: Context) {
     val quickSendItems: StateFlow<List<ClipboardItem>> = _quickSendItems.asStateFlow()
 
     /** 本地剪贴板变更事件流（新增/更新条目时发射，供剪贴板同步等外部消费）。 */
-    private val _clipboardChanged = MutableSharedFlow<ClipboardItem>(extraBufferCapacity = 16)
+    /**
+     * 剪贴板变更事件（同步推送 / 插件 / 消费标记的入口）。
+     *
+     * `onBufferOverflow = DROP_OLDEST`：订阅者里有做网络 IO 的同步插件，默认 SUSPEND 语义下
+     * 缓冲（16）一满，`emit` 就挂住调用方——旧实现里这发生在 `imageMutex` **锁内**，
+     * 一个慢订阅者能把整个图片子系统（采集、同步导入、设置页清理）全部堵死。
+     * 变更通知是幂等提示、丢最旧的没问题，绝不能让采集路径被订阅者拖住。
+     */
+    private val _clipboardChanged = MutableSharedFlow<ClipboardItem>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     val clipboardChanged: SharedFlow<ClipboardItem> = _clipboardChanged.asSharedFlow()
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -679,6 +724,10 @@ class ClipboardManager private constructor(private val context: Context) {
                     enforceImageQuotaLocked(imageLimits(), sweepOrphans = true)
                 }
             }.onFailure { Log.w(TAG, "Clipboard image startup cleanup failed", it) }
+            // 启动自检：emoji_cache（commitImage / 共享图片的中转副本）只写不清理，
+            // 长期使用会无界增长；这里按「7 天 + 64MB」双阈值回收。
+            runCatching { sweepEmojiCache() }
+                .onFailure { Log.w(TAG, "Emoji cache sweep failed", it) }
             // 启动自检：上次没删干净的中转图
             runCatching { MediaBridge.sweepStale(context) }
                 .onFailure { Log.w(TAG, "Media bridge startup sweep failed", it) }
@@ -970,7 +1019,13 @@ class ClipboardManager private constructor(private val context: Context) {
         scope.launch {
             var rowId = 0L
             runCatching {
-                rowId = dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+                // 串行化「按文本去重 + 插入」：监听回调与键盘补采是两条独立链路，
+                // upsertAndTrim 内部是「先 findByText 再 insert」，并发时两边都可能读到
+                // null，插出两行同文本（面板出现重复卡片，markConsumed(text) 还会标错行）。
+                // 库里的 text 索引不是唯一索引，靠 SQL 挡不住。
+                rowId = textWriteMutex.withLock {
+                    dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+                }
             }.onFailure {
                 // 入库失败必须留痕：用户只会看到"复制了没进面板"，无从判断是采集没触发
                 // 还是写库失败。写进 xime 日志文件才可排查。
@@ -1029,9 +1084,15 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /** 删除条目并回收对应图片文件（文本条目无文件，行为不变）。 */
     private suspend fun deleteEntriesAndFiles(ids: List<Long>) {
-        val paths = dao.findByIds(ids).filter { it.imagePath.isNotEmpty() }.map { it.imagePath }
-        dao.deleteClipboardByIds(ids)
-        paths.forEach { imageStore.delete(it) }
+        // 必须与 addImage / 配额收敛共用一把锁：否则「用户删条目」与「同一张图又被复制」
+        // 交错时，addImage 命中同一 hash 只做 revive，删除方随后把行与文件一起删掉 →
+        // 库里没有任何行引用该文件，系统剪贴板却仍指向它，粘贴失败且孤儿清理救不回来
+        // （孤儿清理只会删没人引用的文件，不会把「有行无文件」修回去）。
+        imageMutex.withLock {
+            val paths = dao.findByIds(ids).filter { it.imagePath.isNotEmpty() }.map { it.imagePath }
+            dao.deleteClipboardByIds(ids)
+            paths.forEach { imageStore.delete(it) }
+        }
     }
 
     fun splitItem(id: Long) {

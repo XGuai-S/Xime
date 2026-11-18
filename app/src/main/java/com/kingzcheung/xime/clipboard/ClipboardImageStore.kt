@@ -46,6 +46,12 @@ class ClipboardImageStore(private val rootDir: File) {
         /** 图片条目数量上限（文本条目上限 MAX_ITEMS 独立）。 */
         const val MAX_IMAGES = 200
 
+        /**
+         * 半成品 `.tmp` 的回收宽限（10 分钟）：只清理明显是崩溃残留的临时文件。
+         * 见 [cleanupOrphans]。
+         */
+        private const val TMP_GRACE_MS = 10L * 60 * 1000
+
         /** 支持采集的图片 MIME → 扩展名。 */
         private val MIME_TO_EXT = mapOf(
             "image/png" to "png",
@@ -270,11 +276,21 @@ class ClipboardImageStore(private val rootDir: File) {
     fun cleanupOrphans(knownRelativePaths: Set<String>): Int {
         val files = rootDir.listFiles() ?: return 0
         var removed = 0
+        val now = System.currentTimeMillis()
         for (file in files) {
             if (!file.isFile) continue
             val relative = "$DIR_NAME/${file.name}"
-            val isTmp = file.name.endsWith(".tmp")
-            if (!isTmp && relative in knownRelativePaths) continue
+            if (file.name.endsWith(".tmp")) {
+                // .tmp 是 [save] 的中间态：`<hash>.<ext>.tmp` → renameTo 成品。
+                // 旧实现一律删，靠「save 与清理都在 imageMutex 内」这条调用纪律维持正确性；
+                // 一旦将来有别的路径在这把锁外落盘（插件、同步、备份恢复），
+                // 清理就会删掉正在写的临时文件 → rename 失败 → save 返回 null，
+                // 表现为「复制了图片没反应」。这里给宽限期，只回收真正的半成品。
+                if (now - file.lastModified() < TMP_GRACE_MS) continue
+                if (file.delete()) removed++
+                continue
+            }
+            if (relative in knownRelativePaths) continue
             if (file.delete()) removed++
         }
         return removed

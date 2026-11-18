@@ -295,12 +295,16 @@ class RimeEngine {
                         nativeInstallSignalHandler(userDataDir)
                         notifyDeploymentStatus(true, "正在加载输入法引擎...")
                         nativeInitialize(userDataDir, sharedDataDir)
+                        // 顺序至关重要：先补丁、后发布 isInitialized。
+                        // isInitialized 一置位，其它线程的 `if (!isInitialized) return` 守卫
+                        // 立刻放行并进 native；而补丁循环原本在**锁外**跑（native 侧读写
+                        // config 组件树 + 写 custom.yaml），两者并发正是历史上
+                        // __dynamic_cast SIGSEGV 的同类栈。这里用 rimeLock 包住补丁，
+                        // 且放在发布之前，保证「对外可见的就绪」= 「native 侧已完全就绪」。
+                        locked {
+                            ensureT9SchemaPatchesForDeployedSchemas(userDataDir)
+                        }
                         isInitialized = true
-
-                        // 部署后主动触发：为已部署目录中所有 T9 方案打九键特有补丁
-                        // （t9 四要素 + 个人词库 packs 兜底），保证第三方九键方案
-                        // 首次使用前 custom.yaml 健康、用户词典生效。
-                        ensureT9SchemaPatchesForDeployedSchemas(userDataDir)
 
                         // startup 只初始化引擎，不创建 session
                         // session 在第一次使用时延迟创建（ensureSession）
@@ -1041,18 +1045,22 @@ class RimeEngine {
      */
     fun t9SelectCandidate(pinyin: String, text: String?, textLength: Int): Boolean {
         if (!isInitialized) return false
-        return tryLocked(false) {
-            if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked false
-            nativeT9SelectCandidate(pinyin, text, textLength)
+        // 同 t9FlushRimeInput：右选必须真的执行，静默返回 false 会被上层当成
+        // 「候选没被消费」的正常业务结果，用户点右选就没反应。
+        return locked {
+            if (!nativeHasSession() && !nativeCreateSession()) false
+            else nativeT9SelectCandidate(pinyin, text, textLength)
         }
     }
 
     /** 用户词典写入/回滚公共实现：memorize=true → commits=+1；false → commits=-1。 */
     private fun t9DictOp(text: String, pinyin: String, memorize: Boolean): Boolean {
         if (!isInitialized || text.isEmpty() || pinyin.isEmpty()) return false
-        return tryLocked(false) {
-            if (!nativeHasSession() && !nativeCreateSession()) return@tryLocked false
-            if (memorize) nativeT9Memorize(text, pinyin) else nativeT9Forget(text, pinyin)
+        // 用户词典调频同样不能用 tryLocked：静默返回 false 会让上层把「词频没写进去」
+        // 当成正常结果。调用方在上屏后的后台线程，阻塞等锁安全。
+        return locked {
+            if (!nativeHasSession() && !nativeCreateSession()) false
+            else if (memorize) nativeT9Memorize(text, pinyin) else nativeT9Forget(text, pinyin)
         }
     }
 
@@ -1244,7 +1252,12 @@ class RimeEngine {
      */
     fun t9FlushRimeInput() {
         if (!isInitialized) return
-        tryLocked(Unit) {
+        // 必须 locked（阻塞等锁），不能用 tryLocked：processKey 明确保证「按键永不丢」
+        // （阻塞等锁），但它只把动作标记进 C++ 侧 pending，真正 compose 在这里。
+        // 若部署/同步持锁时这里静默跳过，C++ pending 就永远发不出去，
+        // RIME composition 与 T9 buffer 分叉 → 下一键 set_input 连旧 pending 一起冲刷，
+        // 表现为「编码忽然清空 / 跳字 / 错词」。调用方都在后台线程，阻塞是安全的。
+        locked {
             nativeT9FlushRimeInput()
         }
     }

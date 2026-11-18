@@ -282,19 +282,34 @@ class WirelessImportHelper(private val context: Context) {
     }
 
     private suspend fun routeUpload(call: ApplicationCall) {
-        val rimeDir = File(context.filesDir, "rime")
-        rimeDir.mkdirs()
-        val tmpFile = File.createTempFile("upload_", ".tmp", rimeDir)
+        // 临时文件落 cacheDir/uploads：旧实现建在 files/rime 里，会被 RimeUserFileSync
+        // 镜像到可见目录、并被备份包一并打包上传（变成用户可见的垃圾文件），
+        // 进程在解析中途被杀也会残留 upload_*.tmp 污染词库目录。
+        val uploadDir = File(context.cacheDir, "uploads").apply { mkdirs() }
+        val tmpFile = File.createTempFile("upload_", ".tmp", uploadDir)
         var lastName = ""
 
         try {
             // 1. 流式写入临时文件（不占堆内存）
             val ch = call.receiveChannel()
+            // 上传总量上限：旧实现完全没有闸门，同一 Wi-Fi 内任何拿到令牌的人（或用户误传
+            // 一个大文件）都能把 /data 写满。这里按累计字节拦截并回 413。
+            var uploaded = 0L
             java.io.FileOutputStream(tmpFile).use { fos ->
                 val buf = ByteArray(8192)
                 while (!ch.isClosedForRead) {
                     val n = ch.readAvailable(buf, 0, buf.size)
                     if (n <= 0) break
+                    uploaded += n
+                    if (uploaded > MAX_UPLOAD_BYTES) {
+                        runCatching { tmpFile.delete() }
+                        call.respondText(
+                            """{"success":false,"error":"文件超过上限 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB"}""",
+                            ContentType.Application.Json,
+                            HttpStatusCode.PayloadTooLarge,
+                        )
+                        return
+                    }
                     fos.write(buf, 0, n)
                 }
             }
@@ -498,6 +513,9 @@ private fun buildNode(file: File): FileNode {
 
     companion object {
         private const val TAG = "WirelessImport"
+
+    /** 单次上传总量上限（防同一 Wi-Fi 内的令牌持有者把 /data 写满）。 */
+    private const val MAX_UPLOAD_BYTES = 64L * 1024 * 1024
 
         /** 携带会话令牌的请求头（二维码 URL 里用 `?t=` 传递，前端转成这个头）。 */
         private const val TOKEN_HEADER = "X-Xime-Token"

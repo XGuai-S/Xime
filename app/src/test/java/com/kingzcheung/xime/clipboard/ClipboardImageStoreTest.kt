@@ -246,8 +246,16 @@ class ClipboardImageStoreTest {
         val store = store()
         val keep = store.save(png(), "keep", "png")!!
         val orphan = store.save(png(96), "orphan", "png")!!
-        // 模拟上次淘汰残留的半成品文件
-        File(ClipboardImageStore.rootDirOf(filesDir()), "broken.png.tmp").writeBytes(png())
+        // 模拟上次淘汰残留的半成品文件（必须够旧：cleanupOrphans 对 .tmp 有 10 分钟宽限期，
+        // 因为 .tmp 是 save() 的中间态，删掉正在写的临时文件会让 rename 失败、
+        // 表现为「复制了图片没反应」。见 cleanupOrphans 注释。）
+        val brokenTmp = File(ClipboardImageStore.rootDirOf(filesDir()), "broken.png.tmp")
+        brokenTmp.writeBytes(png())
+        assertTrue(brokenTmp.setLastModified(System.currentTimeMillis() - 11L * 60 * 1000))
+
+        // 刚写出来的 .tmp 必须被保留（宽限期内的半成品）
+        val freshTmp = File(ClipboardImageStore.rootDirOf(filesDir()), "fresh.png.tmp")
+        freshTmp.writeBytes(png())
 
         assertTrue(store.absoluteFile(orphan).exists())
         assertTrue(store.delete(orphan))
@@ -256,7 +264,8 @@ class ClipboardImageStoreTest {
         // 再写一个孤儿（不入库）后清理：只保留已知路径
         store.save(png(80), "orphan2", "png")
         val removed = store.cleanupOrphans(setOf(keep))
-        assertTrue("应清理未入库文件与 .tmp", removed >= 1)
+        assertTrue("应清理未入库文件与过期的 .tmp", removed >= 1)
+        assertTrue("宽限期内的 .tmp 不得删除", freshTmp.exists())
         assertTrue(store.absoluteFile(keep).exists())
         assertFalse(File(ClipboardImageStore.rootDirOf(filesDir()), "orphan2.png").exists())
         assertFalse(File(ClipboardImageStore.rootDirOf(filesDir()), "broken.png.tmp").exists())
