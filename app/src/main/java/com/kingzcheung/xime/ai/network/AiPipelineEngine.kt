@@ -3252,6 +3252,16 @@ class AiPipelineEngine(
         private const val MAX_MODEL_RESPONSE_CHARS = 8 * 1024 * 1024
 
         /**
+         * 流式文本回调的最小间隔（毫秒）。
+         *
+         * 之前每个 SSE token 都会做：`rawAcc.toString()`（整段拷贝）+ 若干次全串正则 / 清理，
+         * 累计长度 n、token 数 m 时是 O(n·m)：一段 3000 字输出约产生 3MB 短命字符串，
+         * 直接喂给 GC。表现就是「模型还在吐 token，悬浮窗文本却开始卡」。
+         * 这里把回调节流到约 15 帧/秒——视觉上仍是逐字增长，但重活减少一个数量级。
+         */
+        internal const val STREAM_EMIT_MIN_INTERVAL_MS = 66L
+
+        /**
          * 有界读取字符流：最多读 [maxChars] 个字符，超出即停止。
          *
          * 不用 `reader.readText()`：它对未知长度的响应会一直读到 EOF 并整串驻留内存。
@@ -3301,6 +3311,9 @@ class AiPipelineEngine(
             val rawAcc = StringBuilder()
             var thinkingEmitted = false
             var lastUsageChunk: JsonObject? = null
+            val openAiThrottle = StreamEmitThrottle()
+            // 被节流丢掉的那次更新：循环结束后补一次，保证最终文本一定已经推给 UI
+            var openAiSkippedEmit = false
             var currLine: String? = firstNonBlank
             while (currLine != null) {
                 val t = currLine.trim()
@@ -3331,21 +3344,28 @@ class AiPipelineEngine(
                                     if (rawAcc.length < MAX_MODEL_RESPONSE_CHARS) {
                                         rawAcc.append(contentDelta)
                                     }
-                                    val accStr = rawAcc.toString()
-                                    val hasUnclosedThink = accStr.contains("<think>", ignoreCase = true) &&
-                                        !accStr.contains("</think>", ignoreCase = true)
-                                    if (hasUnclosedThink) {
-                                        if (!thinkingEmitted) {
-                                            thinkingEmitted = true
-                                            onThinkingStarted?.invoke()
+                                    // 节流：整段 toString + 正则清理是 O(累计长度) 的，
+                                    // 每个 token 都做一次就成了 O(n²)。
+                                    if (openAiThrottle.shouldEmit()) {
+                                        openAiSkippedEmit = false
+                                        val accStr = rawAcc.toString()
+                                        val hasUnclosedThink = accStr.contains("<think>", ignoreCase = true) &&
+                                            !accStr.contains("</think>", ignoreCase = true)
+                                        if (hasUnclosedThink) {
+                                            if (!thinkingEmitted) {
+                                                thinkingEmitted = true
+                                                onThinkingStarted?.invoke()
+                                            }
+                                        } else {
+                                            val cleanSoFar = cleanModelOutput(
+                                                accStr.replace(UNCLOSED_THINK_BLOCK_REGEX, "")
+                                            )
+                                            if (cleanSoFar.isNotEmpty()) {
+                                                onStreamingTextUpdate?.invoke(cleanSoFar)
+                                            }
                                         }
                                     } else {
-                                        val cleanSoFar = cleanModelOutput(
-                                            accStr.replace(UNCLOSED_THINK_BLOCK_REGEX, "")
-                                        )
-                                        if (cleanSoFar.isNotEmpty()) {
-                                            onStreamingTextUpdate?.invoke(cleanSoFar)
-                                        }
+                                        openAiSkippedEmit = true
                                     }
                                 }
                             }
@@ -3353,6 +3373,12 @@ class AiPipelineEngine(
                     }
                 }
                 currLine = reader.readLine()
+            }
+            if (openAiSkippedEmit) {
+                runCatching {
+                    val finalClean = cleanModelOutput(rawAcc.toString().replace(UNCLOSED_THINK_BLOCK_REGEX, ""))
+                    if (finalClean.isNotEmpty()) onStreamingTextUpdate?.invoke(finalClean)
+                }
             }
             val usageDiag = lastUsageChunk?.let { usage ->
                 val p = usage.get("prompt_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0
@@ -3412,6 +3438,8 @@ class AiPipelineEngine(
 
             val accText = StringBuilder()
             var thinkingEmitted = false
+            var geminiSkippedEmit = false
+            val geminiThrottle = StreamEmitThrottle()
             var thoughtsTok = 0
             var candTok = 0
             var promptTok = 0
@@ -3450,9 +3478,14 @@ class AiPipelineEngine(
                                             .orEmpty()
                                         if (txt.isNotEmpty()) {
                                             accText.append(txt)
-                                            val cleanSoFar = cleanModelOutput(accText.toString())
-                                            if (cleanSoFar.isNotEmpty()) {
-                                                onStreamingTextUpdate?.invoke(cleanSoFar)
+                                            if (geminiThrottle.shouldEmit()) {
+                                                geminiSkippedEmit = false
+                                                val cleanSoFar = cleanModelOutput(accText.toString())
+                                                if (cleanSoFar.isNotEmpty()) {
+                                                    onStreamingTextUpdate?.invoke(cleanSoFar)
+                                                }
+                                            } else {
+                                                geminiSkippedEmit = true
                                             }
                                         }
                                     }
@@ -3462,6 +3495,12 @@ class AiPipelineEngine(
                     }
                 }
                 currLine = reader.readLine()
+            }
+            if (geminiSkippedEmit) {
+                runCatching {
+                    val finalClean = cleanModelOutput(accText.toString())
+                    if (finalClean.isNotEmpty()) onStreamingTextUpdate?.invoke(finalClean)
+                }
             }
             val usageDiag = if (promptTok > 0 || thoughtsTok > 0 || candTok > 0) {
                 "Tokens: in=$promptTok | thoughts=$thoughtsTok | out=$candTok"
@@ -3777,5 +3816,33 @@ class AiPipelineEngine(
             // 5. Hard split at maxLen
             return maxLen.coerceAtMost(window.length)
         }
+    }
+}
+
+/**
+ * 流式文本回调的时间窗节流器。
+ *
+ * 只做一件事：限制「多久允许回调一次」。放在这里而不是内联计时，是为了能被单测直接
+ * 拨时钟验证（[clockNanos] 可注入），避免「节流逻辑靠肉眼看不出来」这种隐患。
+ *
+ * 语义：
+ * - 首次调用必定放行（否则开头一段文字要等满一个窗口才出现）；
+ * - 窗口内的后续调用返回 false，由调用方累积到下次窗口；
+ * - [force] 立即放行并重置窗口，用于收尾补发。
+ */
+internal class StreamEmitThrottle(
+    private val minIntervalMs: Long = AiPipelineEngine.STREAM_EMIT_MIN_INTERVAL_MS,
+    private val clockNanos: () -> Long = { System.nanoTime() }
+) {
+    private val intervalNanos = minIntervalMs * 1_000_000L
+    private var lastEmitNanos = 0L
+
+    fun shouldEmit(force: Boolean = false): Boolean {
+        val now = clockNanos()
+        if (force || lastEmitNanos == 0L || now - lastEmitNanos >= intervalNanos) {
+            lastEmitNanos = now
+            return true
+        }
+        return false
     }
 }

@@ -158,6 +158,22 @@ object ToolPanelEditTextHolder {
  */
 data class T9PartialSegment(val text: String, val pinyin: String)
 
+/**
+ * 最近一次输入会话的关键 EditorInfo 字段快照（进程内全局）。
+ *
+ * 为什么需要它：悬浮胶囊（[com.kingzcheung.xime.ai.bubble.XimeBubbleService]）跑在
+ * 无障碍 + 前台服务里，**拿不到 EditorInfo**——无障碍节点只有 inputType / password 标记，
+ * 没有 imeOptions。于是胶囊侧的隐私判定一直是 `imeOptions = 0` 的硬编码，
+ * `IME_FLAG_NO_PERSONALIZED_LEARNING`（银行 / 隐私输入框塞的「不要学习」标记）被完全忽略，
+ * 这类输入框的语音原文与 WAV 仍会被归档进历史。输入法进程与胶囊在同一进程，
+ * 这里把 IME 侧看到的 EditorInfo 关键字段记录下来给胶囊侧读。
+ */
+data class EditorFocusSnapshot(
+    val packageName: String,
+    val inputType: Int,
+    val imeOptions: Int
+)
+
 class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner, ActionExecutor {
 
     companion object {
@@ -177,6 +193,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
         /** 面板 loading 延迟显示阈值：此时间内完成的动作不显示进度条（面板高度也不变，防闪烁）。 */
         private const val TOOL_PANEL_LOADING_SHOW_DELAY_MS = 250L
+
+        /**
+         * 当前（或最近一次）输入会话的 EditorInfo 关键字段，供同进程的悬浮胶囊做隐私判定。
+         * 会话结束时清空；读方必须校验 packageName 与自己的焦点应用一致，避免跨应用误用。
+         */
+        @Volatile
+        var lastEditorFocus: EditorFocusSnapshot? = null
+            private set
     }
 
     /** release 构建不输出调试日志，减少 logcat 写入开销。 */
@@ -3270,6 +3294,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
         }
 
+        attribute?.let { info ->
+            lastEditorFocus = EditorFocusSnapshot(
+                packageName = info.packageName?.toString() ?: "",
+                inputType = info.inputType,
+                imeOptions = info.imeOptions
+            )
+        }
+
         super.onStartInput(attribute, restarting)
         // QQ 撤回/发送消息时会把输入框重建一遍：系统给出的是 restarting=false 的"新会话"，
         // 但实际还是同一个编辑框（同样的包名/fieldId/inputType，且间隔很短）。
@@ -3877,6 +3909,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 flow.value = flow.value.copy(targetPackage = "", targetAppName = "")
             }
         }
+        lastEditorFocus = null
         super.onFinishInput()
         inlineSuggestionManager?.clear()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)

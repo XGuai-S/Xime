@@ -526,10 +526,17 @@ class XimeBubbleService :
                             if (!inserted) {
                                 copyToClipboard(finalOut)
                             }
+                            // imeOptions 不能再用 0 硬编码：无障碍节点读不到它，但同进程的
+                            // XimeInputMethodService 在 onStartInput 时记了快照。仅在快照的
+                            // 包名与当前焦点应用一致（或宿主没给包名）时才采信，避免拿上一个
+                            // 应用的 EditorInfo 误判。
+                            val focusSnapshot = com.kingzcheung.xime.service.XimeInputMethodService
+                                .lastEditorFocus
+                                ?.takeIf { it.packageName.isBlank() || it.packageName == pkg }
                             val isIncognito = settings.manualIncognitoMode ||
                                 liveSnap.isSensitivePassword ||
                                 ImeLogic.isIncognitoImeOptions(
-                                    imeOptions = 0,
+                                    imeOptions = focusSnapshot?.imeOptions ?: 0,
                                     inputType = liveSnap.inputType,
                                     manualIncognitoMode = settings.manualIncognitoMode
                                 )

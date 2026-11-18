@@ -18,6 +18,8 @@ import com.kingzcheung.xime.plugin.core.runtime.installer.InstallerManager
 import com.kingzcheung.xime.plugin.core.runtime.installer.PluginRegistry
 import com.kingzcheung.xime.plugin.core.runtime.loader.LoadedPluginInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -34,21 +36,46 @@ class PluginLifecycleManager(
         private const val TAG = "PluginLifecycle"
     }
 
-    suspend fun launchPlugin(pluginId: String): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * 每个插件的生命周期串行锁。
+     *
+     * 之前 launchPlugin / unloadPlugin / loadEnabledPlugins 全都只靠 ConcurrentHashMap
+     * 做「有没有」判断，而判断与写入之间是跨挂起点的长流程（建 QuickJS 运行时、
+     * 跑 onLoad）。并发触发（如插件列表刷新与用户手动启用/禁用同时发生）会：
+     *   1) 两个协程同时通过 containsKey==false，各自 new 一个 JsScriptRuntime，
+     *      后写入的覆盖前一个 → 前一个引擎线程池永不回收（泄漏 + 事件重复分发）；
+     *   2) unload 与 load 交错，造成 pluginInstances 里有实例但 loadedPlugins 里没有，
+     *      或反过来，后续调用拿到半初始化状态。
+     * 这里用 per-plugin Mutex 把整段「查 → 建 → 注册」串行化；Mutex 按 pluginId 细分，
+     * 不同插件之间仍然并行，不影响 loadEnabledPlugins 的启动耗时。
+     */
+    private val lifecycleLocks = ConcurrentHashMap<String, Mutex>()
+
+    private fun lockFor(pluginId: String): Mutex =
+        lifecycleLocks.getOrPut(pluginId) { Mutex() }
+
+    suspend fun launchPlugin(pluginId: String): Boolean =
+        lockFor(pluginId).withLock { launchPluginLocked(pluginId) }
+
+    private suspend fun launchPluginLocked(pluginId: String): Boolean = withContext(Dispatchers.IO) {
         try {
             if (loadedPlugins.containsKey(pluginId)) {
-                return@withContext reloadPlugin(pluginId)
+                return@withContext reloadPluginLocked(pluginId)
             }
             launchSinglePlugin(pluginId)
         } catch (e: Throwable) {
             if (loadedPlugins.containsKey(pluginId)) {
-                unloadPlugin(pluginId)
+                unloadPluginLocked(pluginId)
             }
             false
         }
     }
 
-    suspend fun unloadPlugin(pluginId: String) = withContext(Dispatchers.IO) {
+    suspend fun unloadPlugin(pluginId: String) {
+        lockFor(pluginId).withLock { unloadPluginLocked(pluginId) }
+    }
+
+    private suspend fun unloadPluginLocked(pluginId: String) = withContext(Dispatchers.IO) {
         if (!loadedPlugins.containsKey(pluginId)) return@withContext
 
         pluginInstances[pluginId]?.let { instance ->
@@ -98,7 +125,7 @@ class PluginLifecycleManager(
 
         var successCount = 0
         for (plugin in enabledPlugins) {
-            if (launchSinglePlugin(plugin.id)) {
+            if (lockFor(plugin.id).withLock { launchSinglePlugin(plugin.id) }) {
                 successCount++
             } else {
                 Log.w(TAG, "Failed to load: ${plugin.id}")
@@ -137,7 +164,9 @@ class PluginLifecycleManager(
         val instance = instantiatePlugin(loadedPlugin)
         if (instance == null) {
             Log.w(TAG, "Failed to instantiate plugin: $pluginId")
-            unloadPlugin(pluginId)
+            // 注意：此处已持有该插件的 lifecycleLock，必须调 Locked 版本，
+            // 直接调 unloadPlugin 会二次 withLock 自锁（Mutex 不可重入）。
+            unloadPluginLocked(pluginId)
             return false
         }
         pluginInstances[pluginId] = instance
@@ -146,8 +175,8 @@ class PluginLifecycleManager(
         return true
     }
 
-    private suspend fun reloadPlugin(pluginId: String): Boolean {
-        unloadPlugin(pluginId)
+    private suspend fun reloadPluginLocked(pluginId: String): Boolean {
+        unloadPluginLocked(pluginId)
         return launchSinglePlugin(pluginId)
     }
 

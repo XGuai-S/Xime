@@ -6,6 +6,8 @@ import com.charleskorn.kaml.Yaml
 import com.charleskorn.kaml.YamlConfiguration
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * 统一配置文件 `/storage/emulated/0/rime/xime/xime.yaml` 的生成。
@@ -38,6 +40,21 @@ object UnifiedConfigFile {
 
     private val yaml = Yaml(configuration = YamlConfiguration(strictMode = false))
 
+    /**
+     * 统一配置文件的读-改-写锁。
+     *
+     * [updateTopLevelBlock] 是典型的「读全文 → 改一段 → 写回全文」流程，而设置页里多个开关
+     * 的回调各自在 IO 线程上跑，两个几乎同时发生的写入会：
+     *   1) 都读到同一份旧快照，后写的把先写的那一段改动整体覆盖掉（静默丢更新）；
+     *   2) 与 [generate]（首次释放 / 用户重置）交错，把刚生成的完整快照又改回半截。
+     * 文件本身已是原子写（temp + rename），但原子写只防「写到一半被读到」，
+     * 不防「两次完整写入互相覆盖」，所以必须在进程内把这几次读改写串行化。
+     *
+     * 用 ReentrantLock 而不是 Mutex：[generate] 与 [updateTopLevelBlock] 都是从普通函数
+     * （非 suspend）调用，且持锁区间只有一次文件读写（毫秒级），阻塞代价可接受。
+     */
+    private val fileLock = ReentrantLock()
+
     /** 匹配顶层键（列 0 且形如 `key:`），用于切分与定位顶层块。 */
     private val TOP_LEVEL_KEY = Regex("^[A-Za-z_][A-Za-z0-9_-]*:")
 
@@ -59,7 +76,9 @@ object UnifiedConfigFile {
      * 无条件按「内置基线 + 旧自定义配置」重新生成。
      * 供用户主动要求把文件重置为完整快照时调用（会覆盖现有编辑）。
      */
-    fun generate(context: Context): Boolean {
+    fun generate(context: Context): Boolean = fileLock.withLock { generateLocked(context) }
+
+    private fun generateLocked(context: Context): Boolean {
         val base = readAssetText(context, ASSET_BASE) ?: run {
             Log.w(TAG, "asset $ASSET_BASE missing, skip unified config generation")
             return false
@@ -247,7 +266,10 @@ object UnifiedConfigFile {
      * 文件不存在（尚未释放）、无写权限、或替换后 YAML 解析不通过时返回 false，
      * 由调用方决定是否回退到别的存储方式。
      */
-    fun updateTopLevelBlock(context: Context, key: String, blockText: String): Boolean {
+    fun updateTopLevelBlock(context: Context, key: String, blockText: String): Boolean =
+        fileLock.withLock { updateTopLevelBlockLocked(context, key, blockText) }
+
+    private fun updateTopLevelBlockLocked(context: Context, key: String, blockText: String): Boolean {
         if (!UserConfigDir.hasWritePermission(context)) return false
         val current = UserConfigDir.readText(context, UserConfigDir.UNIFIED_CONFIG_FILE) ?: return false
         val blockLines = blockText.trimEnd('\n', '\r').lines()
