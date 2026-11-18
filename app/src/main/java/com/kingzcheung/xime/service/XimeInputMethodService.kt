@@ -5331,27 +5331,25 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // [CandidateState.autoWordTempIndices]。这里只记录**下标**，不改候选文本：
         // 候选文本还要被上屏、黑名单、输入框首词等路径消费，「◌」绝不能混进文本。
         // 固定词库（已晋升）不加标记，与引擎候选一致。
-        // 完整编码命中的造词放到**最前**，前缀命中仍追加在尾部。
+        // ⚠️ 排序规则：造词**一律追加在引擎候选之后**，不要改成置顶。
         //
-        // 旧实现一律追加到引擎候选末尾：用户刚造好的词（如码 yiyi 的「一亿」）会因为
-        // 引擎在该编码下已有满一页高频词（意义/异议/…）而永远排在第 9 位之后，
-        // 候选栏第一页永远看不到它、翻页也未必能对上 —— 用户感知就是
-        // 「生词本里明明有，候选栏就是打不出来」（用户 2026-11 反馈）。
-        // 造词是用户自己的词，完整命中时优先级就该高于引擎的高频词。
-        val exactHits = extra.filter { it.exact }
-        val prefixHits = extra.filterNot { it.exact }
-        val headWords = exactHits.map { it.word }
-        val tailWords = prefixHits.map { it.word }
+        // 用户 2026-11-19 明确要求：「生词排序不要放在最前面，按照之前的排序规则」。
+        // 造词放在最前会把首选词换掉、打乱肌肉记忆（它还会顶到 index=0，用户按空格
+        // 上屏的就是自己造的词而不是词典高频词）。
+        //
+        // 已知代价（**这是有意接受的取舍，不是待修 bug**）：当引擎在该编码下出满一页
+        // 高频词时（例：码 yiyi 有 意义/异议/乜/也/亂/了/予/亦），造词会排到可见范围之外，
+        // 第一页看不到。用户已确认宁可按原顺序、自己翻页找，也不要改变排序。
+        // 若将来要解决可见性，正确方向是「候选栏可横向滚到尾部」或「生词单独一栏」，
+        // **不是**把造词提到最前。
         val tempIndices = HashSet<Int>()
-        exactHits.forEachIndexed { i, hit -> if (hit.fromTemp) tempIndices += i }
-        prefixHits.forEachIndexed { i, hit ->
-            if (hit.fromTemp) tempIndices += headWords.size + engineCandidates.size + i
+        extra.forEachIndexed { i, hit ->
+            if (hit.fromTemp) tempIndices += engineCandidates.size + i
         }
         return CandidateOrderStore.Reordered(
-            candidates = headWords + engineCandidates + tailWords,
-            comments = headWords.map { "" } + engineComments + tailWords.map { "" },
-            actions = headWords.map { CandidateAction.plugin(it) } +
-                baseActions + tailWords.map { CandidateAction.plugin(it) },
+            candidates = engineCandidates + extra.map { it.word },
+            comments = engineComments + extra.map { "" },
+            actions = baseActions + extra.map { CandidateAction.plugin(it.word) },
             autoWordTempIndices = tempIndices,
         )
     }
