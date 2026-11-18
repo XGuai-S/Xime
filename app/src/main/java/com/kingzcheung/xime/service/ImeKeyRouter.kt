@@ -811,7 +811,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                             et.text?.replace(start, et.selectionEnd.coerceAtLeast(start), input)
                             try { et.setSelection(start + input.length) } catch (e: Exception) { FileLogger.d(XimeInputMethodService.TAG, "setSelection(after-replace) ignored: ${e.message}") }
                         }
-                        service.rimeEngine.clearComposition()
+                        // clearComposition 要拿 rimeLock（部署/会话重建最长持 180s），
+                        // 绝不能放在主线程：面板里打完拼音按回车是日常操作，部署期会直接
+                        // 冻住 UI 到 ANR。这里只做 UI 状态清理，引擎调用交给 rime 队列。
                         service.updateCandidateState { it.copy(
                             inputText = "",
                             preeditText = "",
@@ -823,6 +825,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                             candidateActions = emptyList()
                         ) }
                     }
+                    // 引擎侧清理放到 rime 队列执行（后台线程，阻塞等锁也安全）。
+                    // 不能省：不 clear 的话面板里会残留组合态，下一次字母被当成续接编码。
+                    postRimeJob { service.rimeEngine.clearComposition() }
                 }
                 service.triggerToolPanelGenerate()
                 return true
@@ -1610,6 +1615,12 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 service.serviceScope.launch {
                     val candidates = service.predictionManager.getEnglishAssociations(newPending, PredictionManager.MAX_ASSOCIATION_COUNT)
                     withContext(Dispatchers.Main) {
+                        // 在途过期校验：连按退格时多个请求并发，旧前缀的结果可能最后落地，
+                        // 候选栏就会显示与屏幕编码不匹配的联想词（点选还会按错误前缀替换）。
+                        if (service.candidateState.value.pendingEnglishText != newPending) {
+                            FileLogger.d("ImeKeyRouter", "丢弃过期的英文联想回填（期望=$newPending）")
+                            return@withContext
+                        }
                         service.updateCandidateState { it.copy(associationCandidates = candidates) }
                     }
                 }

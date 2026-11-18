@@ -256,8 +256,13 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
         val total = before.length + after.length
         val next = (pos + direction).coerceIn(0, total)
         if (next != pos) {
+            // 用户没先点「选择起点」时 editSelAnchor 仍是 -1：AOSP 的 BaseInputConnection
+            // 会把它钳到 0，但 WebView / Flutter / 部分终端等自定义宿主会抛
+            // IndexOutOfBoundsException 或直接忽略（此处原先没有任何 catch）。
+            if (editSelAnchor < 0) editSelAnchor = pos
             ic.beginBatchEdit()
-            ic.setSelection(editSelAnchor, next)
+            runCatching { ic.setSelection(editSelAnchor, next) }
+                .onFailure { FileLogger.w(XimeInputMethodService.TAG, "extendSelection failed: ${it.message}") }
             ic.endBatchEdit()
         }
     }
@@ -306,6 +311,17 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             if (!service.rimeEngine.switchSchema(schemaId)) {
                 if (service.rimeEngine.isMaintaining()) {
                     FileLogger.w(XimeInputMethodService.TAG, "switchSchema skipped: deployment in progress")
+                    // 布局在上面已经被切成全键盘了：引擎没切成 → 必须按引擎**实际**方案
+                    // 重新对齐布局，否则「键盘显示全键盘、引擎仍是九键」，数字/符号键按九键
+                    // 语义路由，候选栏可能一直 IDLE。
+                    val current = service.rimeEngine.getCurrentSchema()
+                    if (current.isNotEmpty()) {
+                        service.keyboardViewModel.dispatch(
+                            com.kingzcheung.xime.ui.keyboard.KeyboardDispatchAction.AsciiModeChanged(
+                                service.rimeEngine.isAsciiMode(), current
+                            )
+                        )
+                    }
                     Toast.makeText(service, "词库部署中，请稍后再切换方案", Toast.LENGTH_SHORT).show()
                     return
                 }
@@ -317,6 +333,15 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 val actual = service.rimeEngine.getCurrentSchema()
                 if (actual.isNotEmpty()) {
                     SettingsPreferences.setCurrentSchema(service, actual)
+                }
+                if (actual.isNotEmpty()) {
+                    // 同 deployment-in-progress 分支：布局已切全键盘，引擎没换，
+                    // 按引擎实际方案把布局重新对齐，避免方案/布局永久脱节。
+                    service.keyboardViewModel.dispatch(
+                        com.kingzcheung.xime.ui.keyboard.KeyboardDispatchAction.AsciiModeChanged(
+                            service.rimeEngine.isAsciiMode(), actual
+                        )
+                    )
                 }
                 FileLogger.w(XimeInputMethodService.TAG, "switchSchema failed: target=$schemaId actual=$actual")
                 Toast.makeText(service, "方案未部署，请在方案管理中部署后再试", Toast.LENGTH_SHORT).show()

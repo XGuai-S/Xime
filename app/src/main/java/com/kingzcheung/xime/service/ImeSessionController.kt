@@ -273,8 +273,16 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
                 " inWindow=$inWindow isComposing=$isComposing"
         }
         // 候选词不是可编辑编码，光标固定在末尾；编码沿用编辑光标
+        // 必须判空：currentInputConnection 是平台类型（Kotlin 视为非空），运行时随时可能为
+        // null（编辑器被销毁/宿主 finishInput/WebView 换页）。旧实现直接透传给**非空**形参，
+        // 参数空检查抛出的 NPE 会被 uiEventChannel 的兜底 catch 吞掉 →
+        // 候选栏与输入框静默不同步，且日志里什么都没有。
+        val ic = service.currentInputConnection ?: run {
+            FileLogger.d("ImeSessionController", "[BOX] skip: currentInputConnection=null")
+            return
+        }
         showInputBoxComposition(
-            service.currentInputConnection,
+            ic,
             text,
             if (candidate != null) -1 else preeditCaretOffsetForInputBox(displayText),
         )
@@ -683,6 +691,13 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
 
         syncInputBoxComposition(
             SettingsPreferences.isCodeInInputBox(service), display.text, display.candidates, display.isComposing
+        )
+        // 与 applyComposition 对齐：候选栏从「忙」回到「闲」时重算一次剪贴板候选。
+        // 旧实现只有 applyComposition 调这个钩子，经 sendTransformedResult / refreshAfterKey
+        // 走的路径（字母、退格、翻页、选词刷新）清空编码后不会重算 →
+        // 组合态期间复制的内容在清空编码后仍不显示（「有时候复制了不显示」）。
+        service.onCandidateBarIdleStateChanged(
+            isIdle = display.text.isEmpty() && !display.isComposing
         )
     }
 
