@@ -101,6 +101,13 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // 搜索态与工具面板的守卫统一在 syncInputBoxComposition 内部处理
         // （剪贴板搜索态在那里顺带把首候选同步给搜索框）。
         syncInputBoxComposition(codeInInputBox, shown.text, shown.candidates, shown.isComposing)
+
+        // 候选栏从「忙」（有编码/组字）回到「闲」时重算一次剪贴板候选：
+        // 用户正在打字时复制的内容，那一次展示会被闸门挡掉；不补这一下，
+        // 清空编码后候选栏再也不会出现剪贴板条目（用户反馈的「有时候不显示」）。
+        service.onCandidateBarIdleStateChanged(
+            isIdle = inputText.isEmpty() && !shown.isComposing
+        )
     }
 
     /** 在输入框模式向编辑器写入编码文本。 */

@@ -1495,6 +1495,52 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     /**
+     * 重算并（在允许时）展示剪贴板候选。**幂等**，可在任意时机重复调用。
+     *
+     * 为什么需要它：剪贴板候选的展示原先只挂在 `clipboardItems` 这个数据库 Flow 上，
+     * 而 Flow 只在**数据库内容变化**时发射。于是出现两类漏展示：
+     *
+     * 1. 复制那一刻 `canShowClipboardInCandidateBar()` 返回 false（用户还有编码残留、
+     *    正在组字）→ 那次展示机会被跳过，之后用户清空编码，Flow 不再发射，
+     *    候选栏就永远不出现了。用户感知是「有时候复制了不显示」。
+     * 2. 键盘弹出时 `onStartInput` 因 `sameEditorQuickRestart` 提前返回，
+     *    根本走不到会话初始化；补采判定 SKIP 时也不入库、不发射 Flow。
+     *
+     * 把「是否展示」从「数据变化」解耦成「可随时重算」，这些时机都能补上。
+     *
+     * @param ignoreSuppression true 表示这是「新的键盘可见时机」（onWindowShown）：
+     *   上屏回声抑制只用于**同一时刻**的回声，不该跨窗口生效——
+     *   否则用户点选 A 上屏后切走再回来，同批未被消费的 B 就永远不展示了。
+     */
+    private fun refreshClipboardCandidates(ignoreSuppression: Boolean = false) {
+        if (!::clipboardManager.isInitialized) return
+        val items = try {
+            clipboardManager.getRecentItems()
+        } catch (e: Exception) {
+            FileLogger.e(TAG, "刷新剪贴板候选失败", e)
+            return
+        }
+        recentClipboardItemsState.value = items
+        if (ignoreSuppression) {
+            suppressClipboardCandidateAutoShow = false
+        } else if (suppressClipboardCandidateAutoShow) {
+            val freshCount = items.count { it.timestamp > suppressSince }
+            val show = com.kingzcheung.xime.clipboard.ClipboardCandidateEchoPolicy.shouldShow(
+                suppressed = true,
+                freshItemCount = freshCount,
+            )
+            if (!show) {
+                FileLogger.d(TAG, "剪贴板候选不展示：上屏回声抑制中（count=${items.size} fresh=$freshCount）")
+                return
+            }
+            suppressClipboardCandidateAutoShow = false
+        }
+        if (!canShowClipboardInCandidateBar()) return
+        FileLogger.d(TAG, "剪贴板候选展示：count=${items.size} ids=${items.map { it.id }}")
+        showClipboardCandidates(items)
+    }
+
+    /**
      * 建立剪贴板候选监听。
      *
      * 展示规则（用户明确）：
@@ -1516,26 +1562,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     clipboardCollectorJob?.cancel()
     clipboardCollectorJob = serviceScope.launch {
         clipboardManager.clipboardItems.collect { _ ->
-            val items = clipboardManager.getRecentItems()
-            recentClipboardItemsState.value = items
-            // 刚上屏过一条：本次变更若只是「标记已消费」引起的回声就跳过。
-            // 判据是「列表里有没有基线之外的新 id」——用户上屏后马上又复制了新内容时，
-            // 必须照常展示，不能被抑制逻辑吃掉。
-            if (suppressClipboardCandidateAutoShow) {
-                val freshCount = items.count { it.timestamp > suppressSince }
-                val show = com.kingzcheung.xime.clipboard.ClipboardCandidateEchoPolicy.shouldShow(
-                    suppressed = true,
-                    freshItemCount = freshCount,
-                )
-                if (!show) {
-                    FileLogger.d(TAG, "剪贴板候选不展示：上屏回声抑制中（count=${items.size} fresh=$freshCount）")
-                    return@collect
-                }
-                suppressClipboardCandidateAutoShow = false
-            }
-            // 新复制内容 / 状态刷新：候选栏空闲时展示（正在打字则不抢占）
-            if (!canShowClipboardInCandidateBar()) return@collect
-            showClipboardCandidates(items)
+            // 统一走 refreshClipboardCandidates：抑制判定 / 闸门判定 / 展示都在一处，
+            // 避免「collector 一条路径、补采一条路径、初始化一条路径」各自为政导致行为不一致。
+            refreshClipboardCandidates()
         }
     }
     }
@@ -1571,6 +1600,30 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             items.first()
         } else {
             null
+        }
+    }
+
+    /** 上一次观察到的「候选栏是否空闲」：用于只在「忙 → 闲」跳变时重算剪贴板候选。 */
+    @Volatile
+    private var candidateBarWasIdle = false
+
+    /**
+     * 候选栏空闲状态变化回调（由 [ImeSessionController.applyComposition] 每次调用）。
+     *
+     * 只处理「忙 → 闲」的跳变：用户清空编码（退格清空、上屏候选）后，候选栏回到空闲，
+     * 此时若有未消费的剪贴板条目就应该重新展示。
+     *
+     * 为什么需要：剪贴板展示原先只挂在数据库 Flow 上。用户「正在打字时复制内容」那一次
+     * 展示会被闸门挡掉，之后清空编码 Flow 不再发射，候选栏就永远不再出现剪贴板候选——
+     * 用户感知正是「有时候复制了不显示」。这里补上「空闲了再算一次」的时机。
+     *
+     * 限制频率：applyComposition 是按键热路径，只在跳变时触发，正常运行不做额外工作。
+     */
+    internal fun onCandidateBarIdleStateChanged(isIdle: Boolean) {
+        val wasIdle = candidateBarWasIdle
+        candidateBarWasIdle = isIdle
+        if (isIdle && !wasIdle) {
+            mainHandler.post { refreshClipboardCandidates(ignoreSuppression = true) }
         }
     }
 
@@ -3881,6 +3934,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 内容就丢了。这里补采一次把那一段捡回来（addItem 按文本去重，不会重复入库）。
             if (::clipboardManager.isInitialized) {
                 clipboardManager.captureCurrentClipboardNow()
+                // 兜底重算：键盘每次显示都是一个「该不该展示剪贴板候选」的确定时机。
+                // 只靠 Flow 发射会漏掉这些情况：onStartInput 因 quickRestart 提前返回、
+                // 补采判 SKIP 不入库、复制时正在组字导致那次展示被跳过。
+                // 稍作延迟让补采的异步入库先完成，避免读到旧列表。
+                mainHandler.postDelayed({ refreshClipboardCandidates(ignoreSuppression = true) }, 150)
             }
         }
     }
