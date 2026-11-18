@@ -99,4 +99,91 @@ class PluginBlobStoreTest {
         assertNotNull(PluginBlobStore.MAX_BLOB_BYTES)
         assertEquals(512L * 1024 * 1024, PluginBlobStore.MAX_BLOB_BYTES)
     }
+
+    // ---- 总量与句柄数闸门（防「反复下载不 release」把 cache 写满）----
+
+    private fun storeWithLimits(maxTotalBytes: Long, maxEntries: Int): PluginBlobStore =
+        PluginBlobStore(File(tmp.root, "blobs-limits"), maxTotalBytes, maxEntries)
+
+    @Test
+    fun `句柄数达到上限后拒绝登记`() {
+        val store = storeWithLimits(maxTotalBytes = 10_000_000, maxEntries = 2)
+        val a = File(tmp.root, "a.zip").apply { writeBytes(byteArrayOf(1)) }
+        val b = File(tmp.root, "b.zip").apply { writeBytes(byteArrayOf(1)) }
+        store.register("plugin-a", a)
+        store.register("plugin-a", b)
+
+        var thrown = false
+        try {
+            store.register("plugin-a", File(tmp.root, "c.zip").apply { writeBytes(byteArrayOf(1)) })
+        } catch (e: IllegalStateException) {
+            thrown = true
+        }
+        assertTrue("第 3 个句柄应被拒绝（要求先 release）", thrown)
+        assertEquals(2, store.entryCount())
+    }
+
+    @Test
+    fun `释放后可以继续登记（上限只约束同时存在的句柄）`() {
+        val store = storeWithLimits(maxTotalBytes = 10_000_000, maxEntries = 1)
+        val a = File(tmp.root, "a.zip").apply { writeBytes(byteArrayOf(1)) }
+        val id = store.register("plugin-a", a)
+        store.release(id)
+
+        val b = File(tmp.root, "b.zip").apply { writeBytes(byteArrayOf(1)) }
+        assertNotNull("释放后应能登记新句柄", store.register("plugin-a", b))
+    }
+
+    @Test
+    fun `目录超总量时回收未登记文件后再放行`() {
+        val store = storeWithLimits(maxTotalBytes = 1000, maxEntries = 8)
+        val root = File(tmp.root, "blobs-limits")
+        // 两个 600 字节的未登记垃圾（模拟崩溃残留），合计 1200 > 1000
+        val old = File(root, "blob-old.tmp").apply { writeBytes(ByteArray(600)) }
+        assertTrue(old.setLastModified(System.currentTimeMillis() - 60_000))
+        File(root, "blob-new.tmp").apply { writeBytes(ByteArray(600)) }
+
+        assertNotNull("回收未登记文件后应能继续申请", store.createTempFile("plugin-a"))
+        assertFalse("最旧的未登记文件应被回收", old.exists())
+    }
+
+    @Test
+    fun `已登记的 blob 不会被容量回收误删`() {
+        val store = storeWithLimits(maxTotalBytes = 1000, maxEntries = 8)
+        val root = File(tmp.root, "blobs-limits")
+        root.mkdirs()
+        // 已登记文件（owned=false，调用方持有）比未登记垃圾更旧，但必须保留
+        val kept = File(root, "kept.zip").apply { writeBytes(ByteArray(600)) }
+        assertTrue(kept.setLastModified(System.currentTimeMillis() - 120_000))
+        store.register("plugin-a", kept, owned = false)
+        File(root, "junk.tmp").apply { writeBytes(ByteArray(600)) }
+
+        assertNotNull(store.createTempFile("plugin-a"))
+        assertTrue("已登记文件有活句柄，不得删除", kept.isFile)
+        assertNull("未登记垃圾应被回收", File(root, "junk.tmp").takeIf { it.exists() })
+    }
+
+    @Test
+    fun `目录仍超限时拒绝新的落盘（不产生半成品）`() {
+        val store = storeWithLimits(maxTotalBytes = 100, maxEntries = 8)
+        val root = File(tmp.root, "blobs-limits")
+        root.mkdirs()
+        // 全部是已登记文件（回收动不了），总量已超限
+        val big = File(root, "big.zip").apply { writeBytes(ByteArray(200)) }
+        store.register("plugin-a", big, owned = false)
+
+        var thrown = false
+        try {
+            store.createTempFile("plugin-a")
+        } catch (e: java.io.IOException) {
+            thrown = true
+        }
+        assertTrue("超限应拒绝新落盘（由调用方转成 lastError）", thrown)
+    }
+
+    @Test
+    fun `总量与句柄上限常量符合预期`() {
+        assertEquals(1024L * 1024 * 1024, PluginBlobStore.MAX_TOTAL_BYTES)
+        assertEquals(32, PluginBlobStore.MAX_ENTRIES)
+    }
 }

@@ -84,7 +84,9 @@ class JsScriptRuntime(
      *  非 speech 型不注入，保持"未声明的 API 不存在"的横切门禁口径。 */
     private val injectAsr: Boolean = false,
     private val callTimeoutMs: Long = CALL_TIMEOUT_MS,
-    private val callbackTimeoutMs: Long = CALLBACK_TIMEOUT_MS
+    private val callbackTimeoutMs: Long = CALLBACK_TIMEOUT_MS,
+    private val memoryLimitBytes: Long = MEMORY_LIMIT_BYTES,
+    private val maxStackBytes: Long = MAX_STACK_BYTES,
 ) {
 
     companion object {
@@ -107,6 +109,22 @@ class JsScriptRuntime(
 
         /** zlib.gunzip 解压输出上限（防压缩炸弹撑爆内存）。 */
         private const val MAX_GUNZIP_OUTPUT_BYTES = 16 * 1024 * 1024
+
+        /**
+         * 单个插件 QuickJS 堆内存上限（QuickJS 的 malloc 上限）。
+         *
+         * 为什么必须有：插件与本应用**同进程**，超时只挡住「跑太久」，挡不住
+         * `let a = []; while (true) a.push(new Array(1000))` 这种「很快吃满内存」的写法——
+         * 那会直接把输入法进程 OOM 掉，用户丢的是整页输入状态，且崩溃栈指向宿主自己。
+         * 命中上限时 QuickJS 抛 InternalError（out of memory），走既有脚本错误上报路径。
+         *
+         * 96MB：8MB 响应体做 JSON.parse 后按 3–4 倍放大仍有余量，同时远小于进程
+         * 在低端机上的可用堆，够撑到「插件报错」而不是「宿主被杀」。
+         */
+        const val MEMORY_LIMIT_BYTES = 96L * 1024 * 1024
+
+        /** JS 调用栈上限（防深递归把宿主线程栈打穿）。 */
+        const val MAX_STACK_BYTES = 1L * 1024 * 1024
 
         /** require 模块单文件大小上限（模块是脚本，超限拒绝加载）。 */
         private const val MAX_MODULE_BYTES = 2L * 1024 * 1024
@@ -219,8 +237,23 @@ class JsScriptRuntime(
         Thread(r, "xime-js-job-$pluginId").apply { isDaemon = true }
     }
 
-    /** QuickJS 引擎：JS 执行经 [executor] 串行；async job 在 [asyncJobExecutor]。 */
-    private val engine: QuickJs = QuickJs.create(asyncJobExecutor.asCoroutineDispatcher())
+    /**
+     * QuickJS 引擎：JS 执行经 [executor] 串行；async job 在 [asyncJobExecutor]。
+     *
+     * 创建后立刻设定堆内存与调用栈上限（见 [MEMORY_LIMIT_BYTES]）：插件与本应用同进程，
+     * 不设上限时一段 `while (true) a.push(new Array(1000))` 就能把输入法整个 OOM 掉。
+     * 设置失败只记日志不阻断（旧版 quickjs-kt 没有这两个 setter，插件仍应可用）。
+     */
+    private val engine: QuickJs = QuickJs.create(asyncJobExecutor.asCoroutineDispatcher()).apply {
+        runCatching {
+            memoryLimit = memoryLimitBytes
+            // 回读一次：确认 setter 真的写进了 runtime（旧版本可能静默忽略），
+            // 否则"没报错"并不能证明上限生效。
+            Log.i(TAG, "JS 堆上限生效: limit=${memoryLimit} bytes (plugin=$pluginId)")
+        }.onFailure { Log.w(TAG, "设置 JS 内存上限失败（$memoryLimitBytes）：${it.message}") }
+        runCatching { maxStackSize = maxStackBytes }
+            .onFailure { Log.w(TAG, "设置 JS 栈上限失败（$maxStackBytes）：${it.message}") }
+    }
 
     /**
      * 本次 evaluate 可用的二进制参数（表达式内 `__ximeHost.bin(i)` 按下标取用）。
