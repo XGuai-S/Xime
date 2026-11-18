@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -144,6 +145,17 @@ class ClipboardManager private constructor(private val context: Context) {
     @Volatile
     private var selfWrittenText: String? = null
 
+    /**
+     * 自写文本的抑制截止时刻（[SystemClock.uptimeMillis]，0 = 无）。
+     *
+     * 与 [selfWrittenText] 成对使用：命中一次**不**清标记，窗口期内同一文本的每次读取都跳过。
+     * 一次写入会被读到不止一次（ROM 连发回调 + 紧随其后的补采），一次性标记会被第二次读
+     * 吃掉，于是刚上屏的行被 revive 复活、候选栏又显示出来（用户 2026-11 反复反馈）。
+     * 判定见 [ClipboardSelfWritePolicy.shouldSuppressClipCapture]。
+     */
+    @Volatile
+    private var selfWrittenUntilMs: Long = 0L
+
     /** 单条文本剪贴板入库上限（字符）。超长内容（日志/JSON）不入库。 */
     private val MAX_TEXT_CHARS = 100_000
 
@@ -253,17 +265,32 @@ class ClipboardManager private constructor(private val context: Context) {
                 if (!text.isNullOrEmpty()) {
                     // 本应用刚写回的同一条文本：不重复入库（否则会生成新 id 被当成新内容）
                     val selfText = selfWrittenText
-                    if (selfText != null) {
+                    if (ClipboardSelfWritePolicy.shouldSuppressClipCapture(
+                            text = text,
+                            selfText = selfText,
+                            nowMs = SystemClock.uptimeMillis(),
+                            suppressUntilMs = selfWrittenUntilMs,
+                        )
+                    ) {
+                        // 这条变更**已经处理过了**（就是本应用自己写回的），必须清标志：
+                        // 留着它的话，下一次 onWindowShown 补采会认为「剪贴板变过」，
+                        // 于是绕过「未变更旧剪贴板」的拦截，把刚上屏的那条又复活一遍 ——
+                        // 表现就是「点选上屏后，候选栏里它又出现」。
+                        // 注意**不清 selfWrittenText**：一次写入会被读多次（ROM 连发回调 +
+                        // 补采），清掉就会被第二次读当成真实复制而 revive 复活。
+                        clipboardChangedSinceRecord = false
+                        FileLogger.d(
+                            TAG,
+                            "Self-written text clip, skip capture (src=$currentCaptureSource, len=${text.length})",
+                        )
+                        return
+                    }
+                    if (selfText != null && selfText == text) {
+                        // 标记还在但窗口已过期：用户很可能真的又复制了同一段文本，
+                        // 按真实复制处理（入库/复活），并清掉标记避免继续误判。
                         selfWrittenText = null
-                        if (selfText == text) {
-                            // 这条变更**已经处理过了**（就是本应用自己写回的），必须清标志：
-                            // 留着它的话，下一次 onWindowShown 补采会认为「剪贴板变过」，
-                            // 于是绕过「未变更旧剪贴板」的拦截，把刚上屏的那条又复活一遍 ——
-                            // 表现就是「点选上屏后，候选栏里它又出现」。
-                            clipboardChangedSinceRecord = false
-                            FileLogger.d(TAG, "Self-written text clip, skip capture")
-                            return
-                        }
+                        selfWrittenUntilMs = 0L
+                        FileLogger.d(TAG, "Self-written marker expired, treat as real copy (len=${text.length})")
                     }
                     if (currentCaptureSource == CaptureSource.PROBE) {
                         recordProbeText(text)
@@ -1102,13 +1129,24 @@ class ClipboardManager private constructor(private val context: Context) {
             FileLogger.w(TAG, "拒绝写回超长文本 len=${text.length}（上限 $MAX_TEXT_CHARS）")
             return false
         }
+        // 空操作写直接跳过：剪贴板里已经是一模一样的文本时，setPrimaryClip 会白白触发一次
+        // OnPrimaryClipChangedListener，而这次回调正是「点选剪贴板上屏后，候选栏又把它显示
+        // 出来」的源头（采集 → 该行 consumed 被 revive 复位 → 又进候选栏）。剪贴板候选上屏
+        // 时内容本来就在剪贴板里，绝大多数情况都是空操作。
+        val currentText = runCatching { getCurrentClipboardText() }.getOrNull()
+        if (ClipboardSelfWritePolicy.isNoOpWrite(currentText, text)) {
+            FileLogger.d(TAG, "copyToSystemClipboard skipped: clipboard already holds same text (len=${text.length})")
+            return true
+        }
         // 先打标记再写：监听回调是异步的，必须先置位才能拦住自我采集
         selfWrittenText = text
+        selfWrittenUntilMs = SystemClock.uptimeMillis() + ClipboardSelfWritePolicy.SUPPRESS_WINDOW_MS
         return try {
             androidClipboardManager.setPrimaryClip(ClipData.newPlainText("kime_clipboard", text))
             true
         } catch (e: Exception) {
             selfWrittenText = null
+            selfWrittenUntilMs = 0L
             FileLogger.w(TAG, "setPrimaryClip 失败 len=${text.length}: ${e.message}", e)
             false
         }
