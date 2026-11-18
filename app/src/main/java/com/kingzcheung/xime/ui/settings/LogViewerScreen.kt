@@ -43,6 +43,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -190,12 +191,24 @@ fun LogViewerScreen(
         } else {
             // 插件错误来自 PluginErrorLog 持久化快照（getAllErrors 已含启动恢复的历史），
             // 随刷新联动重取（logFiles 为 key）
-            val pluginErrors = remember(uiState.logFiles) {
+            // 插件错误是进程内可变数据（不是 Compose 状态）：清除后必须显式触发重读，
+            // 否则列表不重组、用户看到的仍是旧记录（＝「没有按钮/清不掉」）。
+            var errorVersion by remember { mutableIntStateOf(0) }
+            val pluginErrors = remember(uiState.logFiles, errorVersion) {
                 com.kingzcheung.xime.plugin.core.security.PluginErrorLog.getAllErrors()
+            }
+            val clearAllErrors: () -> Unit = {
+                com.kingzcheung.xime.plugin.core.security.PluginErrorLog.clearAllErrors()
+                errorVersion++
             }
             LogFilesList(
                 logFiles = uiState.logFiles,
                 pluginErrors = pluginErrors,
+                onClearAllPluginErrors = clearAllErrors,
+                onClearPluginErrors = { pluginId ->
+                    com.kingzcheung.xime.plugin.core.security.PluginErrorLog.clearErrors(pluginId)
+                    errorVersion++
+                },
                 onSelect = { viewModel.selectLogFile(it) },
                 onShare = { viewModel.shareLogFile(it) },
                 onSave = { viewModel.saveToDownloads(it) },
@@ -291,6 +304,8 @@ private fun LogContentSection(
 private fun LogFilesList(
     logFiles: List<File>,
     pluginErrors: Map<String, List<com.kingzcheung.xime.plugin.core.security.PluginErrorLog.PluginError>>,
+    onClearAllPluginErrors: () -> Unit = {},
+    onClearPluginErrors: (String) -> Unit = {},
     onSelect: (File) -> Unit,
     onShare: (File) -> Unit,
     onSave: (File) -> Unit,
@@ -373,18 +388,33 @@ private fun LogFilesList(
         if (pluginErrors.isNotEmpty()) {
             item {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "插件错误 (${pluginErrors.values.sumOf { it.size }})",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "插件错误 (${pluginErrors.values.sumOf { it.size }})",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 全部清除：31 条散落在多个插件里时逐条点太慢
+                    TextButton(onClick = onClearAllPluginErrors) {
+                        Text(
+                            "全部清除",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
             pluginErrors.toList().forEach { (pluginId, errors) ->
                 item(key = "plugin-error-$pluginId") {
                     PluginErrorsCard(
                         pluginId = pluginId,
                         pluginName = pluginNames[pluginId] ?: pluginId,
-                        errors = errors
+                        errors = errors,
+                        onClear = { onClearPluginErrors(pluginId) }
                     )
                 }
             }
@@ -490,7 +520,8 @@ private fun LogFileItem(
 private fun PluginErrorsCard(
     pluginId: String,
     pluginName: String,
-    errors: List<com.kingzcheung.xime.plugin.core.security.PluginErrorLog.PluginError>
+    errors: List<com.kingzcheung.xime.plugin.core.security.PluginErrorLog.PluginError>,
+    onClear: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var showDetail by remember { mutableStateOf(false) }
@@ -525,6 +556,18 @@ private fun PluginErrorsCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onErrorContainer
                 )
+                // 单插件清除：按钮要在卡片上直接可点（不再只藏在详情弹窗里）
+                TextButton(
+                    onClick = onClear,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.height(28.dp)
+                ) {
+                    Text(
+                        "清除",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
             errors.takeLast(2).reversed().forEach { error ->
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
