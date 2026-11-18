@@ -56,6 +56,16 @@ data class RimeComposition(
     }
 }
 
+/**
+ * 一次按键/取结果后的引擎快照。
+ *
+ * ⚠️ **字段顺序与类型被 JNI 硬编码**：`app/src/main/jni/librime_jni/rime_jni.cc` 里
+ * `gRimeProcessResultCtor = GetMethodID(..., "(ZLjava/lang/String;...(II)V")` 用的是一份
+ * 写死的构造签名。改动本类字段（增删/换序/换类型）必须同步改那里的签名，
+ * 否则 GetMethodID 返回 null，之后**每次构造结果都会原生 abort（SIGABRT）**，
+ * 表现是「一打字就闪退」且 logcat 里没有 Java 栈。3.11.37 出过这个事故。
+ * 需要额外传递的状态请放到 [RimeEngine] 的旁路字段上，不要加进本类。
+ */
 data class RimeProcessResult(
     val processed: Boolean,
     val committedText: String,
@@ -65,15 +75,6 @@ data class RimeProcessResult(
     val isAsciiMode: Boolean,
     val hasNextPage: Boolean,
     val hasPrevPage: Boolean,
-    /**
-     * 本次结果是否因「拿不到 rimeLock」而退化成的空样本。
-     *
-     * 部署/编译持锁期间 [getProcessResult] 走 tryLocked，返回一个全空结果；
-     * 旧实现与「引擎真的没有候选」完全同形，T9 侧会把 cachedInput 写成空串、
-     * 把左栏复位 IDLE，而 C++ 侧仍是 SELECTION —— 用户看到「编码忽然清空」。
-     * 调用方见到 true 时应保持既有状态、跳过本轮刷新。
-     */
-    val stale: Boolean = false,
     /**
      * T9 左侧面板状态（格式 STATE;PINYIN;DIGIT_LEN;SEL_DIGITS;PANEL_DIGITS;LEFT_LOCKED）。
      * 由 JNI 在 T9 会话活跃时填充，非 T9 场景为空字符串。
@@ -430,15 +431,28 @@ class RimeEngine {
         // 会惰性生成候选页（遍历 translations），与 t9FlushRimeInput（set_input → Reset，
         // 释放旧 translations）并发会导致悬空 → ScriptTranslation::Peek 空指针崩溃。
         // 部署/编译持锁期间拿不到锁直接返回空结果（不进 native），避免阻塞调用线程。
+        // 锁竞争时的空样本：用引擎上的 volatile 标记告知调用方「本次是忙，不是真空」。
+        // 注意**不能**给 RimeProcessResult 加字段：rime_jni.cc 用硬编码的
+        // GetMethodID 签名构造它（(Z String×3 [RimeCandidate ZZZ String String II)V），
+        // 一旦 Kotlin 侧构造签名变了，GetMethodID 返回 null，随后每次 NewObject 都是
+        // 原生 abort（SIGABRT）—— 3.11.37 就这么崩过一轮。
+        lastResultStale = true
         return tryLocked(
-            RimeProcessResult(false, "", "", "", emptyArray(), false, false, false, stale = true)
+            RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)
         ) {
             val r = nativeGetProcessResult(processed)
             updateCandidatesCache(r.candidates)
             updateInputTextCache(r.inputText)
+            lastResultStale = false
             r
         }
     }
+
+    /** 最近一次 [getProcessResult] 是否因锁竞争退化成了空样本（见该函数注释）。 */
+    @Volatile
+    private var lastResultStale = false
+
+    fun wasLastResultStale(): Boolean = lastResultStale
 
     /**
      * 一次锁内取完整按键后快照：input / candidates / ascii / hasNext / hasPrev。
