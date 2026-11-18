@@ -208,8 +208,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         Thread(r, "key-process").also { it.isDaemon = true }
     }.asCoroutineDispatcher()
     
-    internal val keyJobs = Channel<Job>(Channel.UNLIMITED)
+    /**
+     * 按键任务队列（有界）。
+     *
+     * 原为 UNLIMITED：rime 处理变慢（部署、长词库、插件 transform 超时）时队列只增不减，
+     * 每个排队项都是 LAZY 协程对象——同时占内存并让延迟持续累积，表现为「越打越慢、
+     * 候选栏迟到几拍」。改为有界后，积压时丢弃新任务，用「丢一次响应」换取「不让整个
+     * 键盘陷进延迟泥潭」；丢弃由 [com.kingzcheung.xime.service.ImeKeyRouter.sendKeyJob] 留痕。
+     * 容量 64 ≈ 1 秒手速余量（人手极限约 10 键/秒），再多就属积压。
+     */
+    internal val keyJobs = Channel<Job>(capacity = 64)
     internal val uiEventChannel = Channel<suspend () -> Unit>(Channel.CONFLATED)
+
 
     /**
      * 长按退格合并锁/状态。

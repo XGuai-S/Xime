@@ -873,6 +873,8 @@ object SchemaManager {
     fun getEnabledSchemas(context: Context): List<String> {
         val customFile = getCustomYamlFile(context)
         if (!customFile.exists()) {
+            // 注意：这里是「读取顺带首次初始化」。schemaListLock 可重入，
+            // 由 updateEnabledSchemas 在锁内调用时不会死锁。
             setEnabledSchemas(context, BUILTIN_SCHEMAS)
             SettingsPreferences.setBuiltinSchemasMerged(context, true)
             return BUILTIN_SCHEMAS
@@ -1027,14 +1029,33 @@ object SchemaManager {
         }
     }
 
+    /**
+     * 启用/禁用某个方案。
+     *
+     * 必须走 [updateEnabledSchemas] 这把「读-改-写」的总锁：旧实现在锁外先
+     * getEnabledSchemas() 再 setEnabledSchemas()，两次调用之间是可打断的。
+     * 用户在设置页连点两个方案开关、或部署流程与用户点击并发时，两者各自读到
+     * 同一份列表，后写者把前者的改动整套覆盖——表现为「刚启用的方案自己变回去了」
+     * 「同时开两个方案只有一个生效」。这正是 schemaListLock 注释里承诺要消灭、
+     * 但实际没消灭的竞态。
+     */
     fun toggleSchema(context: Context, schemaId: String) {
-        val enabled = getEnabledSchemas(context).toMutableList()
-        if (schemaId in enabled) {
-            enabled.remove(schemaId)
-        } else {
-            enabled.add(schemaId)
+        updateEnabledSchemas(context) { current ->
+            if (schemaId in current) current.filterNot { it == schemaId } else current + schemaId
         }
-        setEnabledSchemas(context, enabled)
+    }
+
+    /**
+     * 启用列表的唯一读-改-写入口：读、变换、写、镜像 default.yaml 全在同一把锁内。
+     *
+     * @param transform 收到当前启用列表，返回新列表
+     */
+    fun updateEnabledSchemas(context: Context, transform: (List<String>) -> List<String>) {
+        synchronized(schemaListLock) {
+            val current = getEnabledSchemas(context)
+            val next = transform(current)
+            if (next != current) setEnabledSchemasLocked(context, next)
+        }
     }
 
     fun isSchemaEnabled(context: Context, schemaId: String): Boolean {
@@ -1064,9 +1085,8 @@ object SchemaManager {
 
         // 从已安装市场列表和启用列表中移除
         SettingsPreferences.removeInstalledMarketId(context, schemaId)
-        val enabled = getEnabledSchemas(context).toMutableList()
-        enabled.remove(schemaId)
-        setEnabledSchemas(context, enabled)
+        // 读-改-写走总锁：与并发 toggle 互斥，避免把别人刚启用的方案覆盖掉
+        updateEnabledSchemas(context) { current -> current.filterNot { it == schemaId } }
         return true
     }
 
@@ -1243,10 +1263,9 @@ object SchemaManager {
             // 如果是 .schema.yaml 文件，自动启用
             if (autoEnable && name.endsWith(".schema.yaml")) {
                 val schemaId = name.removeSuffix(".schema.yaml")
-                val enabled = getEnabledSchemas(context).toMutableList()
-                if (schemaId !in enabled) {
-                    enabled.add(schemaId)
-                    setEnabledSchemas(context, enabled)
+                // 同上：走总锁，避免覆盖用户的并发改动
+                updateEnabledSchemas(context) { current ->
+                    if (schemaId in current) current else current + schemaId
                 }
             }
             if (tracked) {

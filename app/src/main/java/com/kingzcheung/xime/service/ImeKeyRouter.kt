@@ -239,7 +239,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 FileLogger.e("ImeKeyRouter", "key job failed", e)
             }
         }
-        service.keyJobs.trySend(job)
+        sendKeyJob(job)
     }
 
     /**
@@ -1461,7 +1461,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 maybeScheduleFollowUp(generation)
             }
         }
-        service.keyJobs.trySend(job)
+        sendKeyJob(job)
     }
 
     /** 若长按退格期间有累积的请求，排入下一个退格 job；否则结束合并状态。 */
@@ -1819,7 +1819,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 FileLogger.e("ImeKeyRouter", "postRimeJob block failed", e)
             }
         }
-        service.keyJobs.trySend(job)
+        sendKeyJob(job)
     }
 
     suspend fun selectCandidateAsync(index: Int, expandedCandidate: RimeCandidate? = null) {
@@ -2178,6 +2178,26 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * - index 0: 计算结果（如 "2"），点击直接替换为结果
      * - index 1: 带公式的结果（如 "1+1=2"），点击显示公式和结果
      */
+
+    /**
+     * 投递按键任务到 keyJobs，队列满时记录并丢弃。
+     *
+     * keyJobs 原为 UNLIMITED：rime 处理变慢（部署、长词库、插件 transform）时队列只增
+     * 不减，每个排队 job 都是 LAZY 协程对象，同时占内存与延迟——表现为「越打越慢、
+     * 候选栏迟到几拍」。改成有界后，积压时丢弃**新来**的任务：丢一次按键响应，好过
+     * 让整个键盘陷入延迟累积。丢弃必须留痕，否则用户只看到「按键丢了」而无从排查。
+     */
+    private fun sendKeyJob(job: kotlinx.coroutines.Job) {
+        // trySend 在有界 Channel 上不阻塞；返回失败即队列已满
+        val ok = service.keyJobs.trySend(job).isSuccess
+        if (!ok) {
+            FileLogger.w(
+                com.kingzcheung.xime.service.XimeInputMethodService.TAG,
+                "keyJobs 队列已满，丢弃一个按键任务（积压过多，优先保响应）"
+            )
+        }
+    }
+
     internal fun updateCalculatorCandidates() {
         val candidate = service.calculatorEngine.getCandidate()
         val result = service.calculatorEngine.getResult()
