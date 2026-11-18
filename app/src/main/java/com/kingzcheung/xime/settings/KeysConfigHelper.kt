@@ -393,12 +393,40 @@ object KeysConfigHelper {
      * 用弱键（WeakHashMap）而不是永久缓存，树用完可被 GC 回收，不会长期占内存。
      * 键用文本对象本身（字符串内容相同即相等），因此键控自然按内容命中。
      */
-    private val yamlNodeCache = java.util.WeakHashMap<String, YamlMap?>()
+    /**
+     * 解析结果缓存。
+     *
+     * **不能用 WeakHashMap**：它不是线程安全的（并发 put 期间 rehash 会导致条目丢失
+     * 甚至链表成环）。`parseXxxYamlText` 都是 `internal`，被设置页、键盘侧与单测直接
+     * 调用，并不都持 [loadLock]，并发读写是真实存在的。
+     *
+     * 改成 ConcurrentHashMap + 有界上限：解析结果是只读的 YamlMap 树，
+     * 同一文本复用同一棵树语义等价。去掉弱引用是为了可预测——
+     * 上限 [YAML_CACHE_MAX] 条已足够覆盖「asset 基线 + 用户覆盖」的几十份配置，
+     * 超出后整体清空（比 LRU 简单，且这个规模的抖动可接受）。
+     */
+    private val yamlNodeCache = java.util.concurrent.ConcurrentHashMap<String, YamlMap>()
+
+    /** 已确认解析失败（如 YAML 语法错）的文本，避免每次重试都白解析一遍。 */
+    private val yamlParseFailed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private const val YAML_CACHE_MAX = 64
 
     /** 带缓存的 YAML 根节点解析：等价于 yaml.parseToYamlNode(text) as? YamlMap。 */
     private fun parseRootCached(text: String): YamlMap? {
         yamlNodeCache[text]?.let { return it }
+        // 失败过的文本直接返回 null，不再重复解析（旧实现缓存 null，
+        // 而 `cache[text]?.let{}` 无法区分「没缓存」与「缓存了 null」，每次都重解析）
+        if (text in yamlParseFailed) return null
         val root = yaml.parseToYamlNode(text) as? YamlMap
+        if (root == null) {
+            if (yamlParseFailed.size < YAML_CACHE_MAX) yamlParseFailed.add(text)
+            return null
+        }
+        if (yamlNodeCache.size >= YAML_CACHE_MAX) {
+            yamlNodeCache.clear()
+            yamlParseFailed.clear()
+        }
         yamlNodeCache[text] = root
         return root
     }

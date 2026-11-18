@@ -3109,7 +3109,12 @@ private fun SpaceKey(
                                 buttonBounds,
                             )
                         }
-                        val cancelThresholdPx = with(density) { 5.dp.toPx() }
+                        // 走统一的 KeyGestureThresholds，不要硬编码：
+                        // 该常量存在的意义就是「改一处不会漏另一处」，硬编码会让
+                        // 调整 DRAG_CANCEL_DP 时唯独空格键行为不一致（只在真机暴露）。
+                        val cancelThresholdPx = with(density) {
+                            com.kingzcheung.xime.ui.keyboard.KeyGestureThresholds.DRAG_CANCEL_DP.dp.toPx()
+                        }
                         try {
                             var lastReportedIdx = -1
                             var completed = false

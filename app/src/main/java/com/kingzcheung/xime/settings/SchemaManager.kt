@@ -66,6 +66,28 @@ internal data class SchemaEntry(
 
 object SchemaManager {
     private const val TAG = "SchemaManager"
+
+    /**
+     * `dictionary: <name>` 行解析正则（文件级常量）。
+     *
+     * 旧实现在 `for (raw in schemaFile.readLines())` 循环体内写 `Regex(...)`，
+     * 等于**每行编译一次 Pattern**。方案文件常有数百行，而 [getMainDictName] /
+     * [getReverseLookupDictName] 会在部署前校验、getSchemaIssues 与设置页列表中
+     * 反复调用，单次可达几十上百毫秒。
+     *
+     * 这个形态锚定行首空白，用于 translator: / reverse_lookup: 段内逐行扫描。
+     */
+    private val DICT_NAME_RE = Regex("""^\s+dictionary\s*:\s*['"]?(\w[\w-]*)['"]?""")
+
+    /**
+     * 全文范围的 dictionary 名匹配（不锚行首），供 [getReferencedDictName] 粗筛。
+     *
+     * 注意 `reverse_lookup.dictionary` 同样包含 "dictionary:"，
+     * 该函数因此可能把反查词典当成主词典；精确判定以 [getMainDictName] 为准
+     * （它先定位 translator: 段再逐行扫描）。
+     */
+    private val DICT_NAME_ANYWHERE_RE = Regex("""dictionary\s*:\s*['"]?(\w[\w-]*)['"]?""")
+
     private const val CUSTOM_YAML = "default.custom.yaml"
     internal val yaml = Yaml(configuration = YamlConfiguration(strictMode = false, anchorsAndAliases = com.charleskorn.kaml.AnchorsAndAliases.Permitted(maxAliasCount = UInt.MAX_VALUE)))
 
@@ -562,8 +584,7 @@ object SchemaManager {
         return try {
             val content = schemaFile.readText()
             // matches "  dictionary: wubi86" or "translator/dictionary: wubi86" or inline {dictionary:wubi86}
-            val regex = Regex("""dictionary\s*:\s*['\"]?(\w[\w-]*)['\"]?""")
-            regex.find(content)?.groupValues?.getOrNull(1)
+            DICT_NAME_ANYWHERE_RE.find(content)?.groupValues?.getOrNull(1)
         } catch (e: Exception) { null }
     }
 
@@ -600,8 +621,7 @@ object SchemaManager {
                     if (inTranslator) inTranslator = false
                 }
                 if (inTranslator) {
-                    val m = Regex("""^\s+dictionary\s*:\s*['\"]?(\w[\w-]*)['\"]?""")
-                        .find(raw)
+                    val m = DICT_NAME_RE.find(raw)
                     if (m != null) {
                         found = m.groupValues.getOrNull(1)
                         break
@@ -628,8 +648,7 @@ object SchemaManager {
                     if (inReverse) inReverse = false
                 }
                 if (inReverse) {
-                    val m = Regex("""^\s+dictionary\s*:\s*['\"]?(\w[\w-]*)['\"]?""")
-                        .find(raw)
+                    val m = DICT_NAME_RE.find(raw)
                     if (m != null) {
                         found = m.groupValues.getOrNull(1)
                         break
