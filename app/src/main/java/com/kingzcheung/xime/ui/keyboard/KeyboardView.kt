@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -125,16 +126,18 @@ fun KeyboardView(
 
     // 候选展开页自动收起：编码删空（无候选也无联想）时不留空页。
     // 展开态是候选栏的在位扩展（非 Overlay），删除实时更新页内候选，删空即回到键盘。
-    LaunchedEffect(
-        candidatePageExpanded,
-        candidateState.value.candidates.size,
-        candidateState.value.associationCandidates.size
-    ) {
-        if (candidatePageExpanded &&
+    //
+    // 不能写成 `LaunchedEffect(candidatePageExpanded, candidateState.value.candidates.size, …)`：
+    // key 表达式在**组合期**求值，等于让 KeyboardView 顶层作用域订阅了整个候选态——
+    // 每敲一个字候选就变一次，顶层失效 → 整个 Column 及其子 lambda 全部重建。
+    // 改用 snapshotFlow：观察发生在协程内，只有「是否已空」这个结论翻转时才动作。
+    LaunchedEffect(candidatePageExpanded) {
+        if (!candidatePageExpanded) return@LaunchedEffect
+        snapshotFlow {
             candidateState.value.candidates.isEmpty() &&
-            candidateState.value.associationCandidates.isEmpty()
-        ) {
-            viewModel.setCandidatePageExpanded(false)
+                candidateState.value.associationCandidates.isEmpty()
+        }.collect { empty ->
+            if (empty) viewModel.setCandidatePageExpanded(false)
         }
     }
     val viewState by viewModel.viewState.collectAsStateWithLifecycle()
