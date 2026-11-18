@@ -214,6 +214,13 @@ class T9InputController(
      */
     private fun refreshOnBackground() {
         val data = fetchAll()
+        if (data.result.stale) {
+            // 拿不到 rimeLock（部署/编译中）：这是「忙」，不是「引擎空了」。
+            // 照常往上写会把 UI 编码区清空、左栏复位 IDLE，而 C++ 侧仍是 SELECTION，
+            // 下一键 set_input 把旧 pending 一起冲刷 → 跳字/错词。
+            // 直接放弃本轮刷新，保持上一轮的 UI 快照（下一键会重新取全量）。
+            return
+        }
         val (finalResult, injections) = transformInjections(data.result)
         val composition = finalResult.toComposition()
         val gen = ++uiGeneration
@@ -237,6 +244,10 @@ class T9InputController(
      */
     private fun fetchAll(): T9RefreshData {
         val result = rimeEngine.getProcessResult(true)
+        if (result.stale) {
+            // 忙（锁竞争）：不要用空快照覆盖 cachedInput，否则 bufferString 会瞬间变空。
+            return T9RefreshData(result, parseLeftPanelState("IDLE;;;;;0"), emptyList())
+        }
         // 更新主线程可读的 input 快照（与 preedit/候选/左栏同源于本次 flush）
         cachedInput = result.inputText
         val panel = parseLeftPanelState(result.t9PanelState.ifEmpty { "IDLE;;;;;0" })

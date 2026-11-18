@@ -71,13 +71,61 @@ object PersonalDictManager {
         if (!file.exists()) return emptyList()
         return try {
             DictionaryHelper.parseCodeTable(file.readText(Charsets.UTF_8))
-        } catch (_: Exception) { emptyList() }
+        } catch (e: Exception) {
+            // 解析失败 ≠ 用户没有短语。旧实现返回 emptyList() 且不记日志，调用方
+            // （设置页「加一条短语」→ 全量写回）会把原文件覆盖成只剩新条目，
+            // 用户原有的自定义短语整体消失，日志里也没有任何痕迹。
+            com.kingzcheung.xime.util.FileLogger.w(
+                "PersonalDict",
+                "自定义短语解析失败（保持文件原样）: ${file.absolutePath} ${e.javaClass.simpleName}: ${e.message}",
+                e,
+            )
+            emptyList()
+        }
     }
 
     fun saveCustomPhrases(context: Context, schemaId: String? = null, entries: List<DictEntry>) {
         val file = getCustomPhraseFile(context, schemaId)
         file.parentFile?.mkdirs()
-        file.writeText(buildStableDbText(STABLEDB_HEADER, entries), Charsets.UTF_8)
+        // 覆盖前先留一份 .bak：全量重写一旦遇到「读取失败 → 只写回新条目」的路径，
+        // 这是用户短语唯一的救回材料。
+        if (file.isFile && file.length() > 0) {
+            runCatching { file.copyTo(File(file.parentFile, "${file.name}.bak"), overwrite = true) }
+        }
+        writeFileAtomically(file, buildStableDbText(STABLEDB_HEADER, entries))
+    }
+
+    /**
+     * 原子写文件（同目录 .tmp → fsync → rename）。
+     *
+     * `<schema>.custom.yaml` 有**两个写入方**：这里（Kotlin，用户改短语）与 native
+     * （`nativeEnsureT9SchemaPatches`，部署/切方案时打 T9 补丁）。两边并发 truncate+write
+     * 会产出半截 YAML，librime 加载该补丁失败会**静默跳过整段**，表现为「T9 四要素/
+     * 个人词库补丁忽然全失效」，而部署 hash 已经把残文件算进去了，不会再自愈。
+     * rename 保证任一方读到的都是完整文件。
+     */
+    internal fun writeFileAtomically(file: File, text: String) {
+        runCatching {
+            file.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+            return
+        }.onFailure {
+            com.kingzcheung.xime.util.FileLogger.w(
+                "PersonalDict",
+                "原子写失败，退回覆盖写: ${file.absolutePath} ${it.message}",
+                it,
+            )
+        }
+        runCatching { file.writeText(text, Charsets.UTF_8) }
     }
 
     /** 清理 custom_phrase 文件（仅当文件为空时删除，避免丢失用户数据）。 */

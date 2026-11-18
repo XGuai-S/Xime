@@ -66,6 +66,15 @@ data class RimeProcessResult(
     val hasNextPage: Boolean,
     val hasPrevPage: Boolean,
     /**
+     * 本次结果是否因「拿不到 rimeLock」而退化成的空样本。
+     *
+     * 部署/编译持锁期间 [getProcessResult] 走 tryLocked，返回一个全空结果；
+     * 旧实现与「引擎真的没有候选」完全同形，T9 侧会把 cachedInput 写成空串、
+     * 把左栏复位 IDLE，而 C++ 侧仍是 SELECTION —— 用户看到「编码忽然清空」。
+     * 调用方见到 true 时应保持既有状态、跳过本轮刷新。
+     */
+    val stale: Boolean = false,
+    /**
      * T9 左侧面板状态（格式 STATE;PINYIN;DIGIT_LEN;SEL_DIGITS;PANEL_DIGITS;LEFT_LOCKED）。
      * 由 JNI 在 T9 会话活跃时填充，非 T9 场景为空字符串。
      */
@@ -421,7 +430,9 @@ class RimeEngine {
         // 会惰性生成候选页（遍历 translations），与 t9FlushRimeInput（set_input → Reset，
         // 释放旧 translations）并发会导致悬空 → ScriptTranslation::Peek 空指针崩溃。
         // 部署/编译持锁期间拿不到锁直接返回空结果（不进 native），避免阻塞调用线程。
-        return tryLocked(RimeProcessResult(false, "", "", "", emptyArray(), false, false, false)) {
+        return tryLocked(
+            RimeProcessResult(false, "", "", "", emptyArray(), false, false, false, stale = true)
+        ) {
             val r = nativeGetProcessResult(processed)
             updateCandidatesCache(r.candidates)
             updateInputTextCache(r.inputText)
@@ -1010,9 +1021,20 @@ class RimeEngine {
             locked {
                 nativeDestroy()
                 isInitialized = false
+                // 必须把缓存的候选/编码一并失效，并清掉单例引用：
+                // 旧实现只置 isInitialized=false，companion.instance 仍指向这个**已 finalize**
+                // 的对象，排在 rimeLock 队列里的调用（processKey 的
+                // `locked { if (!nativeHasSession()) nativeCreateSession() }`）会在
+                // native 全局状态已 finalize 之后重建 session —— 属高层 use-after-free 类闪退
+                // （注释里也承认 finalize/initialize 不可重入）。
+                invalidateSnapshotCaches()
+            }
+            synchronized(initLock) {
+                if (!isInitialized && instance === this) instance = null
             }
         }
     }
+
 
     /**
      * 结束当前输入会话但**保留引擎**（输入法服务切走时调用）。

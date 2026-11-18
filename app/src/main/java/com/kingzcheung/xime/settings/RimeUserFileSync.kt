@@ -291,6 +291,18 @@ object RimeUserFileSync {
             val vis = File(mirror, rel)
             val privHash = hashOrNull(priv)
             val visHash = hashOrNull(vis)
+            // hashOrNull 把「读失败」也返回 null，而 decideAction 把 null 当作「文件不存在」：
+            // 私有侧一次瞬时读失败（FUSE/存储忙/权限抖动）就会被判成「私有被删 → 可见侧未改动
+            // → DELETE_VISIBLE」，把用户可见目录里的镜像删掉；反方向则会覆盖用户刚编辑的版本。
+            // 这里显式区分：**文件存在但拿不到 hash = 读失败**，本轮跳过该路径，留待下次重试。
+            if (priv.isFile && privHash == null) {
+                FileLogger.w(TAG, "私有文件读取失败，本轮跳过同步：$rel")
+                continue
+            }
+            if (vis.isFile && visHash == null) {
+                FileLogger.w(TAG, "可见文件读取失败，本轮跳过同步：$rel")
+                continue
+            }
             val resultHash: String? = when (decideAction(privHash, visHash, baseline[rel])) {
                 SyncAction.NONE -> privHash ?: visHash
 
@@ -540,11 +552,32 @@ object RimeUserFileSync {
         }.getOrNull()
     }
 
-    /** 复制文件（覆盖目标），必要时创建父目录。 */
+    /**
+     * 复制文件（覆盖目标），必要时创建父目录。
+     *
+     * **必须**走「写 .tmp → fsync → rename」而不是 `copyTo(overwrite = true)`：
+     * 目标文件此刻可能正被 librime 的部署线程按时间戳读取并按文件内容编译
+     * （`ensureDeployment` 里 sync 与 deploy 是顺序的，但进程级其它入口——启动预初始化、
+     * releaseUserConfig、恢复备份后——不受这个顺序保护）。直接截断重写会让编译线程
+     * 读到半截词库：编译**成功**，但生成残缺的 table.bin（magic 检查拦不住「头合法、
+     * 内容截断」）。rename 是原子的，读端只会看到完整的旧版或完整的新版。
+     */
     private fun copyFile(source: File, target: File): Boolean = runCatching {
         if (!source.isFile) return false
         target.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) return false }
-        source.copyTo(target, overwrite = true)
+        val tmp = File(target.parentFile, "${target.name}.sync-tmp")
+        source.inputStream().use { input ->
+            java.io.FileOutputStream(tmp).use { output ->
+                input.copyTo(output)
+                output.flush()
+                output.fd.sync()
+            }
+        }
+        if (!tmp.renameTo(target)) {
+            // 极少数 FUSE/外置存储上 rename 会失败：至少保证不是「半截留在正式路径」
+            runCatching { tmp.copyTo(target, overwrite = true) }
+            tmp.delete()
+        }
         true
     }.getOrElse {
         FileLogger.w(TAG, "复制 ${source.name} -> ${target.absolutePath} 失败：${it.message}", it)
