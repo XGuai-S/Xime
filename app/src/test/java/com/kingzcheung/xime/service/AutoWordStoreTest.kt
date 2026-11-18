@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.service
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -537,6 +538,26 @@ class AutoWordStoreTest {
         assertEquals(0, got[1].count)
         assertEquals(true, got[2].fromTemp)
         assertEquals(2, got[2].count)
+    }
+
+    @Test
+    fun `hitsFor_完整编码命中标 exact_前缀命中不标`() {
+        // 回归：候选栏把「完整编码命中」的造词提到最前、前缀命中留在尾部，
+        // 依据就是这个 exact 标记（用户 2026-11：造词「一亿」码 yiyi 被引擎的高频词
+        // 挤出第一页，表现为「生词本里有、候选栏打不出来」）。
+        val fixed = mapOf("yiyi" to mapOf("一亿" to 500), "yiyida" to mapOf("一大" to 10))
+        val temp = mapOf(
+            "yiyi" to mapOf("一亿点" to AutoWordStore.Entry("一亿点", "yiyi", now, 0, now)),
+        )
+        val exactOnly = AutoWordStore.hitsFor(temp, fixed, "yiyi", emptySet(), prefixMatch = false)
+        assertEquals(listOf("一亿", "一亿点"), exactOnly.map { it.word })
+        assertTrue("完整命中必须 exact=true", exactOnly.all { it.exact })
+
+        val withPrefix = AutoWordStore.hitsFor(temp, fixed, "yiyi", emptySet(), prefixMatch = true)
+        val prefixHits = withPrefix.filter { it.word == "一大" }
+        assertEquals(1, prefixHits.size)
+        assertFalse("前缀命中不能标 exact", prefixHits.single().exact)
+        assertTrue("完整命中仍为 exact", withPrefix.filter { it.word == "一亿" }.single().exact)
     }
 
     @Test

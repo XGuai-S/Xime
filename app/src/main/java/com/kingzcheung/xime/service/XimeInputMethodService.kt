@@ -355,6 +355,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 与 [candidateOrderTable] 同一加载约束（onCreate 里用已 attach 的 context 加载）。
      * 上屏时记录、晋升时更新并防抖落盘，见 [recordWordFrequency]。
      */
+    /**
+     * 已加载进内存的生词库版本（见 [AutoWordStore.dataVersion]）。
+     *
+     * 设置页/同步/手改文件改了生词后，内存表不会自动失效，用户会遇到
+     * 「生词本里明明有『一亿』，候选栏里打不出来」，必须重启输入法。会话开始时比对版本号即可。
+     */
+    @Volatile
+    private var loadedAutoWordVersion = -1
+
     @Volatile
     internal var autoWordTemp: Map<String, Map<String, AutoWordStore.Entry>> = emptyMap()
     /** 自动造词固定词库（编码 → 词 → 权重），晋升时更新落盘；作为 custom_phrase 注入 rime。 */
@@ -1034,6 +1043,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             if (!ok) {
                 FileLogger.e(TAG, "词库加载 3 次均失败，本次保持空表降级（下次服务重建时重新加载）")
             }
+            // 无论成败都记下当前版本：失败时也避免每次开会话都重试打日志
+            loadedAutoWordVersion = AutoWordStore.dataVersion()
         }
         FileLogger.i(
             TAG,
@@ -3217,7 +3228,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
     }
 
+    /**
+     * 生词/排序表在别处被改过（设置页造词、同步、手改文件）时重载内存表。
+     *
+     * 只在会话开始调用：按键热路径不能碰 IO。版本号没变时是一次 int 比较，零成本。
+     */
+    private fun maybeReloadWordTables() {
+        if (AutoWordStore.dataVersion() == loadedAutoWordVersion) return
+        serviceScope.launch {
+            val ok = runCatching { loadWordTablesOnce() }.getOrElse { false }
+            if (ok) {
+                loadedAutoWordVersion = AutoWordStore.dataVersion()
+                FileLogger.i(TAG, "生词/排序表已重载（version=$loadedAutoWordVersion）")
+            } else {
+                FileLogger.w(TAG, "生词/排序表重载失败，沿用旧表（下次会话再试）")
+            }
+        }
+    }
+
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        // 会话开始是唯一安全的「补载」时机：造词表若被别处改过，这里换上新表
+        runCatching { maybeReloadWordTables() }
         // 换了输入框：帮写的"原文基准"失效，避免拿上一个框的原文改写
         runCatching { ensureAiVoiceController()?.resetHelpWriteBase() }
         // 把当前宿主包名/输入类型同步给 AI 面板状态。
@@ -5300,14 +5331,27 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // [CandidateState.autoWordTempIndices]。这里只记录**下标**，不改候选文本：
         // 候选文本还要被上屏、黑名单、输入框首词等路径消费，「◌」绝不能混进文本。
         // 固定词库（已晋升）不加标记，与引擎候选一致。
+        // 完整编码命中的造词放到**最前**，前缀命中仍追加在尾部。
+        //
+        // 旧实现一律追加到引擎候选末尾：用户刚造好的词（如码 yiyi 的「一亿」）会因为
+        // 引擎在该编码下已有满一页高频词（意义/异议/…）而永远排在第 9 位之后，
+        // 候选栏第一页永远看不到它、翻页也未必能对上 —— 用户感知就是
+        // 「生词本里明明有，候选栏就是打不出来」（用户 2026-11 反馈）。
+        // 造词是用户自己的词，完整命中时优先级就该高于引擎的高频词。
+        val exactHits = extra.filter { it.exact }
+        val prefixHits = extra.filterNot { it.exact }
+        val headWords = exactHits.map { it.word }
+        val tailWords = prefixHits.map { it.word }
         val tempIndices = HashSet<Int>()
-        extra.forEachIndexed { i, hit ->
-            if (hit.fromTemp) tempIndices += engineCandidates.size + i
+        exactHits.forEachIndexed { i, hit -> if (hit.fromTemp) tempIndices += i }
+        prefixHits.forEachIndexed { i, hit ->
+            if (hit.fromTemp) tempIndices += headWords.size + engineCandidates.size + i
         }
         return CandidateOrderStore.Reordered(
-            candidates = engineCandidates + extra.map { it.word },
-            comments = engineComments + extra.map { "" },
-            actions = baseActions + extra.map { CandidateAction.plugin(it.word) },
+            candidates = headWords + engineCandidates + tailWords,
+            comments = headWords.map { "" } + engineComments + tailWords.map { "" },
+            actions = headWords.map { CandidateAction.plugin(it) } +
+                baseActions + tailWords.map { CandidateAction.plugin(it) },
             autoWordTempIndices = tempIndices,
         )
     }

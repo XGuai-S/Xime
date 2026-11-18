@@ -661,6 +661,13 @@ internal object AutoWordStore {
         val fromTemp: Boolean,
         /** 临时词库的选中次数；固定词库恒为 0。 */
         val count: Int,
+        /**
+         * true = 与当前输入**完整编码**命中；false = 只是前缀命中。
+         *
+         * 候选栏排序要用它区分：完整命中的造词（用户刚造/刚确认过的词）必须排在最前，
+         * 否则会被引擎的高频词挤出第一页 —— 用户感知就是「生词本里有，候选栏打不出来」。
+         */
+        val exact: Boolean = true,
     )
 
     /**
@@ -679,10 +686,10 @@ internal object AutoWordStore {
         val seen = HashSet<String>(known)
         // 1) 完整编码命中：固定库按权重降序，临时库垫底
         fixed[code]?.entries?.sortedByDescending { it.value }?.forEach { (word, _) ->
-            if (seen.add(word)) out += Hit(word, fromTemp = false, count = 0)
+            if (seen.add(word)) out += Hit(word, fromTemp = false, count = 0, exact = true)
         }
         temp[code]?.forEach { (word, entry) ->
-            if (seen.add(word)) out += Hit(word, fromTemp = true, count = entry.count)
+            if (seen.add(word)) out += Hit(word, fromTemp = true, count = entry.count, exact = true)
         }
         // 2) 前缀命中（仅 prefixMatch=true 时）：输入是某个已录编码的前缀（且没敲完）时也让词可见
         if (prefixMatch && code.length >= PREFIX_MIN_INPUT) {
@@ -709,7 +716,7 @@ internal object AutoWordStore {
                 if (added >= MAX_PREFIX_CANDIDATES) break
                 val word = words[idx]
                 if (!seen.add(word)) continue
-                out += Hit(word, fromTemp = false, count = 0)
+                out += Hit(word, fromTemp = false, count = 0, exact = false)
                 added++
             }
             if (added < MAX_PREFIX_CANDIDATES) {
@@ -730,7 +737,7 @@ internal object AutoWordStore {
                     if (added >= MAX_PREFIX_CANDIDATES) break
                     val word = words[idx]
                     if (!seen.add(word)) continue
-                    out += Hit(word, fromTemp = true, count = counts[idx])
+                    out += Hit(word, fromTemp = true, count = counts[idx], exact = false)
                     added++
                 }
             }
@@ -749,6 +756,22 @@ internal object AutoWordStore {
      */
     private var tempBaselineText: String? = null
     private var fixedBaselineText: String? = null
+
+    /**
+     * 生词库数据版本号：每次**写盘**自增。
+     *
+     * 用途：设置页/其它进程路径改了生词文件后，输入法服务里那份内存表（autoWordTemp/
+     * autoWordFixed）不会自动失效——用户会遇到「生词本里明明有『一亿』，候选栏却打不出来」，
+     * 必须重启输入法才恢复。服务侧在每次开会话时比对版本号，变了就重载词库表。
+     */
+    @Volatile
+    private var dataVersion = 0
+
+    fun dataVersion(): Int = dataVersion
+
+    private fun bumpDataVersion() {
+        dataVersion += 1
+    }
 
     private fun tempPrivateFile(context: android.content.Context): File =
         File(context.filesDir, TEMP_FILE_NAME)
@@ -867,11 +890,14 @@ internal object AutoWordStore {
      * 表为空且没被外部改过时删除文件，不留空壳。
      */
     @Synchronized
+    private fun onPersisted() = bumpDataVersion()
+
+    @Synchronized
     fun saveTemp(
         context: android.content.Context,
         table: Map<String, Map<String, Entry>>,
-    ): Map<String, Map<String, Entry>> =
-        UserDataMerge.saveUserTable(
+    ): Map<String, Map<String, Entry>> {
+        val result = UserDataMerge.saveUserTable(
             context = context,
             name = TEMP_FILE_NAME,
             privateFile = tempPrivateFile(context),
@@ -881,6 +907,10 @@ internal object AutoWordStore {
             serialize = ::serializeTemp,
             onBaseline = { tempBaselineText = it },
         )
+        // 写盘成功后自增版本号：输入法服务据此判断内存表要不要重载（见 dataVersion 注释）
+        onPersisted()
+        return result
+    }
 
     /**
      * 生成 rime 可编译词典 `auto_word.dict.yaml`（3.3.13）。
@@ -945,8 +975,8 @@ internal object AutoWordStore {
     fun saveFixed(
         context: android.content.Context,
         table: Map<String, Map<String, Int>>,
-    ): Map<String, Map<String, Int>> =
-        UserDataMerge.saveUserDictYaml(
+    ): Map<String, Map<String, Int>> {
+        val result = UserDataMerge.saveUserDictYaml(
             context = context,
             name = FIXED_FILE_NAME,
             dictName = "auto_word",
@@ -965,6 +995,9 @@ internal object AutoWordStore {
             },
             onBaseline = { fixedBaselineText = it },
         )
+        onPersisted()
+        return result
+    }
 
     /**
      * 合并临时词库的外部手改（不写盘）：返回合并后的表，调用方必须采纳。

@@ -64,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -324,7 +325,12 @@ private fun ExtensionItem(
     var showTrustConfirm by remember { mutableStateOf(false) }
     var trustConfirmAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     
-    val errors = PluginErrorLog.getErrors(extension.id)
+    // 错误记录是插件级的**进程内可变数据**，不是 Compose state：旧实现每次组合直接
+    // PluginErrorLog.getErrors(...)，点「清除日志」后内存确实清了，但没有任何可观察状态
+    // 变化 → 界面不会重组，⚠ 角标继续显示旧条数，用户以为「清不掉、也没有按钮」。
+    // 这里用一个自增版本号显式触发重读。
+    var errorVersion by remember { mutableIntStateOf(0) }
+    val errors = remember(extension.id, errorVersion) { PluginErrorLog.getErrors(extension.id) }
     val hasErrors = errors.isNotEmpty()
 
     val pendingHosts = remember(extension.id) {
@@ -358,8 +364,10 @@ private fun ExtensionItem(
             pluginName = extension.name,
             errors = errors,
             onDismiss = { showErrorDialog = false },
-            onClear = { 
+            onClear = {
                 PluginErrorLog.clearErrors(extension.id)
+                // 清完立刻重读，让 ⚠ 角标与条数同步消失（文件侧 clearAll 已由 clearErrors 排队落盘）
+                errorVersion++
                 showErrorDialog = false
             }
         )
