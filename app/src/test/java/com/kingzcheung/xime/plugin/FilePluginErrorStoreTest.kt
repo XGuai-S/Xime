@@ -90,6 +90,23 @@ class FilePluginErrorStoreTest {
     }
 
     @Test
+    fun `清空之后仍能正常记录（清空不影响后续写入）`() {
+        // 用户 2026-11-19 问：「插件错误还能正常记录吗」——清空/新增按钮只动了 UI 与
+        // clearErrors/clearAllErrors，记录路径（append）未改。这条测试把结论钉住：
+        // 清空后再次 append 必须照常落盘、照常读回。
+        // 注意 error(id) 的第一个参数就是 pluginId（helper 直接写进 PluginError.pluginId）
+        store.append("a", error("a"))
+        store.append("b", error("b"))
+        store.clearAll("a")
+        assertEquals(1, store.load().size)
+
+        store.append("a", error("a"))
+        val loaded = store.load().sortedBy { it.pluginId }
+        assertEquals("清空后新错误必须能再写入", 2, loaded.size)
+        assertEquals(listOf("a", "b"), loaded.map { it.pluginId })
+    }
+
+    @Test
     fun `malformed lines are skipped without breaking others`() {
         store.append("a", error("a"))
         File(dir, "errors.jsonl").appendText("this is not valid json\n")
