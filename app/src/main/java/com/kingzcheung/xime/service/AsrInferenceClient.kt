@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import android.os.SystemClock
 import com.kingzcheung.xime.util.FileLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.lang.ref.WeakReference
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -18,6 +21,55 @@ class AsrInferenceClient(private val context: Context) {
 
     companion object {
         private const val TAG = "AsrInferenceClient"
+
+        /**
+         * 空闲多久就把 `:asr` 进程放掉。
+         *
+         * 取值权衡：太短会让连续几次语音输入之间反复冷启动（模型加载慢），太长则相当于
+         * 一直常驻（实测常驻 PSS ≈232MB）。3 分钟覆盖「说完一句、想一下、再说一句」的
+         * 常见节奏，又能在真正停下来之后把内存放掉。
+         */
+        internal const val IDLE_UNBIND_MS = 3 * 60 * 1000L
+
+        /** 所有仍活着的客户端（弱引用，避免看门狗把临时客户端钉在内存里）。 */
+        private val liveClients = CopyOnWriteArrayList<WeakReference<AsrInferenceClient>>()
+
+        /** 最后一次真正的 ASR 调用时刻（elapsedRealtime）；0 = 从未用过。 */
+        @Volatile
+        var lastActivityAtMs: Long = 0L
+            private set
+
+        /** 只刷新活动时间（不重排看门狗）——留给每 ~20ms 一帧的音频热路径。 */
+        internal fun markActivity() {
+            lastActivityAtMs = SystemClock.elapsedRealtime()
+        }
+
+        /** 会话边界：刷新活动时间并把回收检查推到超时之后。 */
+        internal fun touch() {
+            markActivity()
+            AsrConnectionWatchdog.scheduleIdleCheck()
+        }
+
+        /** 仍处于绑定状态的客户端数量。 */
+        internal fun boundClientCount(): Int {
+            pruneDeadRefs()
+            return liveClients.count { it.get()?.bound == true }
+        }
+
+        /** 解绑所有客户端（主线程调用）。绑定清空后系统即可回收 `:asr` 进程。 */
+        internal fun unbindAll() {
+            pruneDeadRefs()
+            liveClients.forEach { ref -> ref.get()?.unbind() }
+            liveClients.clear()
+        }
+
+        private fun pruneDeadRefs() {
+            liveClients.removeAll { it.get() == null }
+        }
+    }
+
+    init {
+        liveClients.add(WeakReference(this))
     }
 
     interface AsrCallback {
@@ -96,7 +148,9 @@ class AsrInferenceClient(private val context: Context) {
         if (!boundOk) return false
         return withContext(Dispatchers.IO) {
             connectLatch.await(5, TimeUnit.SECONDS)
-            bound && service != null
+            val ready = bound && service != null
+            if (ready) touch()
+            ready
         }
     }
 
@@ -109,6 +163,8 @@ class AsrInferenceClient(private val context: Context) {
         }
         bound = false
         service = null
+        // 解绑也算一次「活动」：让看门狗重新起算，别紧接着又跑一遍空检查
+        touch()
     }
 
     private fun requireService(): IInferenceAsrService {
@@ -116,6 +172,7 @@ class AsrInferenceClient(private val context: Context) {
     }
 
     suspend fun startAsr(modelDir: String, callback: AsrCallback): Boolean = withContext(Dispatchers.IO) {
+        touch()
         try {
             asrCallbackStub.attach(callback)
             requireService().startAsr(modelDir, asrCallbackStub)
@@ -127,6 +184,9 @@ class AsrInferenceClient(private val context: Context) {
     }
 
     fun pushAsrAudio(audioData: ByteArray) {
+        // 录音期间必须持续刷新活动时间：否则一次超过超时阈值的长录音会在中途被判空闲。
+        // 这里只写一个 volatile 时间戳，不碰 Handler，20ms 一帧的开销可忽略。
+        markActivity()
         try {
             requireService().pushAsrAudio(audioData)
         } catch (e: Exception) {
@@ -136,6 +196,7 @@ class AsrInferenceClient(private val context: Context) {
     }
 
     suspend fun stopAsr(): String = withContext(Dispatchers.IO) {
+        touch()
         try {
             requireService().stopAsr()
         } catch (e: Exception) {
@@ -147,6 +208,7 @@ class AsrInferenceClient(private val context: Context) {
     }
 
     fun cancelAsr() {
+        touch()
         try {
             requireService().cancelAsr()
         } catch (e: Exception) {
@@ -156,6 +218,7 @@ class AsrInferenceClient(private val context: Context) {
     }
 
     suspend fun releaseAsr() {
+        touch()
         try {
             requireService().releaseAsr()
         } catch (e: Exception) {

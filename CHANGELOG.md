@@ -30,6 +30,28 @@
 
 ---
 
+## 3.4.02（versionCode 20261346）
+
+**修复 `:asr` 进程开关关了还常驻。**
+
+现象：设置里「使用本地模型」已经是关的，但 `com.kingzcheung.xime:asr` 进程一直在跑，实测 **PSS 232MB**（RSS 147MB + swap 195MB），占着内存不还。
+
+根因有两层：
+
+1. `AsrInferenceService` 是**绑定型**服务，进程寿命取决于「还有没有人绑着」。服务端原有的空闲回收只释放模型句柄，**绑定是客户端资源，服务自己解不开**。
+2. 关闭开关走的是 `AsrSupport.releaseModel()`，它只释放 `warmBackend` 这个预热后端——若该字段为 null（本进程没预热过、已被清空），整段是空操作，真正残留的会话客户端绑定没人解。
+
+修复：
+
+- 新增 `AsrConnectionWatchdog`：用弱引用登记所有活着的 `AsrInferenceClient`，并记录最后一次真实 ASR 调用时间。空闲超过 **3 分钟**即逐个 `unbind()` + `stopService()`，绑定清空后系统回收进程，内存归零。
+- 关闭「使用本地模型」时**立即**回收，不等超时（`AsrSupport.releaseModel()` 末尾调 `shutdownNow`）。
+- 显式开了「保持引擎常驻」时不自动回收——那是用户拿内存换首次响应的选择。
+- 音频帧热路径（每 ~20ms 一帧）只写一个 volatile 时间戳，不排 Handler，避免看门狗本身带来开销；长录音不会在途中被判空闲。
+- 新增 `AsrConnectionWatchdogTest` 5 条（从未用过要收 / 刚用过不收 / 正好到点收 / 差 1ms 不收 / 默认超时与常量一致）。
+- `AsrInferenceService.onDestroy()` 里主动结束 `:asr` 进程：只解绑不退出的话，进程会变成系统的
+  「cached empty」继续挂着（实测 RSS 仍 356MB），要等系统内存吃紧才回收。该进程只服务这一个
+  服务，退出是安全的（exit-info 记 `reason=1 EXIT_SELF`，不是崩溃），下次用 `bindService` 重新拉起。
+
 ## 3.4.01（versionCode 20261345）
 
 版本序列重置后的首个正式版本。代码内容与 `3.11.47` 完全一致，仅版本号与序列规则变化。

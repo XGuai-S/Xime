@@ -62,6 +62,9 @@ class XimeApplication : Application(), ImageLoaderFactory {
         super.onCreate()
 
         FileLogger.init(this)
+        // :asr 进程空闲回收看门狗：绑定型服务的绑定是客户端资源，服务自己解不开，
+        // 一旦有路径漏了 unbind 就会让 232MB 的 :asr 进程永久常驻。
+        com.kingzcheung.xime.service.AsrConnectionWatchdog.attach(this)
         KeyTapLogger.init(this)
         KeyTapLogger.enabled = SettingsPreferences.isKeyTapLogEnabled(this)
         // 邻键误触纠错（librime 插件版）：初始化先验推送器

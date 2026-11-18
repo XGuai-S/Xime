@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.speech
 
 import android.content.Context
+import com.kingzcheung.xime.service.AsrConnectionWatchdog
 import com.kingzcheung.xime.util.FileLogger
 
 /**
@@ -56,5 +57,10 @@ internal object AsrSupport {
             backend?.releaseModel()
             FileLogger.i(TAG, "offline ASR model released")
         }
+        // 只放模型不够：`:asr` 进程活不活取决于「还有没有人绑着它」，而绑定是客户端资源。
+        // warmBackend 为 null（本进程没预热过 / 已被清）时上面整段是空操作，历史上就出现过
+        // 「开关关了、模型也标了已释放，但 232MB 的 :asr 进程照样常驻」。
+        // 这里补一刀：立刻解绑所有客户端并停掉服务，把进程交还给系统。
+        AsrConnectionWatchdog.shutdownNow("关闭本地识别")
     }
 }

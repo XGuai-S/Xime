@@ -222,5 +222,17 @@ class AsrInferenceService : Service() {
             loadedModelDir = null
         }
         super.onDestroy()
+
+        // 本进程只服务于这一个绑定型服务，没有别的组件。
+        // 解绑之后如果不主动退出，进程会变成系统里的「cached empty」继续挂着
+        // ——实测 RSS 仍 356MB，要等到系统内存吃紧才被回收，期间一直占着 zram/页缓存。
+        // 这里直接结束自己：下次真正要用时 bindService 会重新拉起（冷启动代价已知且可接受）。
+        //
+        // 不用 stopSelf：对「只被绑定」的服务它不会终止进程。也不用 System.exit，
+        // Process.killProcess 才会走正常进程终止路径（exit-info 记为 reason=1 EXIT_SELF，
+        // 不是崩溃，可与 SIGNALED/CRASH 区分）。
+        idleHandler.postDelayed({
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }, 300L)
     }
 }
