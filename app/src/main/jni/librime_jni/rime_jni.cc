@@ -22,6 +22,7 @@
 #include <cstring>  // for strcmp
 #include <utility>  // for std::pair
 #include <ctime>    // for time
+#include <cstdio>   // for snprintf（信号安装失败时的 header 行）
 #include <signal.h> // native crash 捕获
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -3297,6 +3298,30 @@ extern "C"
             unlink(log_path.c_str());
         }
         g_native_crash_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+        // 安装成功时先写一行 header：
+        // 这个文件为空有两种可能——「装好了但没崩过」和「根本没装上（JNI 没走到这里）」，
+        // 从空文件本身分不出来。有 header 就说明本次进程确实挂了 handler，
+        // 之后仍为空 = 真的没崩。写失败不影响后续安装流程。
+        if (g_native_crash_fd >= 0)
+        {
+            char header[160];
+            time_t now = time(nullptr);
+            struct tm tm_buf;
+            localtime_r(&now, &tm_buf);
+            char ts[32] = {0};
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            int n = snprintf(
+                header, sizeof(header),
+                "=== native crash handler installed pid=%d at %s ===\n",
+                (int)getpid(), ts);
+            if (n > 0)
+            {
+                // 已 O_APPEND：即使上一进程崩过留下记录，也不会被覆盖
+                ssize_t ignore = write(g_native_crash_fd, header, (size_t)n);
+                (void)ignore;
+            }
+        }
 
         // 预热 unwinder，避免信号处理函数内首次执行触发惰性初始化分配内存
         {

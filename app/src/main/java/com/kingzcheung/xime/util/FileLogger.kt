@@ -357,6 +357,10 @@ object FileLogger {
             logsDir?.let { dir ->
                 dir.listFiles()
                     ?.filter { it.name.endsWith(".log") && !it.name.startsWith("kime_") }
+                    // native_crash.log 永不主动删除：它由 rime_jni.cc 的信号处理器持有 fd 写入，
+                    // 删掉后 fd 仍指向已 unlink 的 inode，后续崩溃记录会写进一个没人能读的文件
+                    // ——等于把最关键的崩溃证据静默丢掉。
+                    ?.filter { it.name != "native_crash.log" }
                     ?.forEach { file ->
                         if (file.length() > MAX_LOG_SIZE) {
                             file.delete()

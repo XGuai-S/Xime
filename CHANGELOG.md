@@ -30,6 +30,19 @@
 
 ---
 
+## 3.4.04（versionCode 20261348）
+
+**native_crash.log 不再有歧义，也不会被悄悄删掉。**
+
+原状：该文件由 `rime_jni.cc` 的信号处理器以 `O_APPEND` 写入，为空时无法区分「handler 装好了但没崩过」和「handler 根本没装上」；而 `FileLogger.cleanOrphanedLogs()` 会删掉超过 5MB 的非 `kime_` 日志，一旦崩溃风暴把文件顶到 5MB 就会被删除——而 C++ 侧仍持有旧 fd，后续崩溃记录会写进一个已 unlink 的 inode，等于把最关键的证据静默丢掉。
+
+- 安装 handler 成功时写一行 header：`=== native crash handler installed pid=N at YYYY-MM-DD HH:MM:SS ===`。
+  之后文件仍为空 = 确实没崩；只有崩溃记录没有 header = 本次进程没装上 handler。
+  ⚠️ 该改动在 `rime_jni.cc` 里。本机 `local.properties` 设了 `xime.skipNative=true`，
+  本地打包直接复用 `src/main/jniLibs/arm64-v8a/librime_jni.so`（预编译），**所以本版 APK 不含 header 逻辑**，
+  要等一次真正编译 native 的构建（CI / 未设 skipNative 的环境）才生效。Kotlin 侧的保护本版即生效。
+- `cleanOrphanedLogs()` 显式排除 `native_crash.log`，永不主动删除。
+
 ## 3.4.03（versionCode 20261347）
 
 针对「还有什么地方耗电」的三项深度优化。其中**第一项经复核是我的误判，已纠正**。
