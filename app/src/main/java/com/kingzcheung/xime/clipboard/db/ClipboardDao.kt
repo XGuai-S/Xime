@@ -131,18 +131,29 @@ interface ClipboardDao {
     suspend fun deleteAll()
 
     @Transaction
-    suspend fun upsertAndTrim(text: String, now: Long, maxItems: Int) {
+    /**
+     * 文本入库（按文本去重）并裁剪超额条目。
+     *
+     * @return 该文本对应的行 id（复活返回既有 id，插入返回新行号）。
+     *
+     * 旧实现返回 Unit，调用方（[com.kingzcheung.xime.clipboard.ClipboardManager.addItem]）
+     * 只能构造一个 `id = 0` 的假 ClipboardItem 向外发射。`clipboardChanged` 的消费方
+     * （剪贴板同步推送、插件、消费标记）拿到 id=0 后，任何按 id 回查/回写/去重的逻辑
+     * 都静默失效——与 revive 注释里记录过的「consumed 永远停在 1、日志全绿」同类。
+     */
+    suspend fun upsertAndTrim(text: String, now: Long, maxItems: Int): Long {
         val existing = findByText(text)
         if (existing != null) {
             // 复活而不是单纯刷新时间：同一内容再次复制要重新进候选栏（见 revive 注释）
             revive(existing.id, now)
-        } else {
-            insert(ClipboardEntry(text = text, timestamp = now))
-            val unpinned = countUnpinned()
-            if (unpinned > maxItems) {
-                trimUnpinned(unpinned - maxItems)
-            }
+            return existing.id
         }
+        val newId = insert(ClipboardEntry(text = text, timestamp = now))
+        val unpinned = countUnpinned()
+        if (unpinned > maxItems) {
+            trimUnpinned(unpinned - maxItems)
+        }
+        return newId
     }
 
     /**

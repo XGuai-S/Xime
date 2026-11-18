@@ -881,17 +881,21 @@ class ClipboardManager private constructor(private val context: Context) {
         lastAddText = text
         lastAddAt = now
         scope.launch {
+            var rowId = 0L
             runCatching {
-                dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+                rowId = dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
             }.onFailure {
                 // 入库失败必须留痕：用户只会看到"复制了没进面板"，无从判断是采集没触发
                 // 还是写库失败。写进 xime 日志文件才可排查。
                 FileLogger.e(TAG, "剪贴板入库失败: len=${text.length}", it)
                 return@launch
             }
-            FileLogger.i(TAG, "剪贴板入库: len=${text.length}")
+            FileLogger.i(TAG, "剪贴板入库: len=${text.length} id=$rowId")
+            // 发射真实 id：消费方（同步推送/插件/消费标记）依赖它做去重与回写，
+            // 旧实现这里恒为 0，按 id 的逻辑会静默失效。
             _clipboardChanged.emit(
                 ClipboardItem(
+                    id = rowId,
                     text = text,
                     timestamp = System.currentTimeMillis()
                 )

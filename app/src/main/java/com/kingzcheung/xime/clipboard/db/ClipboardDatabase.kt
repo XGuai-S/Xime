@@ -13,7 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 
 @Database(
     entities = [ClipboardEntry::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class ClipboardDatabase : RoomDatabase() {
@@ -64,8 +64,43 @@ abstract class ClipboardDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 → v5：补三个复合索引。
+         *
+         * 此前只有 text / imageHash 两个单列索引，而面板与候选栏的核心查询是
+         * `WHERE isQuickSend = 0 ORDER BY timestamp DESC`、`WHERE isPinned = 0 ORDER BY timestamp`、
+         * `WHERE isQuickSend = 0 AND type = 'image'`——全部退化为全表扫描 + 临时排序。
+         * 1000 条条目时每次复制/每次打开面板都要付这个代价。
+         *
+         * Room 会校验期望 schema：实体声明了索引但迁移没建，会抛
+         * "Migration didn't properly handle"，所以这里必须显式 CREATE INDEX。
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                listOf(
+                    "CREATE INDEX IF NOT EXISTS index_clipboard_entries_isQuickSend_timestamp " +
+                        "ON clipboard_entries (isQuickSend, timestamp)",
+                    "CREATE INDEX IF NOT EXISTS index_clipboard_entries_isPinned_timestamp " +
+                        "ON clipboard_entries (isPinned, timestamp)",
+                    "CREATE INDEX IF NOT EXISTS index_clipboard_entries_isQuickSend_type " +
+                        "ON clipboard_entries (isQuickSend, type)",
+                ).forEach { connection.prepare(it).step() }
+            }
+        }
+
         @Volatile
         private var instance: ClipboardDatabase? = null
+
+        /**
+         * 数据库 IO 作用域（进程级单例）。
+         *
+         * 旧实现 `fun scope() = CoroutineScope(SupervisorJob() + Dispatchers.IO)` 每次调用都
+         * 新建一个**永不取消**的作用域：ClipboardManager 持有一个、其他调用点各持有一个，
+         * Job 泄漏且无法统一取消（服务销毁后仍在跑 DB 写入与配额收敛）。
+         */
+        private val ioScope: CoroutineScope by lazy {
+            CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
 
         fun getInstance(context: Context): ClipboardDatabase {
             return instance ?: synchronized(this) {
@@ -75,14 +110,13 @@ abstract class ClipboardDatabase : RoomDatabase() {
                 )
                     .setDriver(AndroidSQLiteDriver())
                     .setQueryCoroutineContext(Dispatchers.IO)
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { instance = it }
             }
         }
 
-        fun scope(): CoroutineScope {
-            return CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        }
+        /** 进程级数据库 IO 作用域（单例，不再每次新建）。 */
+        fun scope(): CoroutineScope = ioScope
     }
 }

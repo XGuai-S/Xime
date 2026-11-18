@@ -10,6 +10,12 @@ import androidx.room3.PrimaryKey
     indices = [
         Index(value = ["text"]),
         Index(value = ["imageHash"]),
+        // 面板列表 / 候选栏：WHERE isQuickSend = 0 ORDER BY timestamp DESC
+        Index(value = ["isQuickSend", "timestamp"]),
+        // 淘汰与置顶排序：WHERE isPinned = 0 ORDER BY timestamp ASC/DESC
+        Index(value = ["isPinned", "timestamp"]),
+        // 图片配额统计：WHERE isQuickSend = 0 AND type = 'image'
+        Index(value = ["isQuickSend", "type"]),
     ]
 )
 data class ClipboardEntry(
