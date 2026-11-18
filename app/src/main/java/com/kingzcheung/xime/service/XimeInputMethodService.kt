@@ -3910,6 +3910,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
         }
         lastEditorFocus = null
+        // 会话结束（换输入框/失焦）：把待写的词频立刻落盘，别等长防抖到期
+        runCatching { flushPendingWordData("onFinishInput") }
         super.onFinishInput()
         inlineSuggestionManager?.clear()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
@@ -4230,6 +4232,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
     
     internal fun hideKeyboard() {
+        // 收键盘 = 这一轮输入结束，把待写词频落盘（长防抖期间用户以为已经结束了）
+        runCatching { flushPendingWordData("hideKeyboard") }
         clearInputState()
         requestHideSelf(0)
     }
@@ -4555,8 +4559,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     // ── 上屏词频统计（自动造词与候选排序的数据源） ──
 
-    /** 词频防抖落盘延迟（ms）：合并高频上屏的多次写盘，避免每键一次 IO。 */
-    private val wordFreqSaveDebounceMs: Long = 1500
+    /**
+     * 词频防抖落盘延迟（ms）。
+     *
+     * 原来是 1500ms —— 实际效果是「每次打字停顿超过 1.5 秒，就把 3 个词库文件整份重写一遍」
+     * （`word_freq.dict.yaml` 54KB + `auto_word_temp.txt` 44KB + `auto_word.dict.yaml`），
+     * 一次约 150KB 写入。正常聊天节奏里这等于每分钟写几次盘：没有意义地唤醒 flash 与 IO 线程。
+     *
+     * 词频/造词的价值在于「下次输入时生效」，不需要秒级持久化，因此把防抖拉长到 20 秒，
+     * 并在**会话结束（收键盘/换输入框/服务销毁）时立刻补写**，保证真正重要的边界不丢数据。
+     * 代价：进程被系统在 20 秒内杀掉时，最近这段计数会丢——词频本身可再学，可接受。
+     */
+    private val wordFreqSaveDebounceMs: Long = 20_000L
 
     private var wordFreqSavePending = false
 
@@ -5474,6 +5488,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (wordFreqSavePending) return
         wordFreqSavePending = true
         mainHandler.postDelayed(wordFreqSaveRunnable, wordFreqSaveDebounceMs)
+    }
+
+    /**
+     * 会话结束时立刻补写（只在确实有待写数据时才动手）。
+     *
+     * 与 [wordFreqSaveDebounceMs] 的长防抖配合：打字过程中不频繁写盘，
+     * 收键盘/换输入框这些「用户以为已经结束」的边界把数据落下去。
+     */
+    private fun flushPendingWordData(reason: String) {
+        if (!wordFreqSavePending) return
+        mainHandler.removeCallbacks(wordFreqSaveRunnable)
+        wordFreqSavePending = false
+        FileLogger.d(TAG, "flush word data on session end: $reason")
+        serviceScope.launch(Dispatchers.IO) { saveWordData() }
     }
 
     /** 防抖到期的写盘任务；持有引用才能只撤它自己（见 onDestroy）。 */

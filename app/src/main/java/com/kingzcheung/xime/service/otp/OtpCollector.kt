@@ -53,8 +53,35 @@ object OtpExtractor {
     /**
      * @return 提取到的验证码；不构成验证码时返回 null。
      */
+    /**
+     * 快速预筛：正文里是否存在 **4~8 位连续数字**。
+     *
+     * 通知监听器要对**每一条**系统通知跑一次解析（亮屏期间每分钟十几条），其中绝大多数
+     * 是聊天、新闻、下载进度，压根不含验证码。先做一次纯扫描（无正则、无对象分配）
+     * 就能把这类通知挡在正则之前——正则虽然也不慢，但它跑在系统通知回调里，
+     * 而且紧随其后还有一次 SharedPreferences 读，累积起来就是每条通知一次可观的唤醒开销。
+     */
+    fun hasOtpLikeDigitRun(text: String): Boolean {
+        var run = 0
+        for (ch in text) {
+            if (ch in '0'..'9') {
+                run++
+                if (run > 8) run = 0  // 超长数字串（订单号/流水号）不算
+            } else {
+                if (run >= 4) return true
+                run = 0
+            }
+        }
+        return run in 4..8
+    }
+
+    /** 通知正文参与匹配的最大长度：真实短信/邮件通知远短于此，超长多半是聊天摘要。 */
+    internal const val MAX_BODY_CHARS = 512
+
     fun extract(smsBody: String): OtpCandidate? {
         if (smsBody.isBlank()) return null
+        // 先做零分配的数字扫描，再跑关键词正则
+        if (!hasOtpLikeDigitRun(smsBody)) return null
         if (!KEYWORDS.containsMatchIn(smsBody)) return null
 
         // Google 优先：G-344204 → 首选 344204，次选 G-344204

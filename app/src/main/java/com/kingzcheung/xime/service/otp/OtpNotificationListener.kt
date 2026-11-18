@@ -33,6 +33,9 @@ class OtpNotificationListener : NotificationListenerService() {
      * listener 07:01:22 已连但通知仍在栏里却未补收），这里主动扫一遍吞掉差集。
      */
     override fun onListenerConnected() {
+        // 重连后开关状态可能已变（用户刚授权/改设置），丢掉缓存重新读一次
+        otpEnabledCache = null
+        otpEnabledCheckedAtMs = 0L
         super.onListenerConnected()
         runCatching {
             val active = activeNotifications ?: return@runCatching
@@ -43,10 +46,33 @@ class OtpNotificationListener : NotificationListenerService() {
         }
     }
 
+    /**
+     * 「验证码自动填充」开关的本地缓存。
+     *
+     * 原来每条通知都 `SettingsPreferences.isOtpAutofillEnabled()` —— 那是 SharedPreferences
+     * 读，会走内存映射+加锁；系统通知平均每分钟十几条，等于把一次设置读取挂在每条通知上。
+     * 这里缓存 [OTP_FLAG_TTL_MS]，用户改开关最多一分钟后生效（改完也会立刻收到通知刷新的场景不受影响）。
+     * 缓存为 null 表示还没读过。
+     */
+    @Volatile
+    private var otpEnabledCache: Boolean? = null
+    @Volatile
+    private var otpEnabledCheckedAtMs: Long = 0L
+
+    private fun isOtpEnabledCached(): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val cached = otpEnabledCache
+        if (cached != null && now - otpEnabledCheckedAtMs < OTP_FLAG_TTL_MS) return cached
+        // 默认关闭是隐私设计：读设置失败时必须保持关闭，不能退化成"读不到就采集"。
+        val value = runCatching { SettingsPreferences.isOtpAutofillEnabled(this) }.getOrDefault(false)
+        otpEnabledCache = value
+        otpEnabledCheckedAtMs = now
+        return value
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val notification = sbn?.notification ?: return
-        // 默认关闭是隐私设计：读设置失败时必须保持关闭，不能退化成"读不到就采集"。
-        if (!runCatching { SettingsPreferences.isOtpAutofillEnabled(this) }.getOrDefault(false)) return
+        if (!isOtpEnabledCached()) return
         // 聊天类应用不采集：微信/QQ 里随便说一句「验证码 123456」就会被当验证码，
         // 还会把用户手头的剪贴板换掉（用户 2026-11 反馈的误报来源）。
         val pkg = sbn?.packageName.orEmpty()
@@ -70,7 +96,10 @@ class OtpNotificationListener : NotificationListenerService() {
                 extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty(),
                 extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString().orEmpty(),
                 extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty(),
-            ).filter { it.isNotBlank() }.joinToString(" ")
+            ).filter { it.isNotBlank() }.joinToString(" ").let { text ->
+                // 超长正文（聊天摘要/新闻推送）截断后再匹配：验证码必然出现在开头几百字符内
+                if (text.length > OtpExtractor.MAX_BODY_CHARS) text.take(OtpExtractor.MAX_BODY_CHARS) else text
+            }
 
             if (body.isBlank()) {
                 // 关键诊断点：MIUI 的短信通知若取不到 title/text/bigText，会走到这里。
@@ -110,6 +139,9 @@ class OtpNotificationListener : NotificationListenerService() {
 
     private companion object {
         const val TAG = "OtpNotificationListener"
+
+        /** 「验证码自动填充」开关的缓存时长。 */
+        private const val OTP_FLAG_TTL_MS = 60_000L
 
         /** 聊天/IM 类包名：它们的通知里出现「验证码 + 数字」通常是聊天内容，不是验证码。 */
         val IM_PACKAGES = setOf(
