@@ -28,6 +28,15 @@ object PluginErrorLog {
 
         /** 清除某插件全部错误（含持久化）。 */
         fun clearAll(pluginId: String)
+
+        /**
+         * 清除**所有**插件的错误（含持久化）。
+         *
+         * 有默认空实现：老的实现类（测试 fake 等）不必改也不用管磁盘。
+         * 真实实现必须覆盖，否则「全部清除」只清内存、重启后历史错误原样回来
+         * （用户 2026-11-19 的「清不干净」就属这一类）。
+         */
+        fun clearEverything() {}
     }
 
     data class PluginError(
@@ -76,6 +85,18 @@ object PluginErrorLog {
         errorLogs.clear()
     }
 
+    /** 同一错误的合并窗口：窗口内重复只累加次数，不再新增条目、也不重复落盘。 */
+    private const val MERGE_WINDOW_MS = 60_000L
+
+    /** 上层错误详情 → 插件侧二次上报的合并窗口（宿主记完 HTTP 失败后插件很快会再记一条）。 */
+    private const val RETHROW_WINDOW_MS = 3_000L
+
+    /** 最近一条网络/HTTP 错误的详情（按插件），用于吞掉紧随其后的插件侧重述。 */
+    private val recentHostErrorDetail = ConcurrentHashMap<String, Pair<String, Long>>()
+
+    /** 去重键 → (最近时间, 累计次数)。 */
+    private val recentKeys = ConcurrentHashMap<String, Pair<Long, Int>>()
+
     fun logError(
         pluginId: String,
         operation: String,
@@ -83,15 +104,48 @@ object PluginErrorLog {
         throwable: Throwable? = null,
         category: ErrorCategory = ErrorCategory.OTHER
     ) {
+        val now = System.currentTimeMillis()
+
+        // 1) 插件侧的二次上报：宿主刚记录过同一个异常（同一句 message），直接吞掉。
+        if (category == ErrorCategory.OTHER) {
+            val host = recentHostErrorDetail[pluginId]
+            if (host != null && now - host.second < RETHROW_WINDOW_MS &&
+                PluginErrorNoise.isRethrowOfHostError(host.first, message)
+            ) {
+                Log.w(TAG, "[$pluginId] 插件侧重复上报已合并（上层错误已记录）: $message")
+                return
+            }
+        }
+
+        // 2) 同一错误（同类别/同操作/同消息）在 60s 内重复：只累加次数，不再新增条目与落盘
+        val key = PluginErrorNoise.dedupeKey(pluginId, category, operation, message)
+        val prev = recentKeys[key]
+        if (prev != null && now - prev.first < MERGE_WINDOW_MS) {
+            val count = prev.second + 1
+            recentKeys[key] = now to count
+            bumpMergedCount(pluginId, message, count)
+            Log.w(TAG, "[$pluginId] 重复错误已合并（60s 内第 $count 次）: $operation / $message")
+            return
+        }
+        recentKeys[key] = now to 1
+
         Log.e(TAG, "[$pluginId] $operation: $message", throwable)
 
+        // 3) 网络类异常不存堆栈：40+ 行 okhttp/InetAddress 框架帧对排查没有价值，
+        //    真正有用的是消息里的域名与原因（用户 2026-11-19 实测的噪声来源）。
+        val keepStack = throwable != null && !PluginErrorNoise.isNetworkLikeCause(throwable)
         val error = PluginError(
+            timestamp = now,
             pluginId = pluginId,
             operation = operation,
             message = message,
-            stackTrace = throwable?.stackTraceToString(),
+            stackTrace = if (keepStack) throwable?.stackTraceToString() else null,
             category = category
         )
+
+        if (category != ErrorCategory.OTHER) {
+            recentHostErrorDetail[pluginId] = message to now
+        }
 
         errorLogs.getOrPut(pluginId) { mutableListOf() }.apply {
             add(error)
@@ -103,6 +157,28 @@ object PluginErrorLog {
                 storeExecutor.execute { s.append(pluginId, error) }
             } catch (e: Exception) {
                 Log.e(TAG, "store.append 提交失败（不影响内存记录）", e)
+            }
+        }
+    }
+
+    /**
+     * 合并计数回写到内存里那条错误的文案上（例如「…（60s 内重复 3 次）」）。
+     *
+     * 只改内存、不落盘：目的是让用户在列表里看到「这是反复发生的同一个问题」，
+     * 而不是刷出几十条一模一样的记录（那正是旧行为的噪声来源）。
+     */
+    private fun bumpMergedCount(pluginId: String, message: String, count: Int) {
+        val list = errorLogs[pluginId] ?: return
+        synchronized(list) {
+            for (i in list.indices.reversed()) {
+                val item = list[i]
+                if (!item.message.startsWith(message)) continue
+                val base = item.message.substringBefore("（60s 内重复 ")
+                list[i] = item.copy(
+                    message = if (count > 1) "$base（60s 内重复 $count 次）" else base,
+                    timestamp = System.currentTimeMillis(),
+                )
+                return
             }
         }
     }
@@ -119,6 +195,8 @@ object PluginErrorLog {
 
     fun clearErrors(pluginId: String) {
         errorLogs.remove(pluginId)
+        recentHostErrorDetail.remove(pluginId)
+        recentKeys.keys.removeAll { it.startsWith("$pluginId\t") }
         store?.let { s ->
             try {
                 storeExecutor.execute { s.clearAll(pluginId) }
@@ -130,6 +208,17 @@ object PluginErrorLog {
 
     fun clearAllErrors() {
         errorLogs.clear()
+        recentKeys.clear()
+        recentHostErrorDetail.clear()
+        // 必须连磁盘一起清：只清内存的话重启后 initialize() 又把历史错误读回来，
+        // 用户看到的就是「清了还有」。
+        store?.let { s ->
+            try {
+                storeExecutor.execute { s.clearEverything() }
+            } catch (e: Exception) {
+                Log.e(TAG, "store.clearEverything 提交失败（不影响内存清除）", e)
+            }
+        }
     }
 
     fun hasErrors(pluginId: String): Boolean {

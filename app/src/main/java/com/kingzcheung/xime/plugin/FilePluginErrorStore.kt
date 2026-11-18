@@ -26,6 +26,9 @@ class FilePluginErrorStore(private val errorFile: File) : PluginErrorLog.PluginE
         private const val MAX_TOTAL_LINES = 300
         private const val MAX_FILE_BYTES = 512 * 1024
 
+        /** 累计追加多少次做一次压缩重写（控制写放大与文件膨胀的折中）。 */
+        private const val COMPACT_EVERY = 30
+
         private val json = Json {
             encodeDefaults = true
             ignoreUnknownKeys = true
@@ -90,18 +93,67 @@ class FilePluginErrorStore(private val errorFile: File) : PluginErrorLog.PluginE
     }
 
     override fun load(): List<PluginErrorLog.PluginError> {
-        return readAllLines().mapNotNull { fromLine(it) }
+        val lines = readAllLines()
+        cachedLineCount = lines.size
+        return lines.mapNotNull { fromLine(it) }
     }
 
+    /** 距上次压缩的追加次数（压缩会做一次全量重写，不能每条都做）。 */
+    private var appendsSinceCompact = 0
+
+    /** 当前文件行数缓存（-1 = 未知，需要读一次）。压缩/清空后会同步更新。 */
+    @Volatile
+    private var cachedLineCount = -1
+
+    /**
+     * 追加一条错误。
+     *
+     * **只 append 一行**，不再「读全文件 → 拼一行 → 全量重写」。
+     * 旧实现每条错误都要 readAllLines() + writeText()，最坏是 512KB 读 + 512KB 写；
+     * 插件错误风暴（例如断网时 WebDAV 同步每次重试都失败）会变成持续的闪存写放大，
+     * 而且这段都在 storeExecutor 单线程上跑，队列越积越长。
+     *
+     * 上限仍由 [compact] 保证：文件超字节上限、行数达 [MAX_TOTAL_LINES]、
+     * 或累计追加达 [COMPACT_EVERY] 次时做一次压缩重写。
+     */
     override fun append(pluginId: String, error: PluginErrorLog.PluginError) {
         val line = toLine(error) ?: return
-        val lines = readAllLines()
-        val trimmed = if (lines.size >= MAX_TOTAL_LINES || (errorFile.length() > MAX_FILE_BYTES)) {
-            lines.takeLast(MAX_TOTAL_LINES - 1)
-        } else {
-            lines
+        val ok = try {
+            errorFile.parentFile?.mkdirs()
+            errorFile.appendText(line + "\n")
+            true
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "append error file failed", e)
+            false
         }
-        writeLines(trimmed + line)
+        if (!ok) return
+        appendsSinceCompact++
+        val count = if (cachedLineCount < 0) readAllLines().size else cachedLineCount + 1
+        cachedLineCount = count
+        if (errorFile.length() > MAX_FILE_BYTES ||
+            count >= MAX_TOTAL_LINES ||
+            appendsSinceCompact >= COMPACT_EVERY
+        ) {
+            appendsSinceCompact = 0
+            compact()
+        }
+    }
+
+    /** 压缩重写：保留最后 [MAX_TOTAL_LINES] 行，并按 [MAX_FILE_BYTES] 继续丢最旧行。 */
+    private fun compact() {
+        val lines = readAllLines()
+        var kept = if (lines.size > MAX_TOTAL_LINES) lines.takeLast(MAX_TOTAL_LINES) else lines
+        while (kept.size > 1 && kept.sumOf { it.length + 1 } > MAX_FILE_BYTES) {
+            kept = kept.drop(1)
+        }
+        writeLines(kept)
+        cachedLineCount = kept.size
+    }
+
+    override fun clearEverything() {
+        writeLines(emptyList())
+        cachedLineCount = 0
+        appendsSinceCompact = 0
     }
 
     override fun clearAll(pluginId: String) {
@@ -109,6 +161,8 @@ class FilePluginErrorStore(private val errorFile: File) : PluginErrorLog.PluginE
             fromLine(line)?.pluginId != pluginId
         }
         writeLines(kept)
+        cachedLineCount = kept.size
+        appendsSinceCompact = 0
     }
 
     init {
