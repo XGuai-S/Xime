@@ -422,23 +422,26 @@ class WavAudioRecorder(private val context: Context) {
         prefixClearedCallback = null
         val sessionWhisper = activeWhisperMode
         activeWhisperMode = false
-        try {
-            job?.cancelAndJoin()
-        } catch (_: Exception) {
-        }
-
         val record = audioRecord
         audioRecord = null
+        // 顺序很关键：AudioRecord.read() 是**阻塞**调用、不响应协程取消，录制循环只在两次
+        // read 之间检查 isActive。若先 cancelAndJoin 再 stop，麦克风被系统静音 / 设备切到
+        // DEAD_OBJECT 前的高延迟时 join 会一直等下去（stop 排在后面，永远轮不到），
+        // 用户看到的就是「点完成没反应、录音一直转」。先 stop 唤醒 read，再取消 job。
         try {
             if (record?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                 record.stop()
             }
         } catch (_: Exception) {
+        }
+        try {
+            job?.cancelAndJoin()
+        } catch (_: Exception) {
+        }
+        try {
+            record?.release()
+        } catch (_: Exception) {
         } finally {
-            try {
-                record?.release()
-            } catch (_: Exception) {
-            }
             // Immediately release transient AudioFocus so paused background music resumes right away
             abandonTransientAudioFocus()
         }

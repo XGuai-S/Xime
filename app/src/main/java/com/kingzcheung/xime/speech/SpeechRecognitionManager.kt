@@ -329,37 +329,36 @@ class SpeechRecognitionManager(private val context: Context) {
             isPreloading = true
         }
         
-        val newBackend = createBackend()
-        if (newBackend == null) {
+        // 整体包 try/finally：createBackend()（走插件实例化）与 initialize()（原生库/远端）
+        // 都可能抛任意 Throwable。旧实现只在「返回 null / 返回 false」两个正常失败分支里复位
+        // isPreloading 并 notifyAll；一旦抛异常，标志永远停在 true，而 startRecognition()
+        // 在**主线程**用无超时的 preloadLock.wait() 等它 —— 之后每次按麦克风都永久阻塞，
+        // 直接 ANR（整块键盘冻死）。finally 保证无论怎么退出都放开等待者。
+        try {
+            val newBackend = createBackend() ?: return false
+
+            newBackend.setCallbacks(
+                onResult = { text -> handleResult(text) },
+                onPartialResult = { text -> handlePartialResult(text) },
+                onStateChange = { state -> setState(state) },
+                onError = { error -> handleError(error) }
+            )
+
+            if (!newBackend.initialize()) return false
+
+            synchronized(preloadLock) {
+                backend = newBackend
+            }
+            return true
+        } catch (t: Throwable) {
+            FileLogger.w(TAG, "STT 预加载失败: ${t.javaClass.simpleName}: ${t.message}")
+            return false
+        } finally {
             synchronized(preloadLock) {
                 isPreloading = false
                 preloadLock.notifyAll()
             }
-            return false
         }
-
-        newBackend.setCallbacks(
-            onResult = { text -> handleResult(text) },
-            onPartialResult = { text -> handlePartialResult(text) },
-            onStateChange = { state -> setState(state) },
-            onError = { error -> handleError(error) }
-        )
-
-        if (!newBackend.initialize()) {
-            synchronized(preloadLock) {
-                isPreloading = false
-                preloadLock.notifyAll()
-            }
-            return false
-        }
-
-        synchronized(preloadLock) {
-            backend = newBackend
-            isPreloading = false
-            preloadLock.notifyAll()
-        }
-
-        return true
     }
 
     private fun createBackend(): AsrBackend? {

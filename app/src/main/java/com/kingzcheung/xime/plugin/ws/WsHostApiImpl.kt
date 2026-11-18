@@ -36,10 +36,13 @@ class WsHostApiImpl(
         private const val STATE_CLOSED = 3
     }
 
+    /** 禁止自动跟随重定向：同 [SseHostApiImpl]，避免已授权域名把握手（含鉴权头）跳到别的 host。 */
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     @Volatile

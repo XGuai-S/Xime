@@ -451,8 +451,11 @@ class ClipboardManager private constructor(private val context: Context) {
             val now = System.currentTimeMillis()
             val existing = dao.findImageByHash(hash)
             if (existing != null) {
-                // 同图重复复制：仅更新时间戳置顶，不重复落盘
-                dao.updateTimestamp(existing.id, now)
+                // 同图重复复制：刷新时间戳**并复位 consumed**，不重复落盘。
+                // 必须用 revive 而不是 updateTimestamp：点选图片上屏时走了 markConsumedById，
+                // consumed 停在 1；只更新时间戳的话 getRecentItems 的 !consumed 过滤会把它滤掉，
+                // 用户再复制同一张图时表现为「复制了但候选栏不出现」（与文本路径语义对齐）。
+                dao.revive(existing.id, now)
             } else {
                 val relativePath = imageStore.save(bytes, hash, extension, limits.maxBytes) ?: run {
                     Log.e(TAG, "Failed to save clipboard image ($hash.$extension)")

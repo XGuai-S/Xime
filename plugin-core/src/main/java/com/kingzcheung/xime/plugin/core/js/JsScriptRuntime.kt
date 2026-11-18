@@ -1500,6 +1500,11 @@ class JsScriptRuntime(
             subscribedEvents = emptySet()
             activeSseSessions.forEach { sseHostApi?.close(it) }
             activeSseSessions.clear()
+            // WebSocket 也必须关：WsHostApi 是**每插件一份**（WsHostApiImpl 自带一个
+            // OkHttpClient + 心跳）。只关 SSE 的话，插件卸载/热重载后 WS 仍连着，
+            // 剪贴板同步、ASR 这类长驻插件会持续联网、心跳，客户端与线程池也永不释放。
+            runCatching { wsHostApi?.close() }
+                .onFailure { Log.w(TAG, "关闭 WS 失败：${it.message}") }
             // 2) 等已受理的调用跑完，再关引擎：避免引擎在 JS 执行中被关闭
             //    （旧实现先 engine.close() 再 shutdownNow：正在执行的调用报
             //    "Already closed"，排队中的调用被取消并被误判为超时中毒）。

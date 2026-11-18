@@ -3381,12 +3381,14 @@ class AiPipelineEngine(
             if (firstNonBlank == null) throw IOException("Gemini 未返回候选文本")
             val trimmedStart = firstNonBlank.trimStart()
             if (trimmedStart.startsWith("{")) {
-                val rest = reader.readText()
+                // 与 OpenAI 分支同口径：不用 readText()（未知长度会一直读到 EOF 并整串驻留），
+                // 中转站返回几百 MB 或一页 HTML 时会把常驻的输入法进程直接打爆。
+                val rest = readBoundedChars(reader, MAX_MODEL_RESPONSE_CHARS)
                 val fullBody = if (rest.isEmpty()) firstNonBlank else "$firstNonBlank\n$rest"
                 return parseGeminiResponse(fullBody) to null
             }
             if (trimmedStart.startsWith("[")) {
-                val rest = reader.readText()
+                val rest = readBoundedChars(reader, MAX_MODEL_RESPONSE_CHARS)
                 val fullBody = if (rest.isEmpty()) firstNonBlank else "$firstNonBlank\n$rest"
                 val arr = JsonParser.parseString(fullBody).asJsonArray
                 val sb = StringBuilder()

@@ -1461,7 +1461,20 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 maybeScheduleFollowUp(generation)
             }
         }
-        sendKeyJob(job)
+        if (!sendKeyJob(job)) {
+            // 队列满 → job 被丢弃且是 LAZY（永不 start）→ finally 不会执行 →
+            // deleteJobActive 永远停在 true → 之后每次退格都只 pendingDeleteCount++ 后返回，
+            // 退格键彻底无响应，直到切输入框（deleteGeneration 变化）才恢复。
+            // 这里必须把合并状态整体回滚，宁可丢这一次退格，也不能把退格功能钉死。
+            synchronized(service.deleteCoalesceLock) {
+                service.deleteJobActive = false
+                service.pendingDeleteCount = 0
+            }
+            FileLogger.w(
+                com.kingzcheung.xime.service.XimeInputMethodService.TAG,
+                "退格任务入队失败，已回滚合并状态（避免退格键永久失效）",
+            )
+        }
     }
 
     /** 若长按退格期间有累积的请求，排入下一个退格 job；否则结束合并状态。 */
@@ -2187,7 +2200,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * 候选栏迟到几拍」。改成有界后，积压时丢弃**新来**的任务：丢一次按键响应，好过
      * 让整个键盘陷入延迟累积。丢弃必须留痕，否则用户只看到「按键丢了」而无从排查。
      */
-    private fun sendKeyJob(job: kotlinx.coroutines.Job) {
+    private fun sendKeyJob(job: kotlinx.coroutines.Job): Boolean {
         // trySend 在有界 Channel 上不阻塞；返回失败即队列已满
         val ok = service.keyJobs.trySend(job).isSuccess
         if (!ok) {
@@ -2196,6 +2209,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 "keyJobs 队列已满，丢弃一个按键任务（积压过多，优先保响应）"
             )
         }
+        return ok
     }
 
     internal fun updateCalculatorCandidates() {

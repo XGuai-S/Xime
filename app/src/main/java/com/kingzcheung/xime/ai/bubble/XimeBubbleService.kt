@@ -196,7 +196,18 @@ class XimeBubbleService :
         pipelineJob?.cancel()
         feedbackResetJob?.cancel()
         if (::audioRecorder.isInitialized) {
-            serviceScope.launch { audioRecorder.cancelRecording() }
+            // 必须**同步**释放，不能 serviceScope.launch：cancelRecording 的第一个挂起点是
+            // withContext(Dispatchers.IO)，而本方法末尾会 serviceScope.cancel()，
+            // 协程常在进入 IO 线程前就被取消 → stop/release/放弃音频焦点全不执行，
+            // 麦克风与音频焦点被永久占用（录音指示灯常亮、其它应用录不到音）。
+            runCatching {
+                kotlinx.coroutines.runBlocking { audioRecorder.cancelRecording() }
+            }.onFailure {
+                com.kingzcheung.xime.util.FileLogger.w(
+                    "XimeBubble",
+                    "onDestroy 释放录音失败: ${it.javaClass.simpleName}: ${it.message}",
+                )
+            }
         }
         detachOverlayWindow()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)

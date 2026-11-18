@@ -40,10 +40,20 @@ class SseHostApiImpl(
         private const val TAG = "SseHostApi"
     }
 
+    /**
+     * 禁止自动跟随重定向（与 [HttpHostApiImpl] 口径一致）。
+     *
+     * 少这一行时：插件请求的**已授权**域名被 302/307 到别的 host（被墙的中转、被接管的
+     * DNS、NAS 的开放跳转、恶意网关）时，OkHttp 会静默把请求重发到未授权域名，而
+     * `NetworkPolicy.check` 只校验首个 URL —— 于是 Authorization 头与 SSE 的 POST body
+     * （LLM 用户输入）会发到墙外主机。
+     */
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     private val sessions = ConcurrentHashMap<Int, Session>()

@@ -672,13 +672,19 @@ object BackupManager {
             return Result.failure(e)
         } finally {
             staging.deleteRecursively()
-            journal.delete()
             // 回滚目录只在「回滚本身失败」时保留：里面是恢复前的原始文件，
             // 删掉就等于把用户数据一起删了，宁可留一个可人工取回的目录。
+            // journal 必须跟 rollback **同进退**：留着 rollback 却删了 journal，
+            // 下次启动 recoverInterruptedRestore 只会看到「没有日志 = 正常结束」，
+            // 于是这份回滚材料永不还原、也永不清理，用户得到的是半新半旧的 rime 目录。
             if (rollback.listFiles()?.isEmpty() != false) {
                 rollback.deleteRecursively()
+                journal.delete()
             } else {
-                FileLogger.e(TAG, "回滚未完成，恢复前文件保留在 ${rollback.path}")
+                FileLogger.e(
+                    TAG,
+                    "回滚未完成：保留 rollback=${rollback.path} 与 journal=${journal.path} 待下次启动重试",
+                )
             }
         }
     }
@@ -818,7 +824,15 @@ object BackupManager {
             // staging = File(filesDir, STAGING_DIR_NAME)，故 parentFile 即 filesDir
             val filesDir = staging.parentFile ?: staging
             if (!rollbackByJournal(filesDir, rollback, journal)) {
-                FileLogger.e(TAG, "上一次事务回滚不完整，原文件保留在 ${rollback.path}")
+                // 回滚本身就失败了：此时 rollback 目录里是**恢复前唯一一份**原始文件，
+                // journal 是唯一的撤销清单。都不能删 —— 删掉就既回不去也查不清，
+                // 只能让用户手抄。保留下来交给下次启动的 recoverInterruptedRestore。
+                FileLogger.e(
+                    TAG,
+                    "上一次事务回滚不完整，原文件与 journal 一并保留：rollback=${rollback.path} journal=${journal.path}",
+                )
+                staging.deleteRecursively()
+                return
             }
         }
         staging.deleteRecursively()

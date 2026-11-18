@@ -67,6 +67,15 @@ class T9InputController(
     // ── 异步执行模型 ──
     private val t9Dispatcher = Dispatchers.Default.limitedParallelism(1)
     private val t9Scope = CoroutineScope(t9Dispatcher)
+    /**
+     * 最近一次入队的 T9 任务，供 [awaitT9Queue] 跨线程 join。
+     *
+     * 必须 @Volatile：写入方是主线程（reset/clearAll）与 t9Dispatcher（按键），
+     * 读取方是服务层的 keyProcessingDispatcher（onRightCandidateSelected）。没有可见性保证时
+     * join 可能拿到更早的 job 就返回，awaitT9Queue 的「排空」保证不成立，
+     * 右选消费就会在「上一键还没 flush」的状态下执行（pending 覆盖 → 跳字/错词）。
+     */
+    @Volatile
     private var lastT9Job: Job? = null
 
     /** UI 更新投递目标（后台任务通过 post 派发，不阻塞任务完成）。 */
