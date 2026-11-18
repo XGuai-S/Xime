@@ -792,11 +792,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                                 )
                             }
                         }
-                    } catch (_: Throwable) {
+                    } catch (e: Throwable) {
+                        // 不静默吞：补全结果回填失败（快照已变、InputConnection 失效）应当留痕，
+                        // 否则「补全偶尔不出现」在日志里完全看不到任何线索。
+                        FileLogger.w(TAG, "aiCompl apply failed: ${e.javaClass.simpleName}: ${e.message}")
                     }
                 }
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            // 同上：整条补全链路的异常（初始化、取设置、调度）此前被完全吞掉。
+            FileLogger.w(TAG, "aiCompl schedule failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
