@@ -814,6 +814,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     } else null
     
     private fun loadDarkModePreference() {
+        // window.window 是平台类型（InputMethodService.getWindow() 可能返回 null）：
+        // onCreate 早期、pref 监听器在 decorView 建立前触发、onDestroy 之后都可能为 null。
+        // 函数内第 832/834 行两处是裸传参（其余调用点都有 ?.），会 NPE 闪退。
+        // window 未就绪时跳过——onStartInput / onConfigurationChanged 会再次调用补上。
+        if (window?.window == null) return
         val isLandscape = resources.configuration.screenWidthDp > resources.configuration.screenHeightDp
         val isFloatingMode = SettingsPreferences.isFloatingMode(this, isLandscape)
         val loadedX = SettingsPreferences.getFloatingOffsetX(this, isLandscape)

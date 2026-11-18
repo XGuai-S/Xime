@@ -14,7 +14,9 @@ import kotlinx.coroutines.SupervisorJob
 @Database(
     entities = [ClipboardEntry::class],
     version = 5,
-    exportSchema = false
+    // 快照导出到 app/schemas/（见 build.gradle 的 room.schemaLocation）：
+    // 迁移改 schema 时必须提交新版本 JSON，MigrationTestHelper 才能做回归校验。
+    exportSchema = true
 )
 abstract class ClipboardDatabase : RoomDatabase() {
     abstract fun clipboardDao(): ClipboardDao

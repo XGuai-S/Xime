@@ -1,0 +1,171 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "8f943ac9acf8321bbff9a0880edec8fd",
+    "entities": [
+      {
+        "tableName": "clipboard_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `text` TEXT NOT NULL, `code` TEXT NOT NULL DEFAULT '', `timestamp` INTEGER NOT NULL DEFAULT 0, `isPinned` INTEGER NOT NULL DEFAULT 0, `isQuickSend` INTEGER NOT NULL DEFAULT 0, `consumed` INTEGER NOT NULL DEFAULT 0, `type` TEXT NOT NULL DEFAULT 'text', `imagePath` TEXT NOT NULL DEFAULT '', `imageHash` TEXT NOT NULL DEFAULT '', `mimeType` TEXT NOT NULL DEFAULT '', `sizeBytes` INTEGER NOT NULL DEFAULT 0, `width` INTEGER NOT NULL DEFAULT 0, `height` INTEGER NOT NULL DEFAULT 0)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "code",
+            "columnName": "code",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "isPinned",
+            "columnName": "isPinned",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "isQuickSend",
+            "columnName": "isQuickSend",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "consumed",
+            "columnName": "consumed",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'text'"
+          },
+          {
+            "fieldPath": "imagePath",
+            "columnName": "imagePath",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "imageHash",
+            "columnName": "imageHash",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_clipboard_entries_text",
+            "unique": false,
+            "columnNames": [
+              "text"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_clipboard_entries_text` ON `${TABLE_NAME}` (`text`)"
+          },
+          {
+            "name": "index_clipboard_entries_imageHash",
+            "unique": false,
+            "columnNames": [
+              "imageHash"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_clipboard_entries_imageHash` ON `${TABLE_NAME}` (`imageHash`)"
+          },
+          {
+            "name": "index_clipboard_entries_isQuickSend_timestamp",
+            "unique": false,
+            "columnNames": [
+              "isQuickSend",
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_clipboard_entries_isQuickSend_timestamp` ON `${TABLE_NAME}` (`isQuickSend`, `timestamp`)"
+          },
+          {
+            "name": "index_clipboard_entries_isPinned_timestamp",
+            "unique": false,
+            "columnNames": [
+              "isPinned",
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_clipboard_entries_isPinned_timestamp` ON `${TABLE_NAME}` (`isPinned`, `timestamp`)"
+          },
+          {
+            "name": "index_clipboard_entries_isQuickSend_type",
+            "unique": false,
+            "columnNames": [
+              "isQuickSend",
+              "type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_clipboard_entries_isQuickSend_type` ON `${TABLE_NAME}` (`isQuickSend`, `type`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8f943ac9acf8321bbff9a0880edec8fd')"
+    ]
+  }
+}

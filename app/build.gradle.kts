@@ -269,6 +269,14 @@ androidComponents {
         }
     }
 }
+
+// Room schema 快照：迁移防线的前提。没有快照就无法用 MigrationTestHelper
+// 写迁移回归测试，改 schema 时的「Migration didn't properly handle」只能靠真机踩。
+// （2026-11-18 剪贴板 DB v4→v5 加索引时即因此无自动校验。）
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(project(":plugin-core"))
     implementation(libs.androidx.core.ktx)
@@ -343,7 +351,8 @@ dependencies {
 
     // Room 3.0 (SQLite)
     implementation(libs.androidx.room3.runtime)
-    ksp(libs.androidx.room3.compiler)
+    
+ksp(libs.androidx.room3.compiler)
 
     // Sora Code Editor for YAML viewing/editing
     implementation(platform("io.github.rosemoe:editor-bom:0.24.6"))
