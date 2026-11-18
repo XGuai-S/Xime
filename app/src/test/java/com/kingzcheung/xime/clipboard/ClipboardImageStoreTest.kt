@@ -360,4 +360,56 @@ class ClipboardImageStoreTest {
                 .isEmpty()
         )
     }
+
+    // ---- 快路径判定（增量配额收敛的门槛条件）----
+
+    @Test
+    fun `快路径-未超配额`() {
+        assertFalse(ClipboardImageStore.isOverQuota(3, 100, maxImages = 10, maxTotalBytes = 10_000))
+    }
+
+    @Test
+    fun `快路径-数量恰好等于上限不算超`() {
+        assertFalse(ClipboardImageStore.isOverQuota(10, 100, maxImages = 10, maxTotalBytes = 10_000))
+    }
+
+    @Test
+    fun `快路径-容量恰好等于上限不算超`() {
+        assertFalse(
+            ClipboardImageStore.isOverQuota(3, 10_000, maxImages = 10, maxTotalBytes = 10_000)
+        )
+    }
+
+    @Test
+    fun `快路径-数量超一即触发`() {
+        assertTrue(ClipboardImageStore.isOverQuota(11, 0, maxImages = 10, maxTotalBytes = 10_000))
+    }
+
+    @Test
+    fun `快路径-容量超一即触发`() {
+        assertTrue(ClipboardImageStore.isOverQuota(1, 10_001, maxImages = 10, maxTotalBytes = 10_000))
+    }
+
+    @Test
+    fun `快路径-空库不触发`() {
+        assertFalse(ClipboardImageStore.isOverQuota(0, 0))
+    }
+
+    @Test
+    fun `快路径-判定与淘汰结果一致`() {
+        // 快路径说「超了」时 selectEvictions 必须真的能给出淘汰候选，否则会陷入
+        // 「每轮都全表扫描但一条都不删」的空转。
+        val images = listOf(image(1), image(2), image(3))
+        val over = ClipboardImageStore.isOverQuota(
+            count = images.size,
+            totalBytes = images.sumOf { it.sizeBytes },
+            maxImages = 2,
+            maxTotalBytes = 100_000,
+        )
+        assertTrue(over)
+        assertTrue(
+            ClipboardImageStore.selectEvictions(images, maxImages = 2, maxTotalBytes = 100_000)
+                .isNotEmpty()
+        )
+    }
 }

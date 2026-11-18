@@ -74,6 +74,14 @@ class ClipboardManager private constructor(private val context: Context) {
         private const val REJECT_TOAST_INTERVAL_MS = 10_000L
 
         /**
+         * 孤儿图片文件清理的采集间隔（每 N 次图片入库顺带整目录扫描一次）。
+         *
+         * 孤儿文件只可能由「删行后进程被杀」「落盘后入库前崩溃」这类异常中断产生，
+         * 不需要每次采集都遍历整个 `files/clipboard_images/` 目录。
+         */
+        private const val ORPHAN_SWEEP_INTERVAL = 20
+
+        /**
          * 同步导入图片的**绝对**上限 = 设置允许的最大单张（1–20MB 的最大值）。
          *
          * 远端设备可能把单张上限调到比本机大，按本机上限拒收会让同步"看起来成功但没内容"；
@@ -99,6 +107,9 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /** 图片落盘/入库/配额收敛互斥：避免并发采集时孤儿清理误删刚写入的文件。 */
     private val imageMutex = Mutex()
+
+    /** 距上次孤儿清理的图片入库次数（须在 [imageMutex] 内读写）。 */
+    private var capturesSinceOrphanSweep = 0
 
     /** 拒收提示需在主线程弹 Toast。 */
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -434,8 +445,8 @@ class ClipboardManager private constructor(private val context: Context) {
                     ),
                 )
             }
-            // 数量上限（DAO 内已裁）与容量上限：统一回收被删行的文件 + 孤儿文件
-            enforceImageQuotaLocked(limits)
+            // 数量上限与容量上限：超限才全表计算淘汰，孤儿清理按周期/按需触发
+            enforceImageQuotaLocked(limits, sweepOrphans = shouldSweepOrphansNow())
             // 回读入库结果（带 id；极端情况下容量超限且其余条目全受保护时可能已被淘汰）
             val row = dao.findImageByHash(hash) ?: return@withLock null
             _clipboardChanged.emit(row.toClipboardItem())
@@ -510,23 +521,66 @@ class ClipboardManager private constructor(private val context: Context) {
 
     /**
      * 容量/数量配额收敛（须持有 [imageMutex] 调用）。
-     * 淘汰候选由纯函数 [ClipboardImageStore.selectEvictions] 计算（置顶与保护集豁免），
-     * 删除行后回收文件，最后做一次孤儿清理兜底。
+     *
+     * **快路径**：先用两条 SQL 聚合（`COUNT(*)` / `SUM(sizeBytes)`）判断是否真的超配额，
+     * 未超且本轮不需要孤儿清理就直接返回。
+     *
+     * 旧实现每次采集都无条件 `allImages()` 取全表行 + `allImagePaths()` 取全量路径 +
+     * `cleanupOrphans()` 遍历整个 `files/clipboard_images/` 目录。图片条目接近上限
+     * （[ClipboardImageStore.MAX_IMAGES] = 200）时，一次采集要读 200 行、扫 200+ 个文件，
+     * 全部发生在 [imageMutex] 内，会顶住后续图片采集与图片同步导入。
+     *
+     * 淘汰候选仍由纯函数 [ClipboardImageStore.selectEvictions] 计算（置顶与保护集豁免），
+     * 删除行后回收文件；孤儿清理改为「启动一次 + 每 [ORPHAN_SWEEP_INTERVAL] 次采集一次 +
+     * 确实淘汰过条目时」——淘汰过就必须立刻扫，否则被删行的文件要等下一次周期性清理才回收。
+     *
+     * @param sweepOrphans 本轮是否顺带做整目录孤儿清理
      */
-    private suspend fun enforceImageQuotaLocked(limits: ImageLimits) {
-        val images = dao.allImages().map { it.toClipboardItem() }
-        val evicted = ClipboardImageStore.selectEvictions(
-            images = images,
-            protectedPaths = protectedImagePaths(),
+    private suspend fun enforceImageQuotaLocked(limits: ImageLimits, sweepOrphans: Boolean) {
+        val count = dao.countImages()
+        val totalBytes = dao.totalImageBytes()
+        val overQuota = ClipboardImageStore.isOverQuota(
+            count = count,
+            totalBytes = totalBytes,
             maxImages = limits.maxCount,
             maxTotalBytes = limits.maxTotalBytes,
         )
-        if (evicted.isNotEmpty()) {
-            dao.deleteImageByIds(evicted.map { it.id })
-            Log.d(TAG, "Image quota: evicted ${evicted.size} item(s)")
+        var evictedAny = false
+        if (overQuota) {
+            val images = dao.allImages().map { it.toClipboardItem() }
+            val evicted = ClipboardImageStore.selectEvictions(
+                images = images,
+                protectedPaths = protectedImagePaths(),
+                maxImages = limits.maxCount,
+                maxTotalBytes = limits.maxTotalBytes,
+            )
+            if (evicted.isNotEmpty()) {
+                dao.deleteImageByIds(evicted.map { it.id })
+                evictedAny = true
+                Log.d(
+                    TAG,
+                    "Image quota: evicted ${evicted.size} item(s) " +
+                        "(count=$count/${limits.maxCount}, bytes=$totalBytes/${limits.maxTotalBytes})",
+                )
+            }
         }
-        val known = dao.allImagePaths().toSet()
-        imageStore.cleanupOrphans(known)
+        if (sweepOrphans || evictedAny) {
+            val known = dao.allImagePaths().toSet()
+            val removed = imageStore.cleanupOrphans(known)
+            if (removed > 0) Log.d(TAG, "Image orphan sweep removed $removed file(s)")
+        }
+    }
+
+    /**
+     * 记一次图片入库并判断本轮是否该做孤儿清理（须持有 [imageMutex] 调用）。
+     */
+    private fun shouldSweepOrphansNow(): Boolean {
+        capturesSinceOrphanSweep += 1
+        if (capturesSinceOrphanSweep >= ORPHAN_SWEEP_INTERVAL) {
+            capturesSinceOrphanSweep = 0
+            return true
+        }
+        return false
     }
 
     /**
@@ -590,7 +644,10 @@ class ClipboardManager private constructor(private val context: Context) {
         scope.launch {
             // 启动自检：多余图片文件（含上次被淘汰行残留、.tmp 半成品）与容量超限收敛
             runCatching {
-                imageMutex.withLock { enforceImageQuotaLocked(imageLimits()) }
+                imageMutex.withLock {
+                    capturesSinceOrphanSweep = 0
+                    enforceImageQuotaLocked(imageLimits(), sweepOrphans = true)
+                }
             }.onFailure { Log.w(TAG, "Clipboard image startup cleanup failed", it) }
             // 启动自检：上次没删干净的中转图
             runCatching { MediaBridge.sweepStale(context) }

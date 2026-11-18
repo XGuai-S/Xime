@@ -155,6 +155,21 @@ class ClipboardImageStore(private val rootDir: File) {
         }
 
         /**
+         * 快路径判定：当前是否**已经**超配额（数量或容量）。
+         *
+         * 供 [com.kingzcheung.xime.clipboard.ClipboardManager] 用两条 SQL 聚合决定
+         * 是否需要全表读行算淘汰，避免每次图片入库都全表 + 整目录扫描。
+         *
+         * 边界语义：**恰好等于上限不算超**，与 [selectEvictions] 的 `count <= maxImages` 一致。
+         */
+        fun isOverQuota(
+            count: Int,
+            totalBytes: Long,
+            maxImages: Int = MAX_IMAGES,
+            maxTotalBytes: Long = MAX_TOTAL_BYTES,
+        ): Boolean = count > maxImages || totalBytes > maxTotalBytes
+
+        /**
          * 计算应淘汰的图片条目（纯函数）。
          *
          * 规则：跳过置顶（[ClipboardItem.isPinned]）与保护集（[protectedPaths]，如当前系统剪贴板
