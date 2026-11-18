@@ -447,6 +447,50 @@ private fun ExtensionItem(
                 }
             }
             
+            // 有错误记录时给一行显式操作：查看 / 清除。
+            //
+            // 旧实现只有标题右侧一个 14dp 的 ⚠ 角标可点，清除按钮还藏在弹窗的
+            // dismissButton 里 —— 用户连续两次反馈「没有按钮处理」。这里把两个动作
+            // 直接摆在插件卡片上，不再依赖发现那个小角标。
+            if (hasErrors) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "错误记录 ${errors.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    TextButton(
+                        onClick = { showErrorDialog = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text("查看", style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(
+                        onClick = {
+                            // 直接清除：清内存 + 排队清文件，并立即刷新角标/行内文字
+                            PluginErrorLog.clearErrors(extension.id)
+                            errorVersion++
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(
+                            "清除",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
             // 第二行：类型 + 版本
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
