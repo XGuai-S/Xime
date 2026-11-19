@@ -200,6 +200,15 @@ object FileLogger {
     }
 
     fun e(tag: String, message: String, throwable: Throwable? = null) {
+        // 协程取消不是故障：服务重建、切方案、进程收尾都会取消任务，
+        // 这类异常被 `catch (e: Exception)` 兜住后当成 ERROR 记录，日志里就会出现
+        // 「Failed to initialize …: Job was cancelled」这种假故障（用户 2026-11-19 反馈）。
+        // 在唯一的写入口统一降级为 debug，129 处 catch 站点一次覆盖，不用逐个改。
+        if (throwable is kotlinx.coroutines.CancellationException) {
+            Log.d(tag, message)
+            write(LogLevel.DEBUG, tag, message)
+            return
+        }
         Log.e(tag, message, throwable)
         write(LogLevel.ERROR, tag, withStackTrace(message, throwable))
     }

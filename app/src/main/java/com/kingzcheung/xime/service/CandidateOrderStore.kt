@@ -130,43 +130,20 @@ object CandidateOrderStore {
      * （调用方保证：仅在非 ascii、非 T9、且无插件变换的纯引擎路径下调用）。
      */
     /**
-     * 取该编码的权重表——**按前缀聚合**。
+     * 取该编码的权重表——**精确匹配，不做前缀聚合**。
      *
-     * 为什么不能只认 `table[code]` 精确匹配：
-     * 小鹤音形里同一个词可以在不同码长下被上屏（`好看` 3 码 `hck` 也能选、4 码 `hckj` 也能上屏），
-     * rime 给候选时也是按前缀匹配的（打 `hck` 会带出 `hckj` 的词）。如果这里只查精确编码，
-     * 权重就会被「上屏时实际用的那个码长」割裂：按 `hckj` 上屏记的权重，打 `hck` 时一个都用不上。
+     * 曾经试过「把以 code 开头的更长编码的权重也并进来」，理由是 rime 本身按前缀给候选
+     * （打 `hck` 会带出 `hckj` 的词）。但那样一来：`好看` 用 `hckj` 记的权重会去抬高它在
+     * `hck` 下的名次——而 `hck` 根本不是它的编码，用户看到的就是「编码不对应却被顶到前面」。
+     * 这正是用户明确否掉的（2026-11-19）。
      *
-     * 规则：codes 里所有以 [code] 开头的条目都参与，同一个词取**最大值**
-     * （次数不叠加——同一个词用两种码长各打一次，不该等于打了两次短码）。
+     * 现在的口径：**只有编码完全一致的记录才参与排序**。短码下的长码词仍会出现在候选里
+     * （那是引擎的前缀匹配，属于小鹤简码的固有行为），但不会因为别处累积的权重被提前。
      */
     internal fun collectFrequency(
         table: Map<String, Map<String, Int>>,
         code: String,
-    ): Map<String, Int> {
-        val exact = table[code]
-        if (exact != null && exact.isNotEmpty()) {
-            // 快路径：精确命中时先以它为底，再并上更长的同前缀编码
-            val merged = HashMap<String, Int>(exact)
-            for ((key, words) in table) {
-                if (key.length <= code.length || !key.startsWith(code)) continue
-                for ((w, v) in words) {
-                    val cur = merged[w]
-                    if (cur == null || v > cur) merged[w] = v
-                }
-            }
-            return merged
-        }
-        val merged = HashMap<String, Int>()
-        for ((key, words) in table) {
-            if (!key.startsWith(code)) continue
-            for ((w, v) in words) {
-                val cur = merged[w]
-                if (cur == null || v > cur) merged[w] = v
-            }
-        }
-        return merged
-    }
+    ): Map<String, Int> = table[code] ?: emptyMap()
 
     fun reorder(
         code: String,

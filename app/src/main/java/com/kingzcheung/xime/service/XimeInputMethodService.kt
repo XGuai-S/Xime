@@ -1212,6 +1212,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 refreshSchemeDictWords()
                 // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）
                 cleanupAutoWordFromCustomPhrase()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 取消 ≠ 失败：服务重建、切换方案、进程收尾都会取消初始化任务，
+                // 这是正常控制流。之前一律按 Exception 记 ERROR 并提示「初始化失败」，
+                // 用户日志里就会出现「Failed to initialize Rime engine: Job was cancelled」
+                // 这种假故障（2026-11-19 反馈）。保留原样抛出以维持结构化并发的取消语义。
+                FileLogger.d(TAG, "initRimeEngine cancelled: ${e.message}")
+                notifyDeploymentStatus(false, "")
+                throw e
             } catch (e: Exception) {
                 FileLogger.e(TAG, "initRimeEngine: Failed to initialize Rime engine", e)
                 notifyDeploymentStatus(false, "初始化失败")
@@ -5039,6 +5047,45 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 同时联动自动造词：词进临时词库，窗口内攒够次数即晋升固定词库
      * （见 [AutoWordStore.record] / [AutoWordStore.promote]）。
      */
+    /**
+     * 该词在当前方案主词典里的编码（多码时取第一个）；不是词典词则 null。
+     *
+     * 用于把「上屏时按了几个键」和「这个词真正的编码」分开：用户打 `hck` 也能从候选里
+     * 选中 `好看`（引擎前缀匹配），但 `hck` 不是 `好看` 的编码，`hckj` 才是。
+     */
+    private fun canonicalCodeOf(word: String): List<String> {
+        val raw = schemeRootWordCodes[word] ?: return emptyList()
+        return raw.split(' ').filter { it.isNotBlank() }
+    }
+
+    /**
+     * 解析本次上屏应该记进词频/造词库的编码。
+     *
+     * 规则：词在词典里 → 用它词典里的编码（用户按的码恰好是其中之一就沿用它，否则取第一个）；
+     * 词不在词典里（用户自造的）→ 保持按键得到的编码。
+     *
+     * 这样「编码不对应的上屏」不会再把短码写进词频：打 `hck` 选中 `好看`，记的是 `hckj`。
+     */
+    private fun resolveCommitCode(word: String, typedCode: String): String {
+        if (typedCode.isEmpty()) return canonicalCodeOf(word).firstOrNull().orEmpty()
+        // ① 用户按的码本身就是这个词的造词条目码（造词规则码，如 光遇 glyu）→ 尊重它
+        if (isAutoWordCodeOf(typedCode, word)) return typedCode
+        val canonical = canonicalCodeOf(word)
+        // ② 不是词典词（纯自造词）→ 保持按键码
+        if (canonical.isEmpty()) return typedCode
+        // ③ 按的码正好是词典码之一 → 保持
+        if (typedCode in canonical) return typedCode
+        // ④ 其余（按了短码选中了长码词，如 hck 选 好看）→ 记词典码
+        return canonical.first()
+    }
+
+    /** [code] 是否为 [word] 的造词条目码（固定/临时词库里存在这一对）。 */
+    private fun isAutoWordCodeOf(code: String, word: String): Boolean {
+        autoWordFixed[code]?.containsKey(word)?.let { if (it) return true }
+        autoWordTemp[code]?.containsKey(word)?.let { if (it) return true }
+        return false
+    }
+
     private fun recordWordFrequency(text: String, isPaste: Boolean) {
         // 与 saveWordData（IO 线程落盘）/ reconcileUserDataFiles 互斥：
         // 「读内存表 → 累加计数/造词晋升 → 写回」必须原子，否则 IO 线程回写的旧快照
@@ -5095,11 +5142,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 标记编码（按键路径给的「真实上屏编码」）比 UI 快照更权威：
         // 自动上屏时 UI 少一个键（hck vs hckj），此时必须用标记的更长那条，
         // 否则词频会永久记在错的编码上。二者不是前缀关系时以 UI 为准（用户可能改了编码）。
-        val code = when {
+        val typedCode = when {
             markedCode.isNotEmpty() &&
                 (uiCode.isEmpty() || markedCode.startsWith(uiCode)) -> markedCode
             else -> uiCode
         }
+        // 关键：记录「这个词的真实编码」而不是「用户按了几个键」。
+        // 打 hck 就选中好看时，按键码是 hck，但好看的词典码是 hckj —— 记 hck 会让
+        // 词频挂到错编码上（用户 2026-11-19 反馈的同一类问题）。
+        val code = resolveCommitCode(text, typedCode)
         // 反查模式（` 引导符）上屏的字**不进词频、不造词**：
         // 反查是「按字找码」，上屏的字与 ` 后面的码没有任何输入法编码关系，
         // 记进词频会写入 `` `aaek `` / `` hc` `` 这类脏编码（历史已污染过 9 类条目），
@@ -5312,9 +5363,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // （如个人词库 XGuai_user.dict.yaml）：不参与自动造词链——
         // 不进临时/固定词库、不参与组合生词。但仍是方案词典正常候选。
         if (word in noAutoWordWords) return
+        // 词典里已有的词不该被造词库再收一遍——尤其不能收成「用户按的那个短码」。
+        // 历史污染就是这么来的：打 hck 选好看 → auto_word 里出现「好看 hck」。
+        // 这里统一改写成词典编码；不在词典里的自造词保持原样。
+        // 注意：这里**不能**把编码强制改成词典码。
+        // 词典已有的词如果「造词规则码 ≠ 词典码」（如 光遇：词典 gyz，规则 glyu），本来就该造词
+        // —— 否则用户按 gl yu 打不出它（用户 2026-11-19 反馈「光遇造词打不出来了」即此）。
+        // 编码级去重已在 recordComboWord 里做过：只有当词典码里已经包含该规则码时才跳过。
+        val effectiveCodes = codes
+        val effectivePrefer = preferCode
         // 批量收录：多个编码只复制一次外层表（见 AutoWordStore.recordMany 注释）。
         // 旧实现对每个编码各调一次 record，组合词 16 码 = 16 次整表浅复制（~1MB 短命对象）。
-        val next = AutoWordStore.recordMany(autoWordTemp, codes, word, nowForRecord(), initialCount)
+        val next = AutoWordStore.recordMany(autoWordTemp, effectiveCodes, word, nowForRecord(), initialCount)
         val changed = next !== autoWordTemp
         if (changed) autoWordTemp = next
         // 晋升（节流，避免每次上屏全表遍历，见 [fullPromoteIntervalMs] 注释）：
@@ -5329,7 +5389,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     windowDays = config.promoteDays,
                     minCount = config.promoteCount,
                     // 一词一码：固定词库只收用户实际按的那个编码，避免多音字一词多音
-                    preferCode = preferCode,
+                    preferCode = effectivePrefer,
                 )
             } else {
                 AutoWordStore.promoteWord(

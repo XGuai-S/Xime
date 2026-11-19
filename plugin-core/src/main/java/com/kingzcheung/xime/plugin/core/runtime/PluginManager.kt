@@ -97,6 +97,50 @@ object PluginManager {
     val isInitialized: Boolean
         get() = frameworkContext?.initState?.value == InitState.INITIALIZED
 
+    /**
+     * 插件 JS 运行时空闲回收阈值（毫秒）；**0 = 关闭**。
+     *
+     * 默认 15 分钟：常驻输入法里 7 个插件同时活着时主进程 RSS 162MB（实测），
+     * 而大多数插件一次会话只用一两次。空闲超时后释放运行时，下次调用自动重建
+     * （首次会慢一点），内存还给系统 —— 内存压力小了，系统换页也少，间接省电。
+     *
+     * 关闭方式：应用启动时把它设为 0（见 XimeApplication 的配置读取），
+     * 或在 xime.yaml 里配 `plugins.idle_reclaim_ms: 0`。
+     */
+    @Volatile
+    var idleReclaimMs: Long = 15 * 60 * 1000L
+
+    /** 空闲回收的检查间隔。 */
+    private const val IDLE_REAPER_INTERVAL_MS = 60_000L
+
+    /** 启动空闲回收协程（幂等）。 */
+    @Volatile
+    private var reaperStarted = false
+
+    private fun startIdleReaperIfNeeded() {
+        if (reaperStarted) return
+        reaperStarted = true
+        managerScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(IDLE_REAPER_INTERVAL_MS)
+                val idleMs = idleReclaimMs
+                if (idleMs <= 0L) continue
+                val ctx = frameworkContext ?: continue
+                val now = android.os.SystemClock.elapsedRealtime()
+                val reclaimed = ctx.lifecycleManager.reclaimIdlePlugins(
+                    nowMs = now,
+                    idleMs = idleMs,
+                    // 剪贴板同步插件常驻后台跑同步循环，回收即断链，永不回收
+                    excludeCategories = setOf(com.kingzcheung.xime.plugin.core.model.PluginCategory.CLIPBOARD_SYNC),
+                )
+                if (reclaimed.isNotEmpty()) {
+                    Log.i(TAG, "reclaimed idle plugins: $reclaimed")
+                    updateFlows()
+                }
+            }
+        }
+    }
+
     val installerManager: com.kingzcheung.xime.plugin.core.runtime.installer.InstallerManager
         get() = requireContext().installerManager
 
@@ -125,6 +169,7 @@ object PluginManager {
 
         requireContext().initializeLifecycleManager()
         requireContext().initState.value = InitState.INITIALIZED
+        startIdleReaperIfNeeded()
         Log.d(TAG, "Framework initialized")
 
         managerScope.launch {
@@ -153,6 +198,7 @@ object PluginManager {
 
     suspend fun launchPlugin(pluginId: String): Boolean {
         val result = requireContext().lifecycleManager.launchPlugin(pluginId)
+        requireContext().lifecycleManager.touchPlugin(pluginId)
         updateFlows()
         return result
     }
@@ -171,6 +217,8 @@ object PluginManager {
     }
 
     fun getPluginInstance(pluginId: String): IPluginEntryClass? {
+        // 取用即视为一次使用：刷新空闲计时，避免刚被调用的插件被回收
+        frameworkContext?.lifecycleManager?.touchPlugin(pluginId)
         return requireContext().pluginInstances[pluginId]
     }
 

@@ -240,7 +240,11 @@ class ClipboardManager private constructor(private val context: Context) {
             // 关键诊断：后台读剪贴板在 Android 10+ 会返回 null（非焦点应用）。
             // 这条日志是「复制了没进面板」唯一可定位的线索，必须写进 xime 日志文件。
             if (clipData == null) {
-                FileLogger.e(TAG, "primaryClip=null（后台限制或剪贴板为空）")
+                // 不是错误：Android 10+ 非焦点应用读剪贴板本来就返回 null，剪贴板为空也返回 null。
+                // 之前用 e() 记 ERROR，导致日志里每复制一次就刷一条「错误」，用户看到的
+                // 全是假故障（2026-11-19 反馈）。降为 d：默认级别（ERROR）不落盘，
+                // 排查「复制了没进面板」时把 logging.level 调到 debug 仍能拿到这条线索。
+                FileLogger.d(TAG, "primaryClip=null（后台限制或剪贴板为空）")
             }
             if (clipData != null && clipData.itemCount > 0) {
                 val description = clipData.description

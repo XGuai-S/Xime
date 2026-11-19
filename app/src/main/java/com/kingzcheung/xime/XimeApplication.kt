@@ -126,6 +126,17 @@ class XimeApplication : Application(), ImageLoaderFactory {
                 File(filesDir, "logs/plugins/errors.jsonl")
             )
         )
+        // 插件 JS 运行时空闲回收阈值（毫秒，0 = 关闭）。
+        // 允许在 xime.yaml 里写 `plugins.idle_reclaim_ms: 0` 关掉；没写就用插件框架默认的 15 分钟。
+        runCatching {
+            val text = com.kingzcheung.xime.settings.UserConfigDir
+                .readText(this, com.kingzcheung.xime.settings.UserConfigDir.UNIFIED_CONFIG_FILE)
+            if (!text.isNullOrBlank()) {
+                val found = Regex("[ \\t]*idle_reclaim_ms:[ \\t]*(\\d+)", RegexOption.MULTILINE)
+                    .find(text)?.groupValues?.get(1)?.toLongOrNull()
+                if (found != null) PluginManager.idleReclaimMs = found
+            }
+        }
         PluginManager.initialize(this) {
             // 内置插件随包安装：debug 与 release 一致，装完即开箱可用
             PluginManager.installBundledPluginsFromAssets("plugins")

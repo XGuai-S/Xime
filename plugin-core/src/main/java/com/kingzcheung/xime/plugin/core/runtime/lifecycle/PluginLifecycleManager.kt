@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.plugin.core.runtime.lifecycle
 
 import android.app.Application
+import android.os.SystemClock
 import android.util.Log
 import com.kingzcheung.xime.plugin.core.api.IPluginEntryClass
 import com.kingzcheung.xime.plugin.core.js.JsAsrPluginAdapter
@@ -71,12 +72,59 @@ class PluginLifecycleManager(
         }
     }
 
-    suspend fun unloadPlugin(pluginId: String) {
-        lockFor(pluginId).withLock { unloadPluginLocked(pluginId) }
+    suspend fun unloadPlugin(pluginId: String): Boolean {
+        return lockFor(pluginId).withLock { unloadPluginLocked(pluginId) }
     }
 
-    private suspend fun unloadPluginLocked(pluginId: String) = withContext(Dispatchers.IO) {
-        if (!loadedPlugins.containsKey(pluginId)) return@withContext
+    /**
+     * 插件最近一次被真正调用的时刻（elapsedRealtime）。
+     *
+     * 用于空闲回收：JS 运行时常驻很吃内存（实测 7 个插件常驻时主进程 RSS 162MB），
+     * 而绝大多数插件一次会话只会被用一两次。空闲一段时间后释放运行时，下次调用再重建，
+     * 首次调用会慢一点（重建 QuickJS + 跑 onLoad），换来内存归还。
+     */
+    private val lastUsedAtMs = ConcurrentHashMap<String, Long>()
+
+    internal fun touchPlugin(pluginId: String) {
+        lastUsedAtMs[pluginId] = SystemClock.elapsedRealtime()
+    }
+
+    internal fun lastUsedOf(pluginId: String): Long = lastUsedAtMs[pluginId] ?: 0L
+
+    /**
+     * 回收空闲插件：返回被回收的插件 id 列表。
+     *
+     * 只回收**加载中且空闲超时**的插件；[excludeCategories] 里的类别永不回收
+     * （剪贴板同步这类常驻后台的插件一回收就会断掉同步链路）。
+     * 回收走正常 [unloadPlugin]（onUnload → 关脚本 → 摘出表），下次调用方拿到 null 时
+     * 会重新 [launchPlugin]，因此不需要调用方改代码。
+     */
+    suspend fun reclaimIdlePlugins(
+        nowMs: Long,
+        idleMs: Long,
+        excludeCategories: Set<PluginCategory> = emptySet(),
+    ): List<String> {
+        if (idleMs <= 0L) return emptyList()
+        val victims = synchronized(lastUsedAtMs) {
+            loadedPlugins.keys.filter { id ->
+                val info = loadedPlugins[id] ?: return@filter false
+                if (info.pluginInfo.category in excludeCategories) return@filter false
+                val last = lastUsedAtMs[id] ?: 0L
+                last > 0L && nowMs - last >= idleMs
+            }
+        }
+        val reclaimed = ArrayList<String>(victims.size)
+        for (id in victims) {
+            // 二次确认：可能在筛选之后刚被调用过
+            val last = lastUsedOf(id)
+            if (last <= 0L || nowMs - last < idleMs) continue
+            if (unloadPlugin(id)) reclaimed += id
+        }
+        return reclaimed
+    }
+
+    private suspend fun unloadPluginLocked(pluginId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!loadedPlugins.containsKey(pluginId)) return@withContext false
 
         pluginInstances[pluginId]?.let { instance ->
             try {
@@ -97,6 +145,8 @@ class PluginLifecycleManager(
             }
         }
         pluginInstances.remove(pluginId)
+        lastUsedAtMs.remove(pluginId)
+        true
     }
 
     suspend fun loadEnabledPlugins(): Int = withContext(Dispatchers.IO) {
