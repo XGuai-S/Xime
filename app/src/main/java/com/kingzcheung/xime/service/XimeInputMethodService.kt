@@ -4640,14 +4640,26 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 预览残留、光标移动丢弃组合态带入的内容）不计选中次数。
      */
     private var lastSelectedCandidateWord: String? = null
-    /** 记录本次从候选栏选中的词，见 [lastSelectedCandidateWord]。 */
-    internal fun markCandidateSelection(word: String) {
-        if (word.isNotEmpty()) {
-            lastSelectedCandidateWord = word
-            // 同步快照当前编码：上屏后 candidateState 常已被清空，靠这里保住编码，
-            // 否则 word_freq.txt 会因 code 为空而漏记（见 recordWordFrequency 的兜底）。
-            val code = candidateState.value.inputText.ifEmpty { candidateState.value.preeditText }
-            if (code.isNotEmpty()) lastSelectedCandidateCode = code
+    /**
+     * 记录本次从候选栏选中的词，见 [lastSelectedCandidateWord]。
+     *
+     * @param codeHint 本次上屏**实际消费的编码**，由按键路径提供（上一键的编码 + 本键字符）。
+     *   引擎自动上屏（小鹤「满码唯一自动上屏」`auto_select: ^\w{4}$`）时这个参数是必须的：
+     *   第 4 个键触发上屏的瞬间，`candidateState` 还停在**上一个**键刷新出来的 3 码状态，
+     *   直接读 UI 状态会把「好看」的 `hckj` 记成 `hck` —— 词频挂在了错的编码上，
+     *   以后按 `hckj` 打反而拿不到自己累积的权重。
+     */
+    internal fun markCandidateSelection(word: String, codeHint: String? = null) {
+        if (word.isEmpty()) return
+        lastSelectedCandidateWord = word
+        val uiCode = candidateState.value.inputText.ifEmpty { candidateState.value.preeditText }
+        val hint = codeHint?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        lastSelectedCandidateCode = when {
+            // hint 与 UI 编码互为前缀（hck / hckj）时取更长的那个：它才是引擎真正消费的编码
+            hint != null && (uiCode.isEmpty() || hint.startsWith(uiCode) || uiCode.startsWith(hint)) -> hint
+            uiCode.isNotEmpty() -> uiCode
+            // 两者都没有：保留上一次的快照（上屏后 UI 常已被清空）
+            else -> lastSelectedCandidateCode
         }
     }
 
@@ -5076,11 +5088,18 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 也借用它，就会把上一条候选的编码写到这些文本头上——实测污染过：
         // ma → 肆元整 / 伍元整 / 曲、l → 国。这里要求「本次上屏的文本就是刚选中的候选词」
         // 才允许用快照编码。
-        val code = candidateState.value.inputText
+        val uiCode = candidateState.value.inputText
             .ifEmpty { candidateState.value.preeditText }
-            .ifEmpty {
-                if (lastSelectedCandidateWord == text) lastSelectedCandidateCode.orEmpty() else ""
-            }
+        val markedCode =
+            if (lastSelectedCandidateWord == text) lastSelectedCandidateCode.orEmpty() else ""
+        // 标记编码（按键路径给的「真实上屏编码」）比 UI 快照更权威：
+        // 自动上屏时 UI 少一个键（hck vs hckj），此时必须用标记的更长那条，
+        // 否则词频会永久记在错的编码上。二者不是前缀关系时以 UI 为准（用户可能改了编码）。
+        val code = when {
+            markedCode.isNotEmpty() &&
+                (uiCode.isEmpty() || markedCode.startsWith(uiCode)) -> markedCode
+            else -> uiCode
+        }
         // 反查模式（` 引导符）上屏的字**不进词频、不造词**：
         // 反查是「按字找码」，上屏的字与 ` 后面的码没有任何输入法编码关系，
         // 记进词频会写入 `` `aaek `` / `` hc` `` 这类脏编码（历史已污染过 9 类条目），

@@ -470,6 +470,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     return MainKeyResult(needsUIUpdate, committedText, consumed = true)
                 }
             }
+            // 本次按键消费的完整编码 = 按键前的编码 + 本键字符。
+            // 必须在 processKey **之前**取：自动上屏会把引擎编码清空，
+            // 之后只能读到空串；而 UI 的 candidateState 又慢一个键。
+            val preKeyInput = service.rimeEngine.getCachedInputText()
+                .ifEmpty { service.rimeEngine.getInput() }
+            val commitCodeHint =
+                if (!isAsciiMode && char.length == 1 && key.length == 1) preKeyInput + key.lowercase()
+                else null
             val result = service.rimeEngine.processKeyAndGetResult(keyCode, mask)
         if (result.processed) {
             if (isShiftedChinese && result.committedText != char) {
@@ -491,7 +499,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 } else {
                     if (committed.isNotEmpty()) {
-                        service.markCandidateSelection(committed)
+                        // 带上真实编码：自动上屏时 UI 还停在上一个键（见 markCandidateSelection 注释）
+                        service.markCandidateSelection(committed, commitCodeHint)
                         withContext(Dispatchers.Main) { service.commitText(committed) }
                     }
                     sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
@@ -886,6 +895,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         // 入队处理，保持与普通按键同一串行通道（原实现直接在主线程阻塞等锁）。
                         val keyCode = key.lowercase()[0].code
                         postRimeJob {
+                            val preKeyInput = service.rimeEngine.getCachedInputText()
+                                .ifEmpty { service.rimeEngine.getInput() }
+                            val commitCodeHint = preKeyInput + key.lowercase()
                             val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
                             if (result.processed) {
                                 // 引擎自动上屏（四码唯一、简繁转换等）的增量必须照常提交：
@@ -894,7 +906,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                                 // 面板/搜索态直接失效——按键被消费、字却没进输入框。
                                 val committed = result.committedText
                                 if (committed.isNotEmpty()) {
-                                    service.markCandidateSelection(committed)
+                                    service.markCandidateSelection(committed, commitCodeHint)
                                     withContext(Dispatchers.Main) { service.commitText(committed) }
                                 }
                                 sendTransformedResult(result)
