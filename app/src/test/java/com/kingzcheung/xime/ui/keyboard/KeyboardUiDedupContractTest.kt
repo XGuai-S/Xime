@@ -54,6 +54,9 @@ class KeyboardUiDedupContractTest {
     fun `按键组件都接入了统一阴影实现`() {
         // T9KeyboardLayout 不在此列：它唯一的阴影调用点在 ResetKey 里，
         // 抽取后通过共享的 ResetKey 间接受益，不再直接调用助手。
+        //
+        // KeyButton 改用 rememberKeyDepthModifier：立体感已从「每帧画 path」换成
+        // 「预渲染位图 + 每帧一次 blit」，那是同一件事的新实现，因此两种入口都算接入。
         val expected = listOf(
             "KeyboardLayout.kt",
             "KeyButton.kt",
@@ -63,7 +66,13 @@ class KeyboardUiDedupContractTest {
             "ResetKey.kt",
         )
         val missing = expected.filterNot { name ->
-            mainSources.any { it.name == name && it.readText().contains("rememberCrispShadowModifier(") }
+            mainSources.any { file ->
+                if (file.name != name) return@any false
+                val text = file.readText()
+                text.contains("rememberCrispShadowModifier(") ||
+                    text.contains("rememberKeyShadowModifier(") ||
+                    text.contains("rememberKeyDepthModifier(")
+            }
         }
         assertTrue("这些文件没有接入统一阴影实现（抽取后接线断了）：$missing", missing.isEmpty())
     }

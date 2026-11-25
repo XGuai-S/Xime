@@ -54,7 +54,7 @@ object StorageStats {
 
     // ── 路径 ──
 
-    fun modelsDir(context: Context): File = File(context.filesDir, "models")
+    fun modelsDir(context: Context): File = com.kingzcheung.xime.model.ModelStorage.getModelsRoot(context)
     fun rimeDir(context: Context): File = File(context.filesDir, "rime")
     fun rimeBuildDir(context: Context): File = File(context.filesDir, "rime/build")
     fun rimeLogsDir(context: Context): File = File(context.filesDir, "rime/logs")
@@ -79,14 +79,14 @@ object StorageStats {
 
     /** 递归统计目录大小；目录不存在返回 0。 */
     fun directorySize(dir: File?): Long {
-        if (dir == null || !dir.exists()) return 0
+        if (dir == null || java.nio.file.Files.isSymbolicLink(dir.toPath()) || !dir.exists()) return 0
         if (dir.isFile) return dir.length()
         return dir.listFiles()?.sumOf { directorySize(it) } ?: 0L
     }
 
     /** 汇总各类目占用（IO 耗时，须在后台线程调用）。 */
     fun collectCategories(context: Context): List<Category> {
-        val modelsSize = directorySize(modelsDir(context))
+        val modelsSize = runCatching { directorySize(modelsDir(context)) }.getOrDefault(0L)
         val rimeSize = directorySize(rimeDir(context))
         val buildSize = directorySize(rimeBuildDir(context)) + directorySize(rimeLogsDir(context))
         val pluginsSize = directorySize(pluginsDir(context)) + directorySize(pluginIconsDir(context))
@@ -209,15 +209,33 @@ object StorageStats {
     }
 
     private fun clearModels(context: Context): Boolean {
+        val root = runCatching { modelsDir(context) }.getOrElse { return false }
         var ok = true
         for (model in ModelManager.getAllModels()) {
+            // ModelManager.deleteModel 会先取消并等待该模型的活动下载结束（模型目录串行域）
             if (!ModelManager.deleteModel(context, model)) ok = false
         }
         // 未知来源的残余模型目录（如旧版本残留）一并移除
-        modelsDir(context).listFiles()?.forEach { dir ->
-            if (!dir.deleteRecursively()) ok = false
+        if (!root.exists()) return ok
+        val children = root.listFiles() ?: return false
+        children.forEach { file ->
+            // 仍在下载中的模型目录由下载事务自己清理，这里跳过以免删除中途的暂存树
+            if (file.isDirectory && ModelManager.isModelBusy(context, file.name)) return@forEach
+            if (!deleteModelTree(file)) ok = false
         }
         return ok
+    }
+
+    private fun deleteModelTree(file: File): Boolean {
+        if (java.nio.file.Files.isSymbolicLink(file.toPath())) return file.delete()
+        if (!file.exists()) return true
+        if (!file.isDirectory) return file.delete()
+        val children = file.listFiles() ?: return false
+        var ok = true
+        for (child in children) {
+            if (!deleteModelTree(child)) ok = false
+        }
+        return if (ok) file.delete() else false
     }
 
     /**

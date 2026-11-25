@@ -67,10 +67,12 @@ object PluginErrorLog {
             if (loaded.isEmpty()) return
             errorLogs.clear()
             for (error in loaded) {
-                errorLogs.getOrPut(error.pluginId) { mutableListOf() }.add(error)
+                errorLogs.getOrPut(error.pluginId) { mutableListOf() }.also { list ->
+                    synchronized(list) { list.add(error) }
+                }
             }
             // 恢复后按内存上限截断，避免历史累积拖垮 UI 与后续落盘
-            errorLogs.values.forEach { trim(it) }
+            errorLogs.values.forEach { list -> synchronized(list) { trim(list) } }
             Log.i(TAG, "Restored ${loaded.size} plugin errors from store")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to restore plugin errors from store", e)
@@ -147,9 +149,11 @@ object PluginErrorLog {
             recentHostErrorDetail[pluginId] = message to now
         }
 
-        errorLogs.getOrPut(pluginId) { mutableListOf() }.apply {
-            add(error)
-            trim(this)
+        errorLogs.getOrPut(pluginId) { mutableListOf() }.let { list ->
+            synchronized(list) {
+                list.add(error)
+                trim(list)
+            }
         }
 
         store?.let { s ->
@@ -183,14 +187,18 @@ object PluginErrorLog {
         }
     }
 
+    /** 读取时也复制一份：并发 add/trim 下裸 toList() 会抛 ConcurrentModificationException。 */
     @Suppress("UNCHECKED_CAST")
     fun getErrors(pluginId: String): List<PluginError> {
-        return errorLogs[pluginId]?.toList() ?: emptyList()
+        val list = errorLogs[pluginId] ?: return emptyList()
+        return synchronized(list) { (list as List<PluginError>).toList() }
     }
 
     @Suppress("UNCHECKED_CAST")
     fun getAllErrors(): Map<String, List<PluginError>> {
-        return errorLogs.mapValues { it.value.toList() }
+        return errorLogs.mapValues { (_, list) ->
+            synchronized(list) { (list as List<PluginError>).toList() }
+        }
     }
 
     fun clearErrors(pluginId: String) {
@@ -222,11 +230,13 @@ object PluginErrorLog {
     }
 
     fun hasErrors(pluginId: String): Boolean {
-        return errorLogs[pluginId]?.isNotEmpty() ?: false
+        val list = errorLogs[pluginId] ?: return false
+        return synchronized(list) { list.isNotEmpty() }
     }
 
     fun getLastError(pluginId: String): PluginError? {
-        return errorLogs[pluginId]?.lastOrNull()
+        val list = errorLogs[pluginId] ?: return null
+        return synchronized(list) { list.lastOrNull() }
     }
 
     private fun trim(list: MutableList<PluginError>) {

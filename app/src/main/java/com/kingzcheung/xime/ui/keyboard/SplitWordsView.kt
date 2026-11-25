@@ -109,6 +109,7 @@ fun SplitWordsView(
     bottomPaddingDp: Int = 0,
     modifier: Modifier = Modifier
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val textColor = MaterialTheme.colorScheme.onSurface
     val accentColor = MaterialTheme.colorScheme.primary
     val chipBgColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -177,8 +178,16 @@ fun SplitWordsView(
                 onClick = {
                     val text = selectedIndices.joinToString("") { splitParts[it] }
                     if (text.isNotEmpty()) {
-                        viewModel.addQuickSendText(text)
-                        onNavigateToQuickSend?.invoke()
+                        // 敏感内容会被拒绝：不提示的话用户会以为添加成功
+                        if (viewModel.addQuickSendText(text)) {
+                            onNavigateToQuickSend?.invoke()
+                        } else {
+                            android.widget.Toast.makeText(
+                                context,
+                                "含密码/卡号等敏感内容的文本不能设为快捷发送",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
                     }
                 }
             ) {

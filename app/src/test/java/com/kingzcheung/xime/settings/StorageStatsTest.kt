@@ -1,5 +1,6 @@
-package com.kingzcheung.xime.settings
+﻿package com.kingzcheung.xime.settings
 
+import com.kingzcheung.xime.SymlinkSupport
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -50,6 +51,34 @@ class StorageStatsTest {
             category(50L),
         )
         assertEquals(400L, StorageStats.totalSize(categories))
+    }
+
+    @Test
+    fun `模型统计跳过链接且清理不进入链接目标`() = kotlinx.coroutines.runBlocking {
+        val root = tmp.newFolder("files")
+        val outside = tmp.newFolder("outside")
+        val marker = File(outside, "model.bin").apply { writeText("outside-valid") }
+        val models = File(root, "models").apply { mkdirs() }
+        SymlinkSupport.create(File(models, "linked"), outside)
+        File(models, "own.bin").writeText("123")
+        assertEquals(3L, StorageStats.directorySize(models))
+        val context = org.mockito.kotlin.mock<android.content.Context>()
+        org.mockito.kotlin.whenever(context.filesDir).thenReturn(root)
+        org.junit.Assert.assertTrue(StorageStats.clearCategory(context, StorageStats.ID_MODELS))
+        assertEquals("outside-valid", marker.readText())
+        org.junit.Assert.assertTrue(models.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `模型根链接在清理前被拒绝`() = kotlinx.coroutines.runBlocking {
+        val root = tmp.newFolder("root-files")
+        val outside = tmp.newFolder("external-models")
+        val marker = File(outside, "model.bin").apply { writeText("old") }
+        SymlinkSupport.create(File(root, "models"), outside)
+        val context = org.mockito.kotlin.mock<android.content.Context>()
+        org.mockito.kotlin.whenever(context.filesDir).thenReturn(root)
+        org.junit.Assert.assertFalse(StorageStats.clearCategory(context, StorageStats.ID_MODELS))
+        assertEquals("old", marker.readText())
     }
 
     private fun category(size: Long, clearable: Boolean = true) = StorageStats.Category(

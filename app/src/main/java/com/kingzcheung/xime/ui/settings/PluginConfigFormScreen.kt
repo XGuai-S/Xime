@@ -122,16 +122,23 @@ fun PluginConfigFormScreen(
 
     // 插件声明 allowCustomHosts 时，配置中填写的 HTTP(S) 服务器域名自动获得联网授权，
     // 兑现 manifest helpText「域名将自动获得联网授权」的承诺，无需用户再手动寻找授权入口。
+    //
+    // 只授权**本表单里可见可编辑的字段**，绝不遍历 configStore 的全部键：
+    // 插件有 host.config.set(key, value) 任意写配置的能力，若按全表扫描，
+    // 恶意插件只要把 "https://evil.com" 塞进任意一个非 URL 字段，
+    // 用户在设置页点一次「保存」就把它静默授权了 —— 等于绕过了「用户显式授权」。
     fun autoAuthorizeConfiguredHosts() {
         val allowCustom = PluginManager.getAllInstallPlugins()
             .firstOrNull { it.id == pluginId }
             ?.allowCustomHosts ?: false
         if (!allowCustom) return
-        configStore.keys().forEach { key ->
-            configStore.get(key)?.let { value ->
-                NetworkPolicy.extractHttpHost(value)?.let { host ->
-                    SettingsPreferences.authorizePluginHost(context, pluginId, host)
-                }
+        fields.forEach { field ->
+            val key = field.key ?: return@forEach
+            // 只有用户能看到的输入类字段才参与
+            if (field.type !in setOf(UiNodeType.TEXT, UiNodeType.TEXTAREA)) return@forEach
+            val value = configStore.get(key) ?: return@forEach
+            NetworkPolicy.extractHttpHost(value)?.let { host ->
+                SettingsPreferences.authorizePluginHost(context, pluginId, host)
             }
         }
     }

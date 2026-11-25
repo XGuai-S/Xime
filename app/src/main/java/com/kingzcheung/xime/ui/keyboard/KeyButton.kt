@@ -290,7 +290,23 @@ fun KeyButton(
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // 立体感拆两层：阴影+键面在 clip 之前（阴影要外扩，不能被裁）；
+    // 高光+压暗必须在 background 之后，否则会被键面底色盖住。
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor, 0.2f) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
@@ -429,13 +445,16 @@ fun KeyButton(
                     }
                 }
             .padding(LocalKeyVisualPadding.current)
-            .then(shadowModifier)
+            // 阴影层：必须在 clip 之前，它向外扩出阴影留白。
+            .then(shadowLayer)
             .clip(keyClipShape)
             .background(
                 if (isPressed) darkenKeyColor(backgroundColor, 0.2f)
                 else if (isHighlighted) backgroundColor.copy(alpha = 0.8f)
                 else backgroundColor
             )
+            // 高光/压暗层：必须在 background 之后才看得见。
+            .then(bevelLayer)
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
         contentAlignment = Alignment.Center
     ) {
@@ -619,7 +638,23 @@ fun SwipeableKeyButton(
     // 父层光标手势已接管横向滑动时，本键不再判定点击（否则会"移动光标 + 打出一个字母"）
     val cursorGestureActive = LocalCursorGestureActive.current
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // 立体感拆两层：阴影+键面在 clip 之前（阴影要外扩，不能被裁）；
+    // 高光+压暗必须在 background 之后，否则会被键面底色盖住。
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor, 0.2f) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     val keyLabelFontFamily = AppFonts.keyLabelFontFamily
@@ -904,13 +939,15 @@ fun SwipeableKeyButton(
                     KeyHeightCache.value = dp
                 }
             }
-            .then(shadowModifier)
+            // 阴影层：必须在 clip 之前，它向外扩出阴影留白。
+            .then(shadowLayer)
             .clip(keyClipShape)
             .background(
                 if (isPressed) backgroundColor.copy(alpha = 0.7f)
                 else if (isHighlighted) backgroundColor.copy(alpha = 0.8f)
                 else backgroundColor
             )
+            .then(bevelLayer)
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
         contentAlignment = if (layoutMode == ButtonLayout.COMPACT) Alignment.TopStart else Alignment.Center
     ) {
@@ -1220,7 +1257,23 @@ fun IconKeyButton(
     val density = LocalDensity.current
     val currentOnClick by rememberUpdatedState(onClick)
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // 立体感拆两层：阴影+键面在 clip 之前（阴影要外扩，不能被裁）；
+    // 高光+压暗必须在 background 之后，否则会被键面底色盖住。
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor, 0.2f) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
@@ -1246,13 +1299,15 @@ fun IconKeyButton(
                 )
             }
             .padding(LocalKeyVisualPadding.current)
-            .then(shadowModifier)
+            // 阴影层：必须在 clip 之前，它向外扩出阴影留白。
+            .then(shadowLayer)
             .clip(keyClipShape)
             .background(
                 if (isPressed) darkenKeyColor(backgroundColor, 0.1f)
                 else if (isHighlighted) darkenKeyColor(backgroundColor, 0.2f)
                 else backgroundColor
             )
+            .then(bevelLayer)
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
         contentAlignment = Alignment.Center
     ) {
@@ -1396,7 +1451,23 @@ fun SwipeableIconKeyButton(
         }
     }
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // 立体感拆两层：阴影+键面在 clip 之前（阴影要外扩，不能被裁）；
+    // 高光+压暗必须在 background 之后，否则会被键面底色盖住。
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor, 0.2f) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
     
@@ -1694,13 +1765,16 @@ fun SwipeableIconKeyButton(
                 buttonBounds = coordinates.boundsInRoot()
             }
             .padding(LocalKeyVisualPadding.current)
-            .then(shadowModifier)
+            // 阴影层：必须在 clip 之前，它向外扩出阴影留白。
+            .then(shadowLayer)
             .clip(keyClipShape)
             .background(
                 if (isPressed) darkenKeyColor(backgroundColor, 0.2f)
                 else if (isHighlighted) backgroundColor.copy(alpha = 0.8f)
                 else backgroundColor
             )
+            // 高光/压暗层：必须在 background 之后才看得见。
+            .then(bevelLayer)
             .keySemantics(a11yDescription, a11yState) { currentOnClick() },
         contentAlignment = Alignment.Center
     ) {

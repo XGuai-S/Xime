@@ -157,6 +157,24 @@ object JsPluginContract {
     const val PATH_BACKUP_REMOVE = "backup.remove"
     const val PATH_BACKUP_TEST = "backup.test"
 
+    // ---- backup：文件级增量（v3.1 新增，插件不支持时宿主回退整包） ----
+    //
+    // 整包模式的代价：每次备份都要重新上传完整 zip（几十 MB），即使只有几个词变了；
+    // 而且包内 userdb 是 librime 导出的文本快照，恢复时要再合并一次。
+    // 文件级模式直接传**原始文件**，宿主按内容哈希只传变化的那几个，恢复时逐文件写回。
+
+    /** 列出远端已存的文件：返回 `[{path, sha256, size}]`（无远端目录时返回空数组，不是 null）。 */
+    const val PATH_BACKUP_LIST_FILES = "backup.listFiles"
+
+    /** 上传单个文件：入参 `{path, sha256, size, blobId}`，blobId 交给 host.http.upload 流式发送。 */
+    const val PATH_BACKUP_PUSH_FILE = "backup.pushFile"
+
+    /** 下载单个文件：入参 `path`，返回 host.http.download 落盘的 blob 句柄字符串。 */
+    const val PATH_BACKUP_PULL_FILE = "backup.pullFile"
+
+    /** 删除远端单个文件：入参 `path`，返回 bool（不存在也视为成功）。 */
+    const val PATH_BACKUP_REMOVE_FILE = "backup.removeFile"
+
     // ---- 网络回调槽（ws / sse） ----
     const val SLOT_WS_OPEN = "ws.onOpen"
     const val SLOT_WS_MESSAGE = "ws.onMessage"

@@ -441,9 +441,13 @@ onCursorMove = { direction -> handleCursorMove(service, direction) },
                     service.rimeEngine.setInput(pinyin)
                 }
             }
-            val composition = service.rimeEngine.getComposition()
+            // 锁竞争失败时返回 null：此时不能拿「空组合」冒充真实状态写回 UI，
+            // 否则候选栏/编码会回退一帧（表现为跳字、闪候选）。
+            val composition = service.rimeEngine.getCompositionOrNull() ?: return@launch
             withContext(Dispatchers.Main) {
-                service.mainHandler.post { service.sessionController.applyComposition(composition) }
+                // 已经在主线程上下文里，直接用 applyComposition；
+                // 旧实现再套一层 mainHandler.post，等于二次投递，后到的旧结果会覆盖新状态。
+                service.sessionController.applyComposition(composition)
             }
         }
     }

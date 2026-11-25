@@ -135,7 +135,11 @@ class XimeAiHostBridge(
         }.getOrDefault("")
 
     override fun readSystemClipboardText(): String =
-        runCatching { com.kingzcheung.xime.clipboard.ClipboardManager.getInstance(app).getCurrentClipboardText() }
+        // 胶囊会把上下文交给 AI 模型，敏感内容不得进入
+        runCatching {
+            com.kingzcheung.xime.clipboard.ClipboardManager.getInstance(app)
+                .getCurrentClipboardText(allowSensitive = false)
+        }
             .getOrNull().orEmpty()
 
     override fun syncSystemClipboardIfNeeded(allowFreshBanner: Boolean) {

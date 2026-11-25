@@ -130,8 +130,11 @@ object PluginManager {
                 val reclaimed = ctx.lifecycleManager.reclaimIdlePlugins(
                     nowMs = now,
                     idleMs = idleMs,
-                    // 剪贴板同步插件常驻后台跑同步循环，回收即断链，永不回收
-                    excludeCategories = setOf(com.kingzcheung.xime.plugin.core.model.PluginCategory.CLIPBOARD_SYNC),
+                    // 后台同步和定时备份依赖已加载的插件实例。
+                    excludeCategories = setOf(
+                        com.kingzcheung.xime.plugin.core.model.PluginCategory.CLIPBOARD_SYNC,
+                        com.kingzcheung.xime.plugin.core.model.PluginCategory.BACKUP,
+                    ),
                 )
                 if (reclaimed.isNotEmpty()) {
                     Log.i(TAG, "reclaimed idle plugins: $reclaimed")
@@ -216,18 +219,64 @@ object PluginManager {
         return result
     }
 
+    /** 记录一次「插件被使用」；宿主热路径（候选变换等）直接访问运行时时需自行调用。 */
+    fun touchPlugin(pluginId: String) {
+        frameworkContext?.lifecycleManager?.touchPlugin(pluginId)
+    }
+
     fun getPluginInstance(pluginId: String): IPluginEntryClass? {
         // 取用即视为一次使用：刷新空闲计时，避免刚被调用的插件被回收
         frameworkContext?.lifecycleManager?.touchPlugin(pluginId)
-        return requireContext().pluginInstances[pluginId]
+        val existing = requireContext().pluginInstances[pluginId]
+        if (existing != null) return existing
+        // 实例缺失但插件仍启用 → 很可能被空闲回收掉了（reclaimIdlePlugins 不 relaunch）。
+        // 这里异步补一次加载，调用方本次仍拿到 null（各自有降级路径），
+        // 下次取用即可用。不 relaunch 的话一次误回收 = 该插件在本次进程内长期失效
+        // （表情空、ASR 降级、候选变换静默失效），只能重启恢复。
+        relaunchIfEnabled(pluginId)
+        return null
     }
+
+    /** 已启用但当前无实例时，异步补一次加载；并发调用只会有一个真正执行。 */
+    private fun relaunchIfEnabled(pluginId: String) {
+        val ctx = frameworkContext ?: return
+        if (relaunching.putIfAbsent(pluginId, true) != null) return
+        managerScope.launch {
+            try {
+                val enabled = runCatching { ctx.pluginRegistry.getPluginById(pluginId)?.enabled == true }
+                    .getOrDefault(false)
+                if (enabled && ctx.pluginInstances[pluginId] == null) {
+                    Log.i(TAG, "插件实例缺失（可能被空闲回收），异步重新加载: $pluginId")
+                    launchPlugin(pluginId)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "异步重新加载插件失败: $pluginId", e)
+            } finally {
+                relaunching.remove(pluginId)
+            }
+        }
+    }
+
+    /** 正在进行异步补加载的插件 id，避免同一插件并发拉起多个运行时。 */
+    private val relaunching = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     fun getPluginInfo(pluginId: String): LoadedPluginInfo? {
         return requireContext().loadedPlugins[pluginId]
     }
 
     fun getAllPluginInstances(): Map<String, IPluginEntryClass> {
-        return requireContext().pluginInstances.toMap()
+        val snapshot = requireContext().pluginInstances.toMap()
+        // 全量取用也视为「在用」：表情面板 / ASR 列表 / 工具列表都走这里，
+        // 取到的实例紧接着就会被调用。不 touch 的话这些插件 lastUsedAtMs 不更新，
+        // 活跃使用中也可能被空闲回收误杀。
+        //
+        // 注意回收后不会自动 relaunch（getPluginInstance 只读表），
+        // 一次误回收 = 该插件在本次进程内长期失效（表情空、ASR 降级、候选变换静默失效），
+        // 所以这里的记账是必要的，不是锦上添花。
+        frameworkContext?.lifecycleManager?.let { lm ->
+            for (id in snapshot.keys) lm.touchPlugin(id)
+        }
+        return snapshot
     }
 
     fun getAllInstallPlugins(): List<PluginInfo> {
@@ -243,9 +292,14 @@ object PluginManager {
     fun dispatchEvent(event: com.kingzcheung.xime.plugin.core.js.PluginEvent): Int {
         val context = frameworkContext ?: return 0
         var delivered = 0
-        for ((_, loaded) in context.loadedPlugins) {
+        for ((id, loaded) in context.loadedPlugins) {
             val runtime = loaded.script ?: continue
-            if (runtime.dispatchEvent(event)) delivered++
+            if (runtime.dispatchEvent(event)) {
+                // 事件投递成功也算「在用」：否则纯事件驱动的插件（如打字统计）
+                // lastUsedAtMs 永不更新，活跃使用中也可能被空闲回收误杀。
+                context.lifecycleManager.touchPlugin(id)
+                delivered++
+            }
         }
         return delivered
     }

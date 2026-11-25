@@ -1,0 +1,143 @@
+diff --git a/app/src/test/java/com/kingzcheung/xime/service/VoiceAbandonAuditTest.kt b/app/src/test/java/com/kingzcheung/xime/service/VoiceAbandonAuditTest.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/java/com/kingzcheung/xime/service/VoiceAbandonAuditTest.kt
+@@ -0,0 +1,138 @@
++package com.kingzcheung.xime.service
++
++import android.content.Context
++import android.content.SharedPreferences
++import android.os.Handler
++import android.view.inputmethod.InputConnection
++import com.kingzcheung.xime.settings.SettingsPreferences
++import com.kingzcheung.xime.speech.RecognitionState
++import com.kingzcheung.xime.speech.SpeechRecognitionManager
++import org.junit.Before
++import org.junit.Rule
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.junit.rules.TemporaryFolder
++import org.mockito.ArgumentMatchers.anyInt
++import org.mockito.ArgumentMatchers.anyLong
++import org.mockito.Mock
++import org.mockito.Mockito.never
++import org.mockito.Mockito.verify
++import org.mockito.junit.MockitoJUnitRunner
++import org.mockito.kotlin.any
++import org.mockito.kotlin.argumentCaptor
++import org.mockito.kotlin.eq
++import org.mockito.kotlin.whenever
++
++/** Drives captured callbacks only; never starts a real recognizer or input connection. */
++@RunWith(MockitoJUnitRunner.Silent::class)
++class VoiceAbandonAuditTest {
++    @get:Rule val temporaryFolder = TemporaryFolder()
++
++    @Mock private lateinit var context: Context
++    @Mock private lateinit var preferences: SharedPreferences
++    @Mock private lateinit var editorA: InputConnection
++    @Mock private lateinit var editorB: InputConnection
++    @Mock private lateinit var manager: SpeechRecognitionManager
++    @Mock private lateinit var mainHandler: Handler
++
++    private lateinit var handler: VoiceRecognitionHandler
++    private lateinit var activeInputConnection: InputConnection
++    private lateinit var onResult: (String) -> Unit
++    private lateinit var onPartial: (String) -> Unit
++    private lateinit var onState: (RecognitionState) -> Unit
++    private val posted = mutableListOf<Runnable>()
++
++    @Before
++    fun setUp() {
++        activeInputConnection = editorA
++        whenever(context.getSharedPreferences(any(), anyInt())).thenReturn(preferences)
++        whenever(context.applicationContext).thenReturn(context)
++        // Provider-name discovery may inspect model paths, all confined to this empty temp root.
++        whenever(context.filesDir).thenReturn(temporaryFolder.newFolder("context-files"))
++        whenever(preferences.getBoolean(any(), any<Boolean>())).thenAnswer { it.getArgument(1) }
++        whenever(preferences.getBoolean(eq(SettingsPreferences.KEY_STT_USE_LOCAL), any<Boolean>()))
++            .thenReturn(true)
++        whenever(mainHandler.postDelayed(any<Runnable>(), anyLong())).thenAnswer {
++            posted.add(it.getArgument(0))
++            true
++        }
++        whenever(mainHandler.removeCallbacks(any<Runnable>())).thenAnswer {
++            posted.remove(it.getArgument<Runnable>(0))
++        }
++
++        handler = VoiceRecognitionHandler(
++            context = context,
++            onStateChanged = {},
++            getState = { InputUIState() },
++            getInputConnection = { activeInputConnection },
++            managerFactory = { manager },
++            mainHandler = mainHandler,
++        )
++        handler.initialize()
++
++        val resultCaptor = argumentCaptor<(String) -> Unit>()
++        val partialCaptor = argumentCaptor<(String) -> Unit>()
++        val stateCaptor = argumentCaptor<(RecognitionState) -> Unit>()
++        val errorCaptor = argumentCaptor<(String, Boolean) -> Unit>()
++        verify(manager).setCallbacks(
++            resultCaptor.capture(), partialCaptor.capture(), stateCaptor.capture(),
++            errorCaptor.capture(), any(), any(),
++        )
++        onResult = resultCaptor.firstValue
++        onPartial = partialCaptor.firstValue
++        onState = stateCaptor.firstValue
++    }
++
++    private fun abandonAAndSwitchToB() {
++        onPartial("旧会话")
++        verify(editorA).setComposingText(eq("旧会话"), eq(1))
++        handler.abandonSession()
++        activeInputConnection = editorB
++    }
++
++    private fun assertBHasNoWrites() {
++        verify(editorB, never()).setComposingText(any(), anyInt())
++        verify(editorB, never()).commitText(any(), anyInt())
++        verify(editorB, never()).finishComposingText()
++        verify(editorB, never()).deleteSurroundingText(anyInt(), anyInt())
++    }
++
++    @Test
++    fun `multiple finals after abandonment cannot write to the next editor`() {
++        abandonAAndSwitchToB()
++        onResult("第一条尾包")
++        onResult("第二条尾包")
++        assertBHasNoWrites()
++    }
++
++    @Test
++    fun `partial after abandoned final cannot write to the next editor`() {
++        abandonAAndSwitchToB()
++        onResult("旧最终结果")
++        onPartial("旧后续部分结果")
++        assertBHasNoWrites()
++    }
++
++    @Test
++    fun `late listening state cannot reopen an abandoned session`() {
++        abandonAAndSwitchToB()
++        // LISTENING is the actual recording state in the current RecognitionState enum.
++        onState(RecognitionState.LISTENING)
++        onPartial("迟到部分结果")
++        onResult("迟到最终结果")
++        assertBHasNoWrites()
++    }
++
++    @Test
++    fun `explicit start allows a new session to write to the next editor`() {
++        abandonAAndSwitchToB()
++        handler.startRecognition()
++        verify(manager).startRecognition()
++        onState(RecognitionState.LISTENING)
++        onPartial("新会话")
++        verify(editorB).setComposingText(eq("新会话"), eq(1))
++        onResult("新会话")
++        verify(editorB).finishComposingText()
++        verify(editorB).commitText(eq("，"), eq(1))
++    }
++}

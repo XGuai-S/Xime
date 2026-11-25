@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.settings
+package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -74,7 +74,7 @@ class WirelessImportHelper(private val context: Context) {
         for (port in 5000..5099) {
             try {
                 val sock = java.net.ServerSocket()
-                sock.bind(java.net.InetSocketAddress(port))
+                try { sock.bind(java.net.InetSocketAddress(port)) } catch (e: Exception) { runCatching { sock.close() }; throw e }
                 sock.close()
                 return port
             } catch (_: Exception) { }
@@ -129,13 +129,15 @@ class WirelessImportHelper(private val context: Context) {
                     val path = call.request.path()
                     val isStatic = path == "/" || path.startsWith("/assets/")
                     if (!isStatic && !isAuthorized(call)) {
-                        Log.w(TAG, "Wireless import: unauthorized ${call.request.httpMethod.value} $path")
+                        Log.w(TAG, "Wireless import: unauthorized request")
                         call.respond(HttpStatusCode.Unauthorized)
                         finish()
                     }
                 }
                 // React 前端：index.html 与静态资源打包在 assets/www/
                 get("/") {
+                    call.response.header("Referrer-Policy", "no-referrer")
+                    call.response.header("Cache-Control", "no-store")
                     serveAsset(call, "www/index.html")
                 }
                 get("/assets/{file...}") {
@@ -211,7 +213,7 @@ class WirelessImportHelper(private val context: Context) {
             }
         }.start(wait = false)
 
-        Log.i(TAG, "Server started at $url")
+        Log.i(TAG, "Wireless import server started on port $port")
         return url
     }
 
@@ -398,26 +400,11 @@ class WirelessImportHelper(private val context: Context) {
         call.respondBytes(bytes, mime)
     }
 
-    /** 解析前端传来的路径（filesDir 的绝对路径或其相对路径），阻止目录穿越（..）。 */
-    private fun safeResolve(rawPath: String?): File? {
-        if (rawPath.isNullOrBlank()) return null
-        val root = context.filesDir ?: return null
-        val normalized = rawPath.replace('\\', '/')
-        val candidate = File(normalized).canonicalFile
-        val rootCanonical = root.canonicalFile
-        return if (candidate.canonicalPath.startsWith(rootCanonical.canonicalPath)) {
-            candidate
-        } else {
-            // 回退：按相对 filesDir 解析
-            val rel = normalized.trimStart('/')
-            if (rel.split('/').any { it == ".." }) return null
-            val c2 = File(root, rel).canonicalFile
-            if (c2.canonicalPath.startsWith(rootCanonical.canonicalPath)) c2 else null
-        }
-    }
+    private fun safeResolve(rawPath: String?): File? =
+        context.filesDir?.let { resolveWirelessImportPath(it, rawPath) }
 
     /** 递归构建数据目录树。 */
-private fun buildNode(file: File): FileNode {
+    private fun buildNode(file: File): FileNode {
         if (!file.isDirectory) {
             return FileNode(
                 name = file.name,
@@ -428,6 +415,7 @@ private fun buildNode(file: File): FileNode {
             )
         }
         val children = file.listFiles()
+            ?.filterNot { java.nio.file.Files.isSymbolicLink(it.toPath()) }
             ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
             ?.map { buildNode(it) }
             .orEmpty()

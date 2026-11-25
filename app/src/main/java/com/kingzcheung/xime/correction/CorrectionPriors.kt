@@ -337,6 +337,9 @@ object CorrectionPriors {
     /**
      * 与当前 Rime 组合编码对齐后推送先验。
      * 在每次按键处理完、拿到 result.inputText 后调用。
+     *
+     * **这是每键热路径**：诊断字符串（每字符一次 `String.format` + 拼接）和
+     * `FileLogger.d` 只在 DEBUG 级日志真的会落盘时才构造，默认级别下不付这份开销。
      */
     @Synchronized
     fun syncWithComposition(inputText: String) {
@@ -344,13 +347,18 @@ object CorrectionPriors {
         val code = inputText.lowercase()
         if (code.isEmpty()) {
             CorrectionNative.clearTaps()
-            lastPush = "编码为空 → 清空先验"
+            if (FileLogger.isDebugEnabled()) {
+                lastPush = "编码为空 → 清空先验"
+                FileLogger.d(TAG, lastPush)
+            }
             return
         }
         if (letters.size < code.length) {
             CorrectionNative.clearTaps()
-            lastPush = "按键数(${letters.size})<编码(${code.length}) → 清空"
-            FileLogger.d(TAG, lastPush)
+            if (FileLogger.isDebugEnabled()) {
+                lastPush = "按键数(${letters.size})<编码(${code.length}) → 清空"
+                FileLogger.d(TAG, lastPush)
+            }
             return
         }
         val n = code.length
@@ -359,8 +367,10 @@ object CorrectionPriors {
         for (i in 0 until n) {
             if (arr[off + i] != code[i]) {
                 CorrectionNative.clearTaps()
-                lastPush = "按键序列与编码不一致(${String(arr)} vs $code) → 清空"
-                FileLogger.d(TAG, lastPush)
+                if (FileLogger.isDebugEnabled()) {
+                    lastPush = "按键序列与编码不一致(${String(arr)} vs $code) → 清空"
+                    FileLogger.d(TAG, lastPush)
+                }
                 return
             }
         }
@@ -369,15 +379,19 @@ object CorrectionPriors {
         val oy = FloatArray(n)
         val oxa = offX.toFloatArray()
         val oya = offY.toFloatArray()
-        val sb = StringBuilder()
         for (i in 0 until n) {
             l[i] = code[i].code.toByte()
             ox[i] = oxa[off + i]
             oy[i] = oya[off + i]
-            sb.append(String.format("%.2f/%.2f ", ox[i], oy[i]))
         }
         CorrectionNative.setTaps(l, ox, oy)
-        lastPush = "已推送 code=$code off=[$sb]"
-        FileLogger.d(TAG, lastPush)
+        if (FileLogger.isDebugEnabled()) {
+            val sb = StringBuilder()
+            for (i in 0 until n) {
+                sb.append(String.format("%.2f/%.2f ", ox[i], oy[i]))
+            }
+            lastPush = "已推送 code=$code off=[$sb]"
+            FileLogger.d(TAG, lastPush)
+        }
     }
 }

@@ -71,6 +71,7 @@ object ModelIndexLoader {
 
     private fun parseModelEntry(entry: YamlMap): ModelInfo? {
         val id = (entry["id"] as? YamlScalar)?.content ?: return null
+        if (!ModelPaths.isSafeId(id)) return null
         val name = (entry["name"] as? YamlScalar)?.content ?: return null
         val description = (entry["description"] as? YamlScalar)?.content ?: ""
         val categoryStr = (entry["category"] as? YamlScalar)?.content ?: "other"
@@ -104,11 +105,13 @@ object ModelIndexLoader {
         val archiveUrl = (versionNode["archive"] as? YamlMap)
             ?.let { (it["url"] as? YamlScalar)?.content }
 
+        val files = parseFiles(versionNode)
+        if (runCatching { ModelPaths.validateFiles(files) }.isFailure) return null
         return ModelVersion(
             version = version,
             date = date,
             changelog = changelog,
-            files = parseFiles(versionNode),
+            files = files,
             archiveUrl = archiveUrl,
             size = size,
             sha256 = sha256

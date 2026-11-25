@@ -364,16 +364,16 @@ class JsAiPluginTest {
             val state = adapter.getPanelState("ctx")
             // 翻译插件接受宿主上下文预填（选中文本优先；空串 = 空框手输）
             assertEquals("ctx", state.inputText)
-            // 控件行：源语言 select + 互换 button + 目标语言 select
+            // 四控件契约：引擎、源语言、互换、目标语言。
             val ui = state.ui
             assertNotNull("direct 面板应声明控件行", ui)
-            assertEquals(3, ui!!.size)
-            assertEquals(UiNodeType.SELECT, ui[0].type)
-            assertEquals("sourceLang", ui[0].key)
-            assertEquals(UiNodeType.BUTTON, ui[1].type)
-            assertEquals("swapLang", ui[1].key)
-            assertEquals(UiNodeType.SELECT, ui[2].type)
-            assertEquals("targetLang", ui[2].key)
+            assertEquals(4, ui!!.size)
+            assertEquals(listOf("engine", "sourceLang", "swapLang", "targetLang"), ui.map { it.key })
+            assertEquals(
+                listOf(UiNodeType.SELECT, UiNodeType.SELECT, UiNodeType.BUTTON, UiNodeType.SELECT),
+                ui.map { it.type }
+            )
+            assertEquals("qwen", ui[0].value)
 
             // 语言选择经 onInput 回流并持久化到配置（值为 qwen-mt 官方语言枚举）
             adapter.onPanelInput("sourceLang", "English")
@@ -383,9 +383,16 @@ class JsAiPluginTest {
 
             // 互换按钮后宿主重拉 state：源/目标对调
             adapter.onPanelAction("swapLang")
-            val swapped = adapter.getPanelState("")
-            assertEquals("Japanese", swapped.ui!![0].value)
-            assertEquals("English", swapped.ui!![2].value)
+            val swapped = adapter.getPanelState("").ui!!.associateBy { it.key }
+            assertEquals("Japanese", swapped["sourceLang"]!!.value)
+            assertEquals("English", swapped["targetLang"]!!.value)
+
+            adapter.onPanelInput("sourceLang", "auto")
+            adapter.onPanelInput("targetLang", "Chinese")
+            adapter.onPanelAction("swapLang")
+            val automatic = adapter.getPanelState("").ui!!.associateBy { it.key }
+            assertEquals("auto", automatic["sourceLang"]!!.value)
+            assertEquals("Chinese", automatic["targetLang"]!!.value)
         } finally {
             runtime.close()
         }

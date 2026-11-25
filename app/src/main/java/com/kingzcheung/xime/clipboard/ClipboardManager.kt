@@ -6,7 +6,6 @@ import android.content.ContentResolver
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -16,9 +15,13 @@ import androidx.core.content.FileProvider
 import com.kingzcheung.xime.clipboard.db.ClipboardDatabase
 import com.kingzcheung.xime.clipboard.db.ClipboardEntry
 import com.kingzcheung.xime.plugin.core.api.ClipboardProfile
+import com.kingzcheung.xime.service.otp.OtpCollector
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -53,6 +56,7 @@ data class ClipboardItem(
     val height: Int = 0,
 ) {
     val isImage: Boolean get() = type == ClipboardEntry.TYPE_IMAGE
+    val isOtp: Boolean get() = type == ClipboardEntry.TYPE_OTP
 }
 
 /** 图片占用快照（剪贴板设置页"已用空间"用）。 */
@@ -67,6 +71,9 @@ class ClipboardManager private constructor(private val context: Context) {
     companion object {
         private const val TAG = "ClipboardManager"
         private const val MAX_ITEMS = 1000
+
+        /** 存量敏感重扫的条目上限（见 rescanLegacySensitiveEntries）。 */
+        private const val RESCAN_LIMIT = 200
         private const val MAX_QUICK_SEND_ITEMS = 2000
         private const val PREFS_NAME = "clipboard_prefs"
         private const val KEY_CLIPBOARD_ITEMS = "clipboard_items"
@@ -114,7 +121,7 @@ class ClipboardManager private constructor(private val context: Context) {
     private val imageStore = ClipboardImageStore(ClipboardImageStore.rootDirOf(context.filesDir))
 
     /** 图片落盘/入库/配额收敛互斥：避免并发采集时孤儿清理误删刚写入的文件。 */
-    private val imageMutex = Mutex()
+    private val imageMutex = ClipboardImageStore.mutationMutex
 
     /** 文本入库的「查重 + 插入」串行化锁（见 addItem）。 */
     private val textWriteMutex = Mutex()
@@ -249,7 +256,7 @@ class ClipboardManager private constructor(private val context: Context) {
             if (clipData != null && clipData.itemCount > 0) {
                 val description = clipData.description
 
-                // 敏感剪贴板（密码管理器等，API 33+ 系统标记）不入库
+                // 敏感剪贴板（密码管理器等）不入库，兼容旧系统同名标记。
                 if (isSensitiveClip(description)) {
                     FileLogger.d(TAG, "Sensitive clip ignored")
                     clearSelfClipboardImage()
@@ -347,15 +354,9 @@ class ClipboardManager private constructor(private val context: Context) {
         }
     }
 
-    /** 敏感剪贴板判定（API 33+ 由系统标记 `ClipDescription.EXTRA_IS_SENSITIVE`）。 */
-    private fun isSensitiveClip(description: ClipDescription): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
-        return try {
-            description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
-        } catch (e: Exception) {
-            false
-        }
-    }
+    /** 与公开读取共用敏感判定，旧系统也识别同名 extras；读取异常时拒收。 */
+    private fun isSensitiveClip(description: ClipDescription?): Boolean =
+        ClipboardPrivacy.isSensitive(description)
 
     /** 剪贴板图片 URI：仅接受声明图片 MIME 且首项带 uri 的 ClipData。 */
     private fun imageUriOf(clipData: ClipData, description: ClipDescription): Uri? {
@@ -711,8 +712,31 @@ class ClipboardManager private constructor(private val context: Context) {
     init {
         migrateLegacyData()
         scope.launch {
-            dao.observeAll().collect { entries ->
-                _clipboardItems.value = orderForPanel(entries)
+            dao.observeAll().collectLatest { entries ->
+                var visible = entries
+                while (true) {
+                    val now = System.currentTimeMillis()
+                    val fresh = visible.filter {
+                        it.type != ClipboardEntry.TYPE_OTP || OtpClipboardPolicy.isFresh(it.timestamp, now)
+                    }
+                    _clipboardItems.value = orderForPanel(fresh)
+                    if (fresh.size != visible.size) {
+                        try {
+                            dao.deleteExpiredOtp(now - OtpCollector.FRESH_WINDOW_MS, now)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            FileLogger.e(TAG, "验证码临时条目清理失败", e)
+                            delay(5_000)
+                            continue
+                        }
+                        visible = fresh
+                    }
+                    val nextExpiry = fresh.asSequence()
+                        .filter { it.type == ClipboardEntry.TYPE_OTP }
+                        .minOfOrNull { it.timestamp + OtpCollector.FRESH_WINDOW_MS } ?: break
+                    delay((nextExpiry - System.currentTimeMillis()).coerceAtLeast(0))
+                }
             }
         }
         scope.launch {
@@ -736,7 +760,46 @@ class ClipboardManager private constructor(private val context: Context) {
             runCatching { MediaBridge.sweepStale(context) }
                 .onFailure { Log.w(TAG, "Media bridge startup sweep failed", it) }
         }
+        // 存量重扫：3.4.14 之前入库的敏感内容没有 sensitive 标记，会照常进备份 zip 与云同步。
+        //
+        // 单独 launch 而不是跟在上面三条自检后面：那三条要扫图片目录/缓存（涉及磁盘遍历），
+        // 串行执行会让重扫排到最后；而重扫是**隐私相关**的，越早完成越好。
+        // 它自己只读数据库 + 跑正则，与目录扫描无依赖，可以并行。
+        scope.launch {
+            runCatching { rescanLegacySensitiveEntries() }
+                .onFailure { Log.w(TAG, "剪贴板敏感存量重扫失败", it) }
+        }
         startListening()
+    }
+
+    /**
+     * 存量重扫：把历史遗留的「含高风险凭据但仍是普通文本」的条目改判为敏感类型。
+     *
+     * 为什么需要：3.4.14 才引入内容级敏感识别，此前入库的密码/卡号都是 `type=text`，
+     * 会照常进备份 zip（明文）并推云同步。升级用户的历史数据必须补标一次。
+     *
+     * 幂等：已标记的条目不再是 `type='text'`，下次启动扫不到。
+     * 只扫最近 [RESCAN_LIMIT] 条（按 timestamp 倒序）：全表上限是 1000，
+     * 每条都要跑一遍正则，扫全部会在每次启动时白付 CPU；而需要补标的
+     * 恰恰是最近复制的内容，旧条目本来就会被 trim 淘汰。
+     */
+    private suspend fun rescanLegacySensitiveEntries() {
+        val texts = runCatching { dao.textEntriesForRescan(RESCAN_LIMIT) }.getOrNull() ?: return
+        if (texts.isEmpty()) return
+        var marked = 0
+        for (entry in texts) {
+            val text = entry.text
+            if (text.isBlank()) continue
+            if (ClipboardSensitivity.containsHighRiskCredential(text)) {
+                // 按实际更新行数计数：并发场景下该行可能刚被删除或已标记，
+                // UPDATE 影响 0 行不算补标成功（否则日志会虚报数量）。
+                runCatching { dao.markSensitive(entry.id) }
+                    .onSuccess { if (it > 0) marked++ }
+            }
+        }
+        if (marked > 0) {
+            FileLogger.i(TAG, "存量重扫：$marked 条历史条目补标为敏感（不再进备份/同步）")
+        }
     }
 
     /**
@@ -956,7 +1019,7 @@ class ClipboardManager private constructor(private val context: Context) {
             FileLogger.w(TAG, "补采命中超长文本 len=${text.length}，未入库")
             return
         }
-        val known = _clipboardItems.value.firstOrNull { it.text == text }
+        val known = _clipboardItems.value.firstOrNull { it.text == text && !it.isOtp }
         // 「还在候选栏窗口内」与「未被消费」是两件事：复制后隔一段时间才弹出键盘时，
         // 条目可能未消费但已超出展示窗口，此时必须重新入库让它回到候选栏。
         // 判据必须与 [getRecentItems] 的展示窗口一致（CANDIDATE_WINDOW_MS），
@@ -1005,6 +1068,25 @@ class ClipboardManager private constructor(private val context: Context) {
      */
     internal val CANDIDATE_WINDOW_MS = 30 * 60 * 1000L
 
+    /** 通知验证码仅作短期本地条目，不发出同步/插件变更事件。 */
+    fun addOtp(text: String, capturedAt: Long) {
+        if (text.length !in 4..8 || text.any { it !in '0'..'9' }) return
+        if (!OtpClipboardPolicy.isFresh(capturedAt, System.currentTimeMillis())) return
+        scope.launch {
+            try {
+                textWriteMutex.withLock {
+                    if (OtpClipboardPolicy.isFresh(capturedAt, System.currentTimeMillis())) {
+                        dao.upsertOtp(text, capturedAt)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                FileLogger.e(TAG, "验证码临时保存失败", e)
+            }
+        }
+    }
+
     fun addItem(text: String) {
         if (text.isBlank()) return
         // 超大文本（几 MB 的 JSON/日志）会把整串写进 Room + StateFlow + 候选栏，
@@ -1022,13 +1104,28 @@ class ClipboardManager private constructor(private val context: Context) {
         lastAddAt = now
         scope.launch {
             var rowId = 0L
+            // 类型要在发射事件时一起带出去：同步桥按 item.type 决定是否外传
+            // （OtpClipboardPolicy.canSync 排除 TYPE_SENSITIVE）。只存库不带出去的话，
+            // 事件里 type 会退回默认 TYPE_TEXT → 敏感凭据被推上云端。
+            var entryType = ClipboardEntry.TYPE_TEXT
             runCatching {
                 // 串行化「按文本去重 + 插入」：监听回调与键盘补采是两条独立链路，
                 // upsertAndTrim 内部是「先 findByText 再 insert」，并发时两边都可能读到
                 // null，插出两行同文本（面板出现重复卡片，markConsumed(text) 还会标错行）。
                 // 库里的 text 索引不是唯一索引，靠 SQL 挡不住。
+                // 内容级敏感识别：密码/证件号/银行卡/密钥这类用户复制的明文，
+                // 仍要入库（用户复制完要能粘回去），但标记为 TYPE_SENSITIVE 以排除
+                // 备份与云同步——那两处是真正的外泄面（zip 明文 + 上传第三方云）。
+                entryType = if (ClipboardSensitivity.containsHighRiskCredential(text)) {
+                    ClipboardEntry.TYPE_SENSITIVE
+                } else {
+                    ClipboardEntry.TYPE_TEXT
+                }
+                if (entryType == ClipboardEntry.TYPE_SENSITIVE) {
+                    FileLogger.i(TAG, "剪贴板入库：含高风险凭据，标记为敏感条目（不进备份/同步）")
+                }
                 rowId = textWriteMutex.withLock {
-                    dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS)
+                    dao.upsertAndTrim(text, System.currentTimeMillis(), MAX_ITEMS, entryType)
                 }
             }.onFailure {
                 // 入库失败必须留痕：用户只会看到"复制了没进面板"，无从判断是采集没触发
@@ -1043,7 +1140,8 @@ class ClipboardManager private constructor(private val context: Context) {
                 ClipboardItem(
                     id = rowId,
                     text = text,
-                    timestamp = System.currentTimeMillis()
+                    timestamp = System.currentTimeMillis(),
+                    type = entryType
                 )
             )
         }
@@ -1102,6 +1200,7 @@ class ClipboardManager private constructor(private val context: Context) {
     fun splitItem(id: Long) {
         scope.launch {
             val item = _clipboardItems.value.find { it.id == id } ?: return@launch
+            if (item.isOtp) return@launch
             dao.deleteClipboardById(id)
             val now = System.currentTimeMillis()
             item.text.forEachIndexed { index, char ->
@@ -1163,6 +1262,12 @@ class ClipboardManager private constructor(private val context: Context) {
 
     fun updateQuickSendItem(id: Long, newText: String, newCode: String = ""): Boolean {
         if (newText.isBlank()) return false
+        // 快捷发送会随完整备份外传（backupEntries 收 isQuickSend 行），
+        // 手动编辑进去的密码/卡号同样要拦。与 addQuickSend 的提升路径同口径。
+        if (ClipboardSensitivity.containsHighRiskCredential(newText)) {
+            FileLogger.w(TAG, "拒绝把含高风险凭据的文本设为快捷发送")
+            return false
+        }
         val index = _quickSendItems.value.indexOfFirst { it.id == id }
         if (index < 0) return false
         scope.launch {
@@ -1171,11 +1276,23 @@ class ClipboardManager private constructor(private val context: Context) {
         return true
     }
 
-    fun addQuickSendItem(text: String, code: String = "") {
-        if (text.isBlank()) return
+    /**
+     * 新建快捷发送条目。
+     *
+     * @return false = 被拒绝（空白文本或含高风险凭据）。调用方**必须**据此提示用户，
+     *   否则用户看到输入框清空了、列表里却没出现，会以为 App 坏了。
+     */
+    fun addQuickSendItem(text: String, code: String = ""): Boolean {
+        if (text.isBlank()) return false
+        // 快捷发送条目会进备份包，敏感内容不得写入
+        if (ClipboardSensitivity.containsHighRiskCredential(text)) {
+            FileLogger.w(TAG, "拒绝把含高风险凭据的文本设为快捷发送")
+            return false
+        }
         scope.launch {
             dao.insertQuickSend(text, code.trim(), System.currentTimeMillis(), MAX_QUICK_SEND_ITEMS)
         }
+        return true
     }
 
     /**
@@ -1201,8 +1318,7 @@ class ClipboardManager private constructor(private val context: Context) {
         // OnPrimaryClipChangedListener，而这次回调正是「点选剪贴板上屏后，候选栏又把它显示
         // 出来」的源头（采集 → 该行 consumed 被 revive 复位 → 又进候选栏）。剪贴板候选上屏
         // 时内容本来就在剪贴板里，绝大多数情况都是空操作。
-        val currentText = runCatching { getCurrentClipboardText() }.getOrNull()
-        if (ClipboardSelfWritePolicy.isNoOpWrite(currentText, text)) {
+        if (ClipboardPrivacy.isNoOpWrite(text) { androidClipboardManager.primaryClip }) {
             FileLogger.d(TAG, "copyToSystemClipboard skipped: clipboard already holds same text (len=${text.length})")
             return true
         }
@@ -1220,11 +1336,21 @@ class ClipboardManager private constructor(private val context: Context) {
         }
     }
 
-    fun getCurrentClipboardText(): String? {
-        val clipData = androidClipboardManager.primaryClip
-        return if (clipData != null && clipData.itemCount > 0) {
-            clipData.getItemAt(0).text?.toString()
-        } else null
+    /**
+     * 当前系统剪贴板文本。
+     *
+     * @param allowSensitive 是否允许返回「内容含高风险凭据」的文本。
+     *   默认 true（用户主动粘贴场景需要它）；**交给第三方/上传的路径必须传 false**——
+     *   AI 工具面板会把这里的内容当 `inputText` 发给插件，而 ai-reply / qwen-translate
+     *   等插件声明了 allowCustomHosts，等于直发第三方 LLM。
+     */
+    fun getCurrentClipboardText(allowSensitive: Boolean = true): String? {
+        val text = ClipboardPrivacy.readText { androidClipboardManager.primaryClip } ?: return null
+        if (!allowSensitive && ClipboardSensitivity.containsHighRiskCredential(text)) {
+            FileLogger.w(TAG, "剪贴板内容含高风险凭据，已拒绝交给外发路径")
+            return null
+        }
+        return text
     }
 
     /**
@@ -1254,7 +1380,10 @@ class ClipboardManager private constructor(private val context: Context) {
         //   这正是「复制了内容有时候不显示」的主因；30 分钟足够覆盖「复制→切应用→
         //   回来粘贴」的真实节奏，又不会让昨天的内容一直挂着。
         return _clipboardItems.value.asSequence()
-            .filter { !it.consumed && now - it.timestamp < withinMs }
+            .filter {
+                !it.consumed && now - it.timestamp < withinMs &&
+                    (!it.isOtp || OtpClipboardPolicy.isFresh(it.timestamp, now))
+            }
             .take(maxItems)
             .toList()
     }
@@ -1272,7 +1401,7 @@ class ClipboardManager private constructor(private val context: Context) {
     fun markConsumed(text: String) {
         scope.launch {
             val item = _clipboardItems.value
-                .filter { it.text == text && !it.consumed }
+                .filter { it.text == text && !it.consumed && !it.isOtp }
                 .maxByOrNull { it.timestamp } ?: return@launch
             dao.markConsumed(item.id)
         }

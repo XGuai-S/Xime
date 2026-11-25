@@ -75,6 +75,26 @@ class RimeEngineLifecycleTest {
     }
 
     @Test
+    fun `同步失败仍重建输入会话并恢复页大小`() {
+        val jni = RepoFiles.file("app/src/main/jni/librime_jni/rime_jni.cc").readText()
+            .replace("\r\n", "\n")
+        val sync = jni.substringAfter("bool syncUserData()")
+            .substringBefore("用户词库操作统一包装")
+        val wait = sync.indexOf("while (rime->is_maintenance_mode())")
+        val beforeWait = sync.substringAfter("Bool result = rime->sync_user_data();").substringBefore("while (rime->is_maintenance_mode())")
+        assertFalse("同步返回 false 时也不能跳过会话恢复", Regex("\\breturn\\b").containsMatchIn(beforeWait))
+        val acquire = sync.indexOf("T9DigitUserDict::AcquireDb()")
+        assertTrue("维护退出后才恢复 T9 句柄", acquire > wait && wait >= 0)
+        val recreate = sync.indexOf("session_id_ = rime->create_session()", acquire + 1)
+        val reapply = sync.indexOf("reapplyPageSizeIfNeeded()", recreate + 1)
+        val result = sync.indexOf("return result;", reapply + 1)
+        assertTrue("同步后要释放数据库锁", acquire >= 0)
+        assertTrue("同步后要重建 session", recreate > acquire)
+        assertTrue("恢复 session 后重新应用页大小", reapply > recreate)
+        assertTrue("成功或失败状态在资源恢复后返回", result > reapply)
+    }
+
+    @Test
     fun `native 侧 endSession 不调用 finalize`() {
         // 契约的最后一环：C++ 侧 endSession 只能 destroy_session，不能 rime->finalize()
         val jni = RepoFiles.file("app/src/main/jni/librime_jni/rime_jni.cc").readText()

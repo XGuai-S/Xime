@@ -63,7 +63,13 @@ class PluginLifecycleManager(
             if (loadedPlugins.containsKey(pluginId)) {
                 return@withContext reloadPluginLocked(pluginId)
             }
-            launchSinglePlugin(pluginId)
+            launchSinglePlugin(pluginId).also { ok ->
+                // 记账放生命周期层内部：调用方漏了 touchPlugin 也不会让插件永久滞留内存
+                if (ok) {
+                    loadedAtMs[pluginId] = SystemClock.elapsedRealtime()
+                    touchPlugin(pluginId)
+                }
+            }
         } catch (e: Throwable) {
             if (loadedPlugins.containsKey(pluginId)) {
                 unloadPluginLocked(pluginId)
@@ -85,6 +91,17 @@ class PluginLifecycleManager(
      */
     private val lastUsedAtMs = ConcurrentHashMap<String, Long>()
 
+    /**
+     * 插件「加载完成」的时刻，用于给刚加载的插件一个回收宽限期。
+     *
+     * 为什么需要：加载流程是「先入 loadedPlugins，再 touchPlugin」，中间有窗口。
+     * 若回收恰好在这个窗口里跑到，`lastUsedAtMs` 还是 0L（无记账），
+     * 旧判定 `last == 0L` 直接放行 → 刚加载好的插件被立刻卸掉。
+     * 而热路径（getPluginInstance / getAllPluginInstances）只读表、**不会 relaunch**，
+     * 一次误回收等于该插件在本次进程内长期失效。
+     */
+    private val loadedAtMs = ConcurrentHashMap<String, Long>()
+
     internal fun touchPlugin(pluginId: String) {
         lastUsedAtMs[pluginId] = SystemClock.elapsedRealtime()
     }
@@ -96,8 +113,11 @@ class PluginLifecycleManager(
      *
      * 只回收**加载中且空闲超时**的插件；[excludeCategories] 里的类别永不回收
      * （剪贴板同步这类常驻后台的插件一回收就会断掉同步链路）。
-     * 回收走正常 [unloadPlugin]（onUnload → 关脚本 → 摘出表），下次调用方拿到 null 时
-     * 会重新 [launchPlugin]，因此不需要调用方改代码。
+     * 回收走正常 [unloadPlugin]（onUnload → 关脚本 → 摘出表）。
+     *
+     * 回收后**不会**在本次取用里立刻复活：调用方拿到的仍是 null（各自有降级路径）。
+     * 但 `PluginManager.getPluginInstance` 会在实例缺失且插件仍启用时异步补一次加载，
+     * 下次取用即可用——不补的话一次误回收就是本次进程内长期失效（表情空、ASR 降级）。
      */
     suspend fun reclaimIdlePlugins(
         nowMs: Long,
@@ -109,15 +129,24 @@ class PluginLifecycleManager(
             loadedPlugins.keys.filter { id ->
                 val info = loadedPlugins[id] ?: return@filter false
                 if (info.pluginInfo.category in excludeCategories) return@filter false
+                // 无记账（0L）视为「加载后从未被取用」：可回收，但必须过了加载宽限期。
+                // 加载流程是「先入表、后 touch」，中间窗口里 last 还是 0L；
+                // 不给宽限期的话刚加载好的插件可能被立刻卸掉，且热路径不会 relaunch，
+                // 该插件就在本次进程内永久失效。
                 val last = lastUsedAtMs[id] ?: 0L
-                last > 0L && nowMs - last >= idleMs
+                if (last == 0L) {
+                    val loadedAt = loadedAtMs[id] ?: return@filter false
+                    nowMs - loadedAt >= idleMs
+                } else {
+                    nowMs - last >= idleMs
+                }
             }
         }
         val reclaimed = ArrayList<String>(victims.size)
         for (id in victims) {
             // 二次确认：可能在筛选之后刚被调用过
             val last = lastUsedOf(id)
-            if (last <= 0L || nowMs - last < idleMs) continue
+            if (last > 0L && nowMs - last < idleMs) continue
             if (unloadPlugin(id)) reclaimed += id
         }
         return reclaimed
@@ -146,6 +175,7 @@ class PluginLifecycleManager(
         }
         pluginInstances.remove(pluginId)
         lastUsedAtMs.remove(pluginId)
+        loadedAtMs.remove(pluginId)
         true
     }
 
@@ -176,6 +206,11 @@ class PluginLifecycleManager(
         var successCount = 0
         for (plugin in enabledPlugins) {
             if (lockFor(plugin.id).withLock { launchSinglePlugin(plugin.id) }) {
+                // 启动加载也记一次使用：否则 lastUsedAtMs 无条目（0L），而
+                // reclaimIdlePlugins 的条件是 `last > 0L`，这些插件会**永远不会被回收**，
+                // 3.4.09 新增的空闲回收对它们等于没生效。
+                loadedAtMs[plugin.id] = SystemClock.elapsedRealtime()
+                touchPlugin(plugin.id)
                 successCount++
             } else {
                 Log.w(TAG, "Failed to load: ${plugin.id}")
@@ -227,7 +262,12 @@ class PluginLifecycleManager(
 
     private suspend fun reloadPluginLocked(pluginId: String): Boolean {
         unloadPluginLocked(pluginId)
-        return launchSinglePlugin(pluginId)
+        return launchSinglePlugin(pluginId).also { ok ->
+            if (ok) {
+                loadedAtMs[pluginId] = SystemClock.elapsedRealtime()
+                touchPlugin(pluginId)
+            }
+        }
     }
 
     private fun loadPlugin(plugin: PluginInfo): LoadedPluginInfo? {

@@ -21,14 +21,91 @@ interface ClipboardDao {
     @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 0 ORDER BY timestamp DESC")
     fun observeAll(): Flow<List<ClipboardEntry>>
 
-    @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 1 ORDER BY timestamp DESC")
+    /** 逻辑备份只读普通历史和快捷发送，不读取临时验证码。 */
+    @Query("SELECT * FROM clipboard_entries WHERE type IN ('text', 'image') ORDER BY timestamp DESC, id DESC LIMIT 20001")
+    suspend fun backupEntries(): List<ClipboardEntry>
+
+    /**
+     * 存量重扫用：取最近 [limit] 条普通文本，供重新判定敏感类型。
+     *
+     * 加 LIMIT 是必要的：条目上限 [com.kingzcheung.xime.clipboard.ClipboardManager.MAX_ITEMS]
+     * 是 1000，全表扫描 + 每条跑一遍正则会在每次启动时产生可观的 CPU 开销；
+     * 而真正需要补标的是「最近复制过的敏感内容」——太旧的条目用户早已不关心，
+     * 且它们本来就会被 trim 淘汰。取最近 200 条覆盖绝大多数实际场景。
+     */
+    @Query("SELECT id, text FROM clipboard_entries WHERE type = 'text' ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun textEntriesForRescan(limit: Int): List<ClipboardEntry>
+
+    /**
+     * 把已存在条目改判为敏感类型（存量迁移用）。
+     * @return 实际更新的行数（0 = 该行已不是 text 或已被删除）
+     */
+    @Query("UPDATE clipboard_entries SET type = 'sensitive' WHERE id = :id AND type = 'text'")
+    suspend fun markSensitive(id: Long): Int
+
+    /** 恢复仅插入缺失内容，不复活、裁剪、清库或覆盖本地编码/状态。 */
+    @Transaction
+    suspend fun mergeBackup(entries: List<ClipboardEntry>) {
+        entries.forEach { entry ->
+            if (entry.type == ClipboardEntry.TYPE_OTP) return@forEach
+            val existing = when {
+                entry.isQuickSend -> findQuickSendByTextAndCode(entry.text, entry.code)
+                entry.type == ClipboardEntry.TYPE_IMAGE -> findImageByHash(entry.imageHash)
+                entry.type == ClipboardEntry.TYPE_TEXT -> findByText(entry.text)
+                else -> return@forEach
+            }
+            if (existing == null) insert(entry.copy(id = 0))
+        }
+    }
+
+    @Query("SELECT * FROM clipboard_entries WHERE isQuickSend = 1 ORDER BY timestamp DESC, id DESC")
     fun observeQuickSend(): Flow<List<ClipboardEntry>>
 
-    @Query("SELECT * FROM clipboard_entries WHERE text = :text AND isQuickSend = 0 LIMIT 1")
+    @Query("SELECT * FROM clipboard_entries WHERE text = :text AND isQuickSend = 0 AND type = 'text' LIMIT 1")
     suspend fun findByText(text: String): ClipboardEntry?
+
+    /**
+     * 采集去重用的查询：**不限定 type**。
+     *
+     * 高风险凭据（密码/证件号/银行卡/密钥）入库时被标成 [ClipboardEntry.TYPE_SENSITIVE]，
+     * 而 [findByText] 只认 `type = 'text'`，于是同一段密码每复制一次就新插一行，
+     * 既绕过 [upsertAndTrim] 的去重/复活，也会把敏感明文在库里堆成多份。
+     */
+    @Query("SELECT * FROM clipboard_entries WHERE text = :text AND isQuickSend = 0 LIMIT 1")
+    suspend fun findAnyTextEntry(text: String): ClipboardEntry?
 
     @Query("SELECT * FROM clipboard_entries WHERE text = :text AND isQuickSend = 1 LIMIT 1")
     suspend fun findQuickSendByText(text: String): ClipboardEntry?
+
+    /** 完整备份允许同文异码，仅合并相同的快捷发送定义。 */
+    @Query("SELECT * FROM clipboard_entries WHERE text = :text AND code = :code AND isQuickSend = 1 AND type = 'text' LIMIT 1")
+    suspend fun findQuickSendByTextAndCode(text: String, code: String): ClipboardEntry?
+
+    @Query("SELECT * FROM clipboard_entries WHERE text = :text AND type = 'otp' AND isQuickSend = 0 LIMIT 1")
+    suspend fun findOtpByText(text: String): ClipboardEntry?
+
+    @Query("DELETE FROM clipboard_entries WHERE type = 'otp' AND (timestamp <= 0 OR timestamp <= :cutoff OR timestamp > :now)")
+    suspend fun deleteExpiredOtp(cutoff: Long, now: Long)
+
+    @Query("DELETE FROM clipboard_entries WHERE type = 'otp' AND id NOT IN (SELECT id FROM clipboard_entries WHERE type = 'otp' ORDER BY timestamp DESC, id DESC LIMIT 5)")
+    suspend fun trimOtp()
+
+    /** 验证码独立去重，不刷新重复通知的捕获时间，也不占用普通历史配额。 */
+    @Transaction
+    suspend fun upsertOtp(text: String, capturedAt: Long): Long {
+        val existing = findOtpByText(text)
+        if (existing != null && existing.timestamp >= capturedAt) return existing.id
+        val id = insert(
+            ClipboardEntry(
+                id = existing?.id ?: 0,
+                text = text,
+                timestamp = capturedAt,
+                type = ClipboardEntry.TYPE_OTP,
+            )
+        )
+        trimOtp()
+        return id
+    }
 
     /** 图片条目按内容 hash 去重（仅剪贴板，不含快捷发送）。 */
     @Query("SELECT * FROM clipboard_entries WHERE imageHash = :hash AND isQuickSend = 0 LIMIT 1")
@@ -81,10 +158,10 @@ interface ClipboardDao {
     @Query("DELETE FROM clipboard_entries WHERE isPinned = 0")
     suspend fun clearUnpinned()
 
-    @Query("SELECT COUNT(*) FROM clipboard_entries WHERE isPinned = 0")
+    @Query("SELECT COUNT(*) FROM clipboard_entries WHERE isPinned = 0 AND type <> 'otp'")
     suspend fun countUnpinned(): Int
 
-    @Query("DELETE FROM clipboard_entries WHERE isPinned = 0 AND id IN (SELECT id FROM clipboard_entries WHERE isPinned = 0 ORDER BY timestamp ASC LIMIT :limit)")
+    @Query("DELETE FROM clipboard_entries WHERE isPinned = 0 AND type <> 'otp' AND id IN (SELECT id FROM clipboard_entries WHERE isPinned = 0 AND type <> 'otp' ORDER BY timestamp ASC LIMIT :limit)")
     suspend fun trimUnpinned(limit: Int)
 
     /** 淘汰最旧的非置顶图片条目（置顶图片永不自动淘汰）。 */
@@ -109,7 +186,7 @@ interface ClipboardDao {
     suspend fun updateQuickSendItem(id: Long, text: String, code: String, now: Long)
 
     /** 置顶开关（仅剪贴板条目）：置顶项永不被数量/容量淘汰，且在面板里排最前。 */
-    @Query("UPDATE clipboard_entries SET isPinned = :pinned WHERE id = :id AND isQuickSend = 0")
+    @Query("UPDATE clipboard_entries SET isPinned = :pinned WHERE id = :id AND isQuickSend = 0 AND type <> 'otp'")
     suspend fun setPinned(id: Long, pinned: Boolean)
 
     @Query("UPDATE clipboard_entries SET consumed = 1 WHERE id = :id")
@@ -124,7 +201,7 @@ interface ClipboardDao {
      * 也能排到最前，但候选栏永远不会再提示，日志还全绿（走的是成功的 updateTimestamp
      * 分支），极难定位。图片条目同理（markConsumedById 之后同一张图再复制仍带 consumed）。
      */
-    @Query("UPDATE clipboard_entries SET timestamp = :timestamp, consumed = 0 WHERE id = :id")
+    @Query("UPDATE clipboard_entries SET timestamp = :timestamp, consumed = 0 WHERE id = :id AND type <> 'otp'")
     suspend fun revive(id: Long, timestamp: Long)
 
     @Query("DELETE FROM clipboard_entries")
@@ -141,14 +218,21 @@ interface ClipboardDao {
      * （剪贴板同步推送、插件、消费标记）拿到 id=0 后，任何按 id 回查/回写/去重的逻辑
      * 都静默失效——与 revive 注释里记录过的「consumed 永远停在 1、日志全绿」同类。
      */
-    suspend fun upsertAndTrim(text: String, now: Long, maxItems: Int): Long {
-        val existing = findByText(text)
+    suspend fun upsertAndTrim(
+        text: String,
+        now: Long,
+        maxItems: Int,
+        type: String = ClipboardEntry.TYPE_TEXT,
+    ): Long {
+        // 用不限定 type 的查询：敏感条目（TYPE_SENSITIVE）也要参与去重与复活，
+        // 否则同一段密码每复制一次就新插一行。
+        val existing = findAnyTextEntry(text)
         if (existing != null) {
             // 复活而不是单纯刷新时间：同一内容再次复制要重新进候选栏（见 revive 注释）
             revive(existing.id, now)
             return existing.id
         }
-        val newId = insert(ClipboardEntry(text = text, timestamp = now))
+        val newId = insert(ClipboardEntry(text = text, timestamp = now, type = type))
         val unpinned = countUnpinned()
         if (unpinned > maxItems) {
             trimUnpinned(unpinned - maxItems)
@@ -176,6 +260,17 @@ interface ClipboardDao {
     @Transaction
     suspend fun addQuickSend(sourceId: Long, now: Long, maxQuickSend: Int) {
         val source = findById(sourceId) ?: return
+        if (source.type == ClipboardEntry.TYPE_OTP) return
+        // 敏感条目不得提升为快捷发送：原来这里硬编码默认 type=TEXT，
+        // 会把 TYPE_SENSITIVE 洗成普通文本 → backupEntries() 的 IN('text','image')
+        // 立刻收录它 → 进明文备份 zip、上传云端、还给插件读。
+        // 用户恰恰最想把「常用密码/卡号」设成快捷，这条路径必须堵死。
+        if (source.type == ClipboardEntry.TYPE_SENSITIVE) {
+            com.kingzcheung.xime.util.FileLogger.w(
+                "ClipboardDao", "拒绝把敏感条目设为快捷发送"
+            )
+            return
+        }
         val existing = findQuickSendByText(source.text)
         if (existing != null) {
             updateTimestamp(existing.id, now)
@@ -185,7 +280,9 @@ interface ClipboardDao {
                     text = source.text,
                     timestamp = now,
                     isPinned = true,
-                    isQuickSend = true
+                    isQuickSend = true,
+                    // 显式带上类型：默认值会把来源类型丢掉
+                    type = source.type,
                 )
             )
         }

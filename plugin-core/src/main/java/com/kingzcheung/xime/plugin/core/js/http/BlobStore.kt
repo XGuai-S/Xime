@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.plugin.core.js.http
 
 import java.io.File
+import java.io.OutputStream
 
 /**
  * 宿主大文件句柄仓库（流式上传/下载用，**协议无关**）。
@@ -25,6 +26,16 @@ interface BlobStore {
      */
     fun createTempFile(ownerPluginId: String): File
 
+    /** 打开临时下载流；真实仓库在每块写入前校验共享预算。关闭后才可登记。 */
+    fun openTempOutputStream(ownerPluginId: String, file: File): OutputStream = file.outputStream()
+
+    /** 放弃尚未登记的临时文件；实现可校验 owner 并释放预扣预算。 */
+    fun discardTempFile(ownerPluginId: String, file: File) {
+        if (file.exists() && !file.delete() && file.exists()) {
+            throw java.io.IOException("blob 暂存文件删除失败")
+        }
+    }
+
     /**
      * 登记宿主文件为可被 [ownerPluginId] 引用的 blob。
      *
@@ -43,4 +54,15 @@ interface BlobStore {
 
     /** 释放 blob（幂等）：注销登记；[register] 时 owned=true 的文件一并删除。 */
     fun release(id: String)
+
+    /**
+     * 回收指定插件的**全部** blob 句柄（插件卸载 / 运行时关闭时调用）。
+     *
+     * 存在意义：句柄槽位是**全插件共享**的有限资源（实现方通常限制总句柄数）。插件被
+     * 卸载后若句柄仍在，槽位与磁盘文件会被一个已经不存在的插件长期占用，最终让其它
+     * 插件的 download / backup.pull 全部失败。
+     *
+     * @return 被回收的句柄数
+     */
+    fun releaseAll(ownerPluginId: String): Int = 0
 }

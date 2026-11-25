@@ -126,6 +126,59 @@ function statusDetail(res: XimeHttpResponse): string {
   return ': ' + body.substring(0, 160);
 }
 
+
+// ------------------------------------------------------------------
+// 文件级增量备份（v3.1）
+//
+// 远端布局：<remotePath>/files/<相对路径>
+//   files/rime/user.yaml
+//   files/_xime_backup/settings.json
+//   files/.xime-manifest.json        ← 宿主维护的 {path:sha256} 清单
+//
+// 为什么要 <files>/ 子目录：和旧的整包 .zip 分开存，用户升级后旧的整包仍在，
+// 可以继续用它恢复；两套互不干扰。
+// ------------------------------------------------------------------
+
+/** 文件级备份根目录（URL 形式，未编码前）。 */
+function filesUrl(): string {
+  const { base } = resolveBase();
+  return base.replace(/\/+$/, '') + '/files';
+}
+
+/** 文件级备份根目录（URL 路径形式，供 PROPFIND 与 parser 用）。 */
+function filesPath(): string {
+  const { basePath } = resolveBase();
+  return basePath.replace(/\/+$/, '') + '/files';
+}
+
+/** 逐级 MKCOL 建出 <files>/<dir 路径>，返回是否成功。已存在（405/301）也算成功。 */
+async function ensureFileDirs(
+  headers: Record<string, string>,
+  segments: string[]
+): Promise<boolean> {
+  const { cfg } = resolveBase();
+  // 先把 files/ 本身建出来
+  let cur = filesUrl();
+  const all = ['files'].concat(segments);
+  for (const seg of all) {
+    if (seg === 'files') {
+      // files 已在 cur 里，直接建
+    } else {
+      cur = cur + '/' + encodePath(seg);
+    }
+    try {
+      const res = await host.http.request('MKCOL', encodePath(cur), headers, null);
+      if (res.status !== 201 && res.status !== 405 && res.status !== 200 && res.status !== 301) {
+        return false;
+      }
+    } catch (e) {
+      host.logError('MKCOL 失败: ' + cur + ' ' + ((e as Error).message || ''));
+      return false;
+    }
+  }
+  return true;
+}
+
 // 仅供宿主 JVM 回归测试使用（JsEncodePathTest）；非插件契约字段，经 spread 并入，
 // 不参与 definePlugin 的规格约束收窄
 const testHooks = { _encodePath: encodePath };
@@ -240,6 +293,97 @@ const plugin = definePlugin({
         return res.status === 204 || res.status === 200 || res.status === 404;
       } catch (e) {
         host.logError('remove 失败: ' + ((e as Error).message || ''));
+        return false;
+      }
+    },
+
+    // ---- 文件级增量（v3.1）----
+    //
+    // listFiles 只列 <files>/ 的**顶层**文件：完整递归要逐目录 PROPFIND，
+    // 备份每次都要多花 N 个请求。宿主的权威依据是 .xime-manifest.json，
+    // 这里只作为「远端是否可达」的探针 + 首次备份时判断远端是否为空。
+
+    async listFiles(): Promise<{ path: string; sha256: string; size: number }[] | null> {
+      const { headers, error } = resolveBase();
+      if (error) return null;
+      headers['Depth'] = '1';
+      try {
+        let res = await host.http.request('PROPFIND', encodePath(filesUrl()), headers, null);
+        if (res.status === 404 || res.status === 409) {
+          // 远端还没有 files/：创建后重查，返回空数组（合法状态，不是失败）
+          if (!await ensureFileDirs(headers, [])) return null;
+          res = await host.http.request('PROPFIND', encodePath(filesUrl()), headers, null);
+        }
+        if (res.status === 404) return [];
+        if (res.status !== 207 && res.status !== 200) return null;
+        const items = parseBackupList(res.text || '', filesPath());
+        return items.map((it) => ({ path: it.name, sha256: '', size: it.size }));
+      } catch (e) {
+        host.logError('listFiles 失败: ' + ((e as Error).message || ''));
+        return null;
+      }
+    },
+
+    // 上传单个文件：blobId 交给 host.http.upload 流式 PUT
+    async pushFile(args: { path: string; sha256: string; size: number; blobId: string }): Promise<PushBackupResult> {
+      const rel = (args.path || '').replace(/^\/+/, '');
+      const blobId = args.blobId || '';
+      if (rel === '') return { ok: false, message: '文件路径为空' };
+      if (blobId === '') return { ok: false, message: '文件内容为空' };
+
+      const { headers, error } = resolveBase();
+      if (error) return { ok: false, message: error };
+
+      // 先建父目录：WebDAV 不会自动创建中间集合，PUT 到不存在的目录会 409
+      const segs = rel.split('/');
+      const dirs = segs.slice(0, segs.length - 1);
+      if (!await ensureFileDirs(headers, dirs)) {
+        return { ok: false, message: '创建远端目录失败' };
+      }
+
+      headers['Content-Type'] = 'application/octet-stream';
+      headers['Overwrite'] = 'T';
+      const url = encodePath(filesUrl() + '/' + rel);
+      try {
+        const res = await host.http.upload('PUT', url, headers, blobId);
+        if (res.status === 200 || res.status === 201 || res.status === 204) return { ok: true };
+        if (res.status === 401) return { ok: false, message: '认证失败（401），请检查账号与密码' };
+        return { ok: false, message: '上传失败（HTTP ' + res.status + '）' + statusDetail(res) };
+      } catch (e) {
+        return { ok: false, message: (e as Error).message || '上传请求失败' };
+      }
+    },
+
+    // 下载单个文件：返回宿主 blob 句柄
+    async pullFile(path: string): Promise<string | null> {
+      const rel = (path || '').replace(/^\/+/, '');
+      if (rel === '') return null;
+      const { headers, error } = resolveBase();
+      if (error) return null;
+      try {
+        const res = await host.http.download('GET', encodePath(filesUrl() + '/' + rel), headers);
+        if (res.status !== 200) {
+          host.logError('pullFile 失败: ' + rel + ' HTTP ' + res.status);
+          return null;
+        }
+        return res.blobId || null;
+      } catch (e) {
+        host.logError('pullFile 失败: ' + ((e as Error).message || ''));
+        return null;
+      }
+    },
+
+    // 删除单个文件（不存在也算成功）
+    async removeFile(path: string): Promise<boolean> {
+      const rel = (path || '').replace(/^\/+/, '');
+      if (rel === '') return false;
+      const { headers, error } = resolveBase();
+      if (error) return false;
+      try {
+        const res = await host.http.request('DELETE', encodePath(filesUrl() + '/' + rel), headers, null);
+        return res.status === 204 || res.status === 200 || res.status === 404;
+      } catch (e) {
+        host.logError('removeFile 失败: ' + ((e as Error).message || ''));
         return false;
       }
     },

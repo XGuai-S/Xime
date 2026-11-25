@@ -49,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,7 +62,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kingzcheung.xime.plugin.ActivePluginSelection
+import com.kingzcheung.xime.plugin.activateBackupService
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
 import com.kingzcheung.xime.plugin.core.api.RemoteBackupEntry
@@ -70,6 +75,10 @@ import com.kingzcheung.xime.plugin.core.model.PluginCategory
 import com.kingzcheung.xime.plugin.core.model.PluginInfo
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
 import com.kingzcheung.xime.settings.BackupManager
+import com.kingzcheung.xime.settings.BackupRunLog
+import com.kingzcheung.xime.settings.BackupRunState
+import com.kingzcheung.xime.settings.BackupRunOutcome
+import com.kingzcheung.xime.settings.BackupRunLogVisibility
 import com.kingzcheung.xime.settings.RimeExportManager
 import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.settings.SyncManager
@@ -114,6 +123,22 @@ fun BackupSettingsContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val backupRun by BackupRunLog.state.collectAsState()
+    val pageLifecycle = LocalLifecycleOwner.current.lifecycle
+    var runLogVisibility by remember {
+        mutableStateOf(BackupRunLogVisibility(observedRunId = backupRun.runId))
+    }
+    LaunchedEffect(backupRun.runId, pageLifecycle) {
+        runLogVisibility = runLogVisibility.observeRun(
+            backupRun.runId, pageLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+        )
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
+        runLogVisibility = runLogVisibility.hide()
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        runLogVisibility = runLogVisibility.observeRun(BackupRunLog.state.value.runId, pageResumed = false)
+    }
     val installedPlugins = remember { ExtensionManager.getAllInstalledPlugins() }
     val backupPlugins = remember { installedPlugins.filter { it.category == PluginCategory.BACKUP } }
     val syncPlugins = remember { ExtensionManager.getEnabledBackupPlugins(context) }
@@ -151,13 +176,21 @@ fun BackupSettingsContent(
     // 失败状态（F1）：持久化，回到本页仍能看到"上次失败 + 重试"，不再只靠 snackbar 一闪而过
     var syncError by remember { mutableStateOf(SettingsPreferences.getLastSyncError(context)) }
     var backupError by remember { mutableStateOf(SettingsPreferences.getLastBackupError(context)) }
+    val latestRunFailed = !backupRun.running && backupRun.outcome != null &&
+        backupRun.outcome !in setOf(BackupRunOutcome.SUCCESS, BackupRunOutcome.CANCELLED)
+    val displayedBackupError = if (backupRun.runId == 0L) backupError else
+        backupRun.entries.lastOrNull()?.message.takeIf { latestRunFailed }
 
     // 进页面静默拉一次远端（IO）：主按钮要显示"云端 N 份 / N 台设备"，也省掉"点开才拉取"
     LaunchedEffect(activePlugin) {
         val plugin = activePlugin?.second ?: return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            syncRemoteList = SyncManager.listRemoteSnapshots(plugin)
-            remoteList = BackupManager.listRemote(plugin)?.filter { !SyncManager.isRemoteSyncEntry(it.name) }
+        val (snapshots, backups) = withContext(Dispatchers.IO) {
+            SyncManager.listRemoteSnapshots(plugin) to
+                BackupManager.listRemote(plugin)?.filter { !SyncManager.isRemoteSyncEntry(it.name) }
+        }
+        if (activePlugin?.second === plugin) {
+            syncRemoteList = snapshots
+            remoteList = backups
         }
     }
 
@@ -243,6 +276,7 @@ fun BackupSettingsContent(
     //备份区主动作：刷新词条快照 → 打整机完整包 → 经备份插件上云（流式，不占内存）
     fun runCloudBackup() {
         val plugin = activePlugin?.second ?: return
+        runLogVisibility = runLogVisibility.show()
         busyOp = "backup"
         scope.launch(Dispatchers.IO) {
             val result = BackupManager.backupNow(context, plugin)
@@ -298,12 +332,14 @@ fun BackupSettingsContent(
 
     // —— 刷新云端备份列表（过滤掉词条快照条目，它们属于词条区）——
     fun refreshRemoteList() {
+        if (busyOp != null) return
         val plugin = activePlugin?.second ?: return
         busyOp = "list"
         scope.launch(Dispatchers.IO) {
             val list = BackupManager.listRemote(plugin)?.filter { !SyncManager.isRemoteSyncEntry(it.name) }
             val err = if (list == null) "获取备份列表失败" else null
             withContext(Dispatchers.Main) {
+                if (activePlugin?.second !== plugin || busyOp != "list") return@withContext
                 busyOp = null
                 remoteList = list
                 err?.let { snackbar.showSnackbar(it) }
@@ -359,8 +395,8 @@ fun BackupSettingsContent(
                         activePlugin == null -> ServiceGuideRow(
                             title = "备份插件已安装但未启用",
                             subtitle = "启用后才能云端同步与备份",
-                            actionText = "去插件中心",
-                            onClick = onNavigateToPlugins
+                            actionText = "选择并启用",
+                            onClick = { if (busyOp == null) showServicePicker = true }
                         )
 
                         configured == false -> ServiceGuideRow(
@@ -376,7 +412,7 @@ fun BackupSettingsContent(
                             plugin = activePlugin?.second,
                             configured = configured,
                             lastSuccessAt = maxOf(lastSyncAt, lastBackupAt),
-                            onClick = { showServicePicker = true },
+                            onClick = { if (busyOp == null) showServicePicker = true },
                             onConfigure = activePlugin?.first?.let { id ->
                                 { onNavigateToPluginSettings(id) }
                             }
@@ -430,23 +466,38 @@ fun BackupSettingsContent(
                             append("上次成功 " + formatRelativeTime(lastBackupAt))
                             remoteList?.let { append(" · 云端 ${it.size} 份") }
                         } else {
-                            "设置、输入方案、插件，一次打包"
+                            "配置、词库、剪贴板、快捷发送，同包备份"
                         },
-                        badgeText = if (busyOp == "backup") "进行中"
-                        else if (backupError != null) "失败"
-                        else if (lastBackupAt > 0) "成功" else "从未",
-                        badgeTone = if (busyOp == "backup") StatusTone.Busy
-                        else if (backupError != null) StatusTone.Fail
-                        else if (lastBackupAt > 0) StatusTone.Ok else StatusTone.Never,
+                        badgeText = when {
+                            busyOp == "backup" || backupRun.running -> "进行中"
+                            backupRun.outcome == BackupRunOutcome.CANCELLED -> "已取消"
+                            latestRunFailed || displayedBackupError != null -> "失败"
+                            backupRun.outcome == BackupRunOutcome.SUCCESS || lastBackupAt > 0 -> "成功"
+                            else -> "从未"
+                        },
+                        badgeTone = when {
+                            busyOp == "backup" || backupRun.running -> StatusTone.Busy
+                            backupRun.outcome == BackupRunOutcome.CANCELLED -> StatusTone.Never
+                            latestRunFailed || displayedBackupError != null -> StatusTone.Fail
+                            backupRun.outcome == BackupRunOutcome.SUCCESS || lastBackupAt > 0 -> StatusTone.Ok
+                            else -> StatusTone.Never
+                        },
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
                     BackupCardActions(
                         busyOp = busyOp,
                         blocking = blocking,
                         serviceReady = serviceReady,
-                        error = backupError,
+                        error = displayedBackupError,
+                        runLog = backupRun,
+                        runLogExpanded = runLogVisibility.expanded,
+                        onToggleRunLog = { runLogVisibility = runLogVisibility.toggle() },
                         onBackup = ::runCloudBackup,
-                        onConfigure = { activePlugin?.first?.let(onNavigateToPluginSettings) },
+                        onConfigure = {
+                            val id = activePlugin?.first
+                            if (id != null) onNavigateToPluginSettings(id)
+                            else if (busyOp == null) showServicePicker = true
+                        },
                         onRefresh = ::refreshRemoteList,
                         remoteList = remoteList,
                         expanded = remoteListExpanded,
@@ -504,6 +555,7 @@ fun BackupSettingsContent(
                         showArrow = true,
                         onClick = {
                             if (busyOp == null) {
+                                runLogVisibility = runLogVisibility.show()
                                 busyOp = "exportLocal"
                                 scope.launch(Dispatchers.IO) {
                                     val result = RimeExportManager.exportArchive(context)
@@ -556,28 +608,73 @@ fun BackupSettingsContent(
             selectedId = selectedPluginId,
             onSelect = { pickedId ->
                 showServicePicker = false
-                if (pickedId != selectedPluginId) {
-                    selectedPluginId = pickedId
-                    SettingsPreferences.setBackupPluginId(context, pickedId)
-                    remoteList = null
-                    // 换了服务：上一家的失败不再代表当前服务，清掉留痕
-                    SettingsPreferences.setLastSyncError(context, null)
-                    SettingsPreferences.setLastBackupError(context, null)
-                    syncError = null
-                    backupError = null
-                    scope.launch(Dispatchers.IO) {
-                        // 单选激活：同一时间只启用 1 个备份插件
-                        backupPlugins
-                            .filter { it.id != pickedId }
-                            .forEach {
-                                SettingsPreferences.setPluginEnabled(context, it.id, false)
-                                PluginManager.unloadPlugin(it.id)
+                if (busyOp == null && (pickedId != selectedPluginId || activePlugin?.first != pickedId)) {
+                    busyOp = "service"
+                    scope.launch {
+                        val activationError = try {
+                            val result = withContext(Dispatchers.IO) {
+                                val previous = PluginManager.getAllInstallPlugins()
+                                    .filter { it.category == PluginCategory.BACKUP }
+                                val previousFlags = previous.associate {
+                                    it.id to SettingsPreferences.isPluginEnabled(context, it.id)
+                                }
+                                val previousLoaded = PluginManager.getAllPluginInstances().keys.toSet()
+                                val previousChoice = SettingsPreferences.getBackupPluginId(context)
+                                activateBackupService(
+                                    selectedId = pickedId,
+                                    installedIds = previous.map { it.id },
+                                    setEnabled = { id, enabled ->
+                                        val saved = PluginManager.setPluginEnabled(id, enabled)
+                                        if (saved) SettingsPreferences.setPluginEnabled(context, id, enabled)
+                                        saved
+                                    },
+                                    launch = { id ->
+                                        if (PluginManager.launchPlugin(id)) {
+                                            PluginManager.getPluginInstance(id) as? BackupPlugin
+                                        } else null
+                                    },
+                                    commit = { SettingsPreferences.setBackupPluginId(context, pickedId) },
+                                    restore = {
+                                        var failure: Exception? = null
+                                        for (plugin in previous) {
+                                            try {
+                                                check(PluginManager.setPluginEnabled(plugin.id, plugin.enabled))
+                                                SettingsPreferences.setPluginEnabled(
+                                                    context, plugin.id, previousFlags.getValue(plugin.id),
+                                                )
+                                                if (plugin.id !in previousLoaded) {
+                                                    PluginManager.unloadPlugin(plugin.id)
+                                                } else if (PluginManager.getPluginInstance(plugin.id) == null) {
+                                                    check(PluginManager.launchPlugin(plugin.id))
+                                                }
+                                            } catch (e: Exception) {
+                                                if (failure == null) failure = e else failure.addSuppressed(e)
+                                            }
+                                        }
+                                        SettingsPreferences.setBackupPluginId(context, previousChoice)
+                                        failure?.let { throw it }
+                                    },
+                                )
                             }
-                        SettingsPreferences.setPluginEnabled(context, pickedId, true)
-                        PluginManager.launchPlugin(pickedId)
-                        // 重新获取已启用实例，驱动配置页入口与远端列表切换到新插件
-                        activePlugin = ExtensionManager.getEnabledBackupPlugins(context)
-                            .firstOrNull { it.first == pickedId }
+                            result.onSuccess { plugin ->
+                                selectedPluginId = pickedId
+                                activePlugin = pickedId to plugin
+                                remoteList = null
+                                syncRemoteList = null
+                                SettingsPreferences.setLastSyncError(context, null)
+                                SettingsPreferences.setLastBackupError(context, null)
+                                syncError = null
+                                backupError = null
+                            }
+                            result.onFailure {
+                                activePlugin = ExtensionManager.getEnabledBackupPlugins(context)
+                                    .firstOrNull { it.first == selectedPluginId }
+                            }
+                            result.exceptionOrNull()?.let { it.message ?: "启用备份服务失败" }
+                        } finally {
+                            busyOp = null
+                        }
+                        activationError?.let { snackbar.showSnackbar(it) }
                     }
                 }
             },
@@ -912,13 +1009,16 @@ private fun WordCardActions(
     }
 }
 
-/** 备份卡主体：主动作 + 失败重试 + 云端记录展开区（恢复/删除）。 */
+/** 备份卡主体：主动作、运行记录与云端文件列表（恢复/删除）。 */
 @Composable
 private fun BackupCardActions(
     busyOp: String?,
     blocking: Boolean,
     serviceReady: Boolean,
     error: String?,
+    runLog: BackupRunState,
+    runLogExpanded: Boolean,
+    onToggleRunLog: () -> Unit,
     onBackup: () -> Unit,
     onConfigure: () -> Unit,
     onRefresh: () -> Unit,
@@ -929,7 +1029,7 @@ private fun BackupCardActions(
     onDelete: (RemoteBackupEntry) -> Unit
 ) {
     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (busyOp == "backup") {
+        if (busyOp == "backup" || runLog.running) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
                 trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
@@ -990,13 +1090,18 @@ private fun BackupCardActions(
                 } else {
                     Text(
                         text = buildString {
-                            append(if (expanded) "收起记录" else "备份记录")
+                            append(if (expanded) "收起列表" else "云端列表")
                             remoteList?.let { append(" ${it.size}") }
                         },
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
             }
+        }
+        if (runLogExpanded) {
+            BackupRunLogPanel(runLog, onClose = onToggleRunLog)
+        } else {
+            TextButton(onClick = onToggleRunLog) { Text("查看运行记录") }
         }
         // 云端备份包列表（恢复=覆盖式，自造词按时间戳合并）
         if (expanded && remoteList == null) {

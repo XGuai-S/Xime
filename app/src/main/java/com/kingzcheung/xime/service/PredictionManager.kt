@@ -192,6 +192,13 @@ class PredictionManager(
         }
     }
     
+    /** 以上一次上屏的最后一个字作为上文，记录「上文字 + 本次上屏词」。无上文时不记录。 */
+    fun recordCommitWithContext(candidate: String) {
+        val last = _lastCommittedText
+        if (last.isEmpty()) return
+        recordInputPair(last.last().toString(), candidate)
+    }
+
     fun recordInputPair(lastChar: String, candidate: String) {
         if (SettingsPreferences.isSmartPredictionEnabled(context) && AssociationManager.isInitialized()) {
             AssociationManager.recordInput(lastChar + candidate)

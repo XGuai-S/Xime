@@ -488,13 +488,27 @@ private fun OperatorPillarKey(
         bottomEnd = if (isLast) cornerRadius else 0.dp,
     )
     val density = LocalDensity.current
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(shape)
             .background(if (isPressed) backgroundColor.copy(alpha = 0.7f) else backgroundColor)
+            .then(bevelLayer)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = {

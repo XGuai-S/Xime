@@ -98,7 +98,7 @@ fun ClipboardView(
     keyTextColor: Color,
     keyBgColor: Color,
     viewModel: KeyboardViewModel,
-    onSelectItem: (String) -> Unit,
+    onSelectItem: (String, Long?) -> Unit,
     onSplitWords: (String, Long) -> Unit,
     onBack: (() -> Unit)? = null,
     onClipboardTabChange: ((Int) -> Unit)? = null,
@@ -674,7 +674,7 @@ fun ClipboardView(
                     subTextColor = subTextColor,
                     accentColor = accentColor,
                     viewModel = viewModel,
-                    onSelect = onSelectItem,
+                    onSelect = { onSelectItem(it, null) },
                     onQuickSendAddClick = onQuickSendAddClick,
                     onQuickSendEditItem = onQuickSendEditItem,
                     onDragSendStarted = onDragSendStarted,
@@ -770,7 +770,16 @@ fun ClipboardView(
 
         menuAnchor?.let { anchor ->
             val menuItems = if (anchor.tab == 0) {
-                if (anchor.item.isImage) {
+                if (anchor.item.isOtp) {
+                    listOf(
+                        LongPressMenuEntry(
+                            icon = Icons.Default.Delete,
+                            label = "删除",
+                            tint = MaterialTheme.colorScheme.error,
+                            onClick = { viewModel.removeClipboardItem(anchor.item.id) },
+                        )
+                    )
+                } else if (anchor.item.isImage) {
                     // 图片条目：拆词/快捷发送无意义（文本操作），只剩多选 + 删除
                     listOf(
                         LongPressMenuEntry(
@@ -997,7 +1006,7 @@ fun ClipboardTabContent(
     textColor: Color,
     subTextColor: Color,
     accentColor: Color,
-    onSelect: (String) -> Unit,
+    onSelect: (String, Long?) -> Unit,
     onRemove: (Long) -> Unit,
     onAddToQuickSend: (Long) -> Unit,
     onSplitWords: (String, Long) -> Unit,
@@ -1042,7 +1051,7 @@ fun ClipboardTabContent(
                     } else if (item.isImage) {
                         onSelectImage?.invoke(item)
                     } else {
-                        onSelect(item.text)
+                        onSelect(item.text, item.id)
                     }
                 }
                 val onLongClick: () -> Unit = {

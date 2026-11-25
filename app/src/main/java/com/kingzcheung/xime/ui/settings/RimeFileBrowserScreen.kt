@@ -67,8 +67,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.kingzcheung.xime.settings.ExportResult
 import com.kingzcheung.xime.settings.RimeExportManager
 import com.kingzcheung.xime.settings.RimeUserFileSync
+import com.kingzcheung.xime.settings.SchemaLayout
 import com.kingzcheung.xime.settings.SchemaManager
-import com.kingzcheung.xime.settings.SyncManager
 import com.kingzcheung.xime.settings.UserConfigDir
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme
@@ -187,7 +187,21 @@ fun RimeFileBrowserContent(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    // rime 顶层中「已归档进 schemes/」的文件名，用于隐藏顶层重复项。
+    //
+    // 不能用 remember(rootDir) 只算一次：schemes/ 可能在页面组合之后才由
+    // ensureSchemeLayout 建好（首次安装/导入方案），那样过滤集合会一直是空的，
+    // 用户刷新也看不到变化。所以每次 refresh() 重算。
+    var archivedTopLevelNames by remember(rootDir) { mutableStateOf(emptySet<String>()) }
+
+    fun recomputeArchivedNames() {
+        val schemesDir = File(rootDir, SchemaLayout.SCHEMES_DIR)
+        archivedTopLevelNames = if (!schemesDir.isDirectory) emptySet()
+        else schemesDir.walkTopDown().filter { it.isFile }.map { it.name }.toSet()
+    }
+
     fun refresh() {
+        recomputeArchivedNames()
         entries = if (browsingUserConfig) {
             UserConfigDir.list(context).map {
                 FileEntry(
@@ -202,6 +216,22 @@ fun RimeFileBrowserContent(
             }
         } else {
             currentDir.listFiles()
+                ?.filter { file ->
+                    // `*.userdb/` 是 librime 的 leveldb 用户词典库（内含 LOCK/LOG/MANIFEST
+                    // 等一堆二进制文件），对用户没有可读价值，只会让目录显得杂乱。
+                    // 用户明确要求不显示。**只隐藏显示，文件保留**——引擎要用它存自造词。
+                    if (file.isDirectory && file.name.endsWith(".userdb")) return@filter false
+                    // 顶层中已归档进 schemes/ 的文件不显示。
+                    //
+                    // librime 只读 rime 顶层，所以启用方案的 dict/schema 必须在顶层留一份
+                    // （和文件夹里那份是硬链接，磁盘只占一份）。但文件管理器列出顶层时，
+                    // 用户会看到「顶层和方案文件夹下都有一样的文件」，看起来像没整理。
+                    //
+                    // 这里只隐藏**显示**，文件本身保留——引擎照常能读。
+                    // 判据：当前在 rime 根目录、该文件是文件、且 schemes/ 下有同名文件。
+                    if (file.isDirectory) true
+                    else !(currentDir == rootDir && archivedTopLevelNames.contains(file.name))
+                }
                 ?.map { FileEntry(it, it.isDirectory, it.name, it.length(), it.lastModified()) }
                 ?.sortedWith(compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name })
                 ?: emptyList()
@@ -456,8 +486,6 @@ fun RimeFileBrowserContent(
                         exportInProgress = true
                         scope.launch {
                             val result = withContext(Dispatchers.IO) {
-                                // 与云备份同构：导出前尽力刷新自造词快照（引擎未就绪则用现有快照）
-                                SyncManager.syncNow(context)
                                 RimeExportManager.exportArchive(context)
                             }
                             exportInProgress = false

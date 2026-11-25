@@ -28,6 +28,19 @@ class AppRepository(
 
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
 
+    /**
+     * 清理 AI 模块历史版本的剪贴板缓存。
+     *
+     * 早期版本在 AI 模块里另存了一份剪贴板明文（`clipboard_v1`），**与主剪贴板的
+     * 敏感识别完全无关**——密码/卡号会以明文形式躺在 SharedPreferences 里。
+     * 3.4.46 起这套 API 已无调用者，属于死代码；这里把历史数据一并抹掉。
+     *
+     * 用 `remove` 而不是写空串：留一个空 JSON 数组同样占着键，且将来误读会得到空列表。
+     */
+    init {
+        runCatching { publicStore.putString(KEY_CLIPBOARD, null) }
+    }
+
     private val _settings = MutableStateFlow(loadSettingsInternal())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
@@ -36,8 +49,7 @@ class AppRepository(
     )
     val history: StateFlow<List<HistoryRecord>> = _history.asStateFlow()
 
-    private val _clipboardItems = MutableStateFlow(loadClipboardInternal())
-    val clipboardItems: StateFlow<List<ClipboardEntry>> = _clipboardItems.asStateFlow()
+
 
     private val _isImeWindowVisible = MutableStateFlow(false)
     val isImeWindowVisible: StateFlow<Boolean> = _isImeWindowVisible.asStateFlow()
@@ -403,77 +415,9 @@ class AppRepository(
         }
     }
 
-    @Suppress("SENSELESS_COMPARISON")
-    private fun loadClipboardInternal(): List<ClipboardEntry> {
-        val raw = publicStore.getString(KEY_CLIPBOARD, null) ?: return emptyList()
-        return try {
-            val type = object : TypeToken<List<ClipboardEntry>>() {}.type
-            val list = gson.fromJson<List<ClipboardEntry>>(raw, type) ?: emptyList()
-            sortClipboardEntries(
-                list.mapNotNull { item ->
-                    val clean = (item.text ?: "").trim()
-                    if (clean.isEmpty()) null
-                    else item.copy(
-                        id = item.id.ifBlank { UUID.randomUUID().toString() },
-                        text = clean,
-                        timestamp = if (item.timestamp <= 0L) System.currentTimeMillis() else item.timestamp
-                    )
-                }
-            )
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
 
-    private fun saveClipboardList(updated: List<ClipboardEntry>) {
-        val sorted = sortClipboardEntries(updated)
-        _clipboardItems.value = sorted
-        publicStore.putString(KEY_CLIPBOARD, gson.toJson(sorted))
-    }
 
-    fun recordClipboardText(
-        rawText: String,
-        pinned: Boolean = false,
-        nowMs: Long = System.currentTimeMillis()
-    ): ClipboardEntry? {
-        if (!_settings.value.clipboardEnabled && !pinned) return null
-        val (updated, entry) = upsertClipboardList(
-            existing = _clipboardItems.value,
-            rawText = rawText,
-            forcePinned = pinned,
-            nowMs = nowMs,
-            maxUnpinned = MAX_CLIPBOARD_UNPINNED
-        )
-        if (entry != null) {
-            saveClipboardList(updated)
-        }
-        return entry
-    }
 
-    fun togglePinClipboardItem(id: String) {
-        val curr = _clipboardItems.value
-        if (curr.none { it.id == id }) return
-        val updated = curr.map { item ->
-            if (item.id == id) item.copy(isPinned = !item.isPinned) else item
-        }
-        saveClipboardList(updated)
-    }
-
-    fun deleteClipboardItem(id: String) {
-        val curr = _clipboardItems.value
-        val updated = curr.filterNot { it.id == id }
-        if (updated.size != curr.size) {
-            saveClipboardList(updated)
-        }
-    }
-
-    fun clearUnpinnedClipboardItems() {
-        val curr = _clipboardItems.value
-        val pinnedOnly = curr.filter { it.isPinned }
-        if (pinnedOnly.size != curr.size) {
-            saveClipboardList(pinnedOnly)
-        }
-    }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val prevRetention = _settings.value.historyRetention
@@ -639,8 +583,6 @@ class AppRepository(
         private const val KEY_MIGRATED_V30_LIVE_WRITE_DEFAULT = "migrated_v30_live_write_default"
         internal const val KEY_MIGRATED_V340_COMPACT_4ROW_AND_LIFT = "mig_v340_compact_4row_and_lift"
         private const val MAX_HISTORY_ITEMS = 200
-        private const val MAX_CLIPBOARD_UNPINNED = 40
-        private const val MAX_CLIP_CHARS = 4000
         private val PUNCT_OR_SPACE_ONLY = Regex("^[\\s\\p{Punct}，。？！、：；“”‘’（）【】《》…—\\-]+$")
 
         fun migrateStretchLevelToLiftLevel(
@@ -674,51 +616,6 @@ class AppRepository(
                 keyboardHeightMode = KeyboardHeightMode.LIFT,
                 keyboardLiftLevel = migratedLift
             )
-        }
-
-        fun sortClipboardEntries(entries: List<ClipboardEntry>): List<ClipboardEntry> {
-            return entries.sortedWith(
-                compareByDescending<ClipboardEntry> { it.isPinned }
-                    .thenByDescending { it.timestamp }
-            )
-        }
-
-        /**
-         * Pure helper inserting or deduplicating a clipboard entry while preserving pinned status
-         * and capping unpinned items at [maxUnpinned].
-         */
-        fun upsertClipboardList(
-            existing: List<ClipboardEntry>,
-            rawText: String,
-            forcePinned: Boolean = false,
-            nowMs: Long = System.currentTimeMillis(),
-            maxUnpinned: Int = MAX_CLIPBOARD_UNPINNED
-        ): Pair<List<ClipboardEntry>, ClipboardEntry?> {
-            val trimmed = rawText.trim()
-            if (trimmed.isEmpty()) return existing to null
-            val capped = if (trimmed.length > MAX_CLIP_CHARS) trimmed.take(MAX_CLIP_CHARS) else trimmed
-
-            val matched = existing.firstOrNull { it.text == capped }
-            val activeEntry = if (matched != null) {
-                matched.copy(
-                    timestamp = nowMs,
-                    isPinned = matched.isPinned || forcePinned
-                )
-            } else {
-                ClipboardEntry(
-                    text = capped,
-                    timestamp = nowMs,
-                    isPinned = forcePinned
-                )
-            }
-
-            val others = existing.filterNot { it.text == capped }
-            val combined = listOf(activeEntry) + others
-            val pinned = combined.filter { it.isPinned }.sortedByDescending { it.timestamp }
-            val unpinned = combined.filterNot { it.isPinned }
-                .sortedByDescending { it.timestamp }
-                .take(maxUnpinned.coerceAtLeast(1))
-            return (pinned + unpinned) to activeEntry
         }
 
         fun pruneHistoryByRetention(

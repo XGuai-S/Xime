@@ -172,22 +172,13 @@ object UserConfigDir {
                 Log.w(TAG, "cannot create config dir: ${dir.absolutePath}")
                 return false
             }
-            // 原子替换：先写同目录临时文件 → fsync → rename。
-            // 旧实现是 File.writeText（truncate 后写），输入法常驻进程随时可能被 LMK 杀，
-            // 半截 xime.yaml 会让用户的全部键盘自定义「一夜清零」（只剩删文件回默认）。
-            val target = File(dir, name)
-            val tmp = File(dir, "$name.tmp")
-            java.io.FileOutputStream(tmp).use { out ->
-                out.write(text.toByteArray(Charsets.UTF_8))
-                out.flush()
-                out.fd.sync()
-            }
-            if (!tmp.renameTo(target)) {
-                // 少数 FUSE/外置存储上 rename 会失败：退回覆盖写，至少不丢内容
-                tmp.copyTo(target, overwrite = true)
-                tmp.delete()
-            }
-            true
+            // 原子替换（temp → fsync → rename）：旧实现是 File.writeText（truncate 后写），
+            // 输入法常驻进程随时可能被 LMK 杀，半截 xime.yaml 会让用户的全部键盘自定义
+            // 「一夜清零」。实现统一在 AtomicFileWriter，词典类文件也走同一份。
+            //
+            // 必须 return 返回值：本函数签名是 Boolean，6 个调用方都靠它判断成功与否
+            // （BackupManager 据此决定是否回退私有目录）。忽略会恒返回 true。
+            return com.kingzcheung.xime.util.AtomicFileWriter.write(File(dir, name), text)
         } catch (t: Throwable) {
             Log.w(TAG, "writeText failed: $name", t)
             false
@@ -236,24 +227,24 @@ object UserConfigDir {
      */
     fun writeCustomConfig(context: Context, text: String): Boolean {
         val visible = writeText(context, UNIFIED_CONFIG_FILE, text)
-        delete(context, CUSTOM_CONFIG_FILE)
-        delete(context, LEGACY_UNIFIED_CONFIG_FILE)
         val privateLegacy = File(context.filesDir, "rime/$CUSTOM_CONFIG_FILE")
         val privateUnified = File(context.filesDir, "rime/$UNIFIED_CONFIG_FILE")
         if (visible) {
+            // 只有新配置确实落到可见目录后才清旧入口：写失败时它们可能是唯一的有效配置
+            delete(context, CUSTOM_CONFIG_FILE)
+            delete(context, LEGACY_UNIFIED_CONFIG_FILE)
             runCatching { privateLegacy.delete() }
             runCatching { privateUnified.delete() }
             return true
         }
-        return try {
-            privateUnified.parentFile?.mkdirs()
-            privateUnified.writeText(text)
+        // 回退写同样要原子：truncate 写被杀会留半截配置
+        val ok = com.kingzcheung.xime.util.AtomicFileWriter.write(privateUnified, text)
+        if (ok) {
             Log.i(TAG, "visible dir unavailable, wrote $UNIFIED_CONFIG_FILE to private dir")
-            true
-        } catch (t: Throwable) {
-            Log.w(TAG, "writeCustomConfig failed", t)
-            false
+        } else {
+            Log.w(TAG, "writeCustomConfig failed")
         }
+        return ok
     }
 
     /**

@@ -41,8 +41,17 @@ class VoiceRecognitionHandler(
 
     private lateinit var speechRecognitionManager: SpeechRecognitionManager
 
-    var textBeforeVoiceInput = ""
-    var textLengthBeforeVoiceInput = 0
+    internal var textWrittenByVoiceInput = ""
+    internal var voiceInputPrefixAnchor = ""
+    internal var voiceInputConnection: InputConnection? = null
+    private var voiceCommittedText = ""
+
+    internal fun clearUndoBookkeeping() {
+        voiceCommittedText = ""
+        textWrittenByVoiceInput = ""
+        voiceInputPrefixAnchor = ""
+        voiceInputConnection = null
+    }
 
     fun initialize() {
         FileLogger.i(TAG, "Initializing speech recognition system")
@@ -118,15 +127,18 @@ class VoiceRecognitionHandler(
             return
         }
 
-        // 上一次会话若还在收尾等待中（快速再次开始），直接废弃收尾状态
+        // A fresh user-initiated recognition is the only operation that reopens writes after abandonment.
+        sessionAbandoned = false
         finishing = false
         mainHandler.removeCallbacks(finishTimeoutRunnable)
         suppressDuplicateFinal = false
         // 新会话：清掉上一会话与输入框的记账（写入文本/已消费前缀/核对标记）
         resetInputBoxBookkeeping()
 
-        textBeforeVoiceInput = getInputConnection()?.getTextBeforeCursor(1000, 0)?.toString() ?: ""
-        textLengthBeforeVoiceInput = textBeforeVoiceInput.length
+        voiceInputConnection = getInputConnection()
+        voiceInputPrefixAnchor = voiceInputConnection?.getTextBeforeCursor(32, 0)?.toString().orEmpty()
+        voiceCommittedText = ""
+        textWrittenByVoiceInput = ""
 
         val providerName = resolveProviderName()
         onStateChanged(getState().copy(voicePluginName = providerName))
@@ -204,6 +216,7 @@ class VoiceRecognitionHandler(
         mainHandler.removeCallbacks(finishTimeoutRunnable)
         lastPartialText = ""
         resetInputBoxBookkeeping()
+        if (::speechRecognitionManager.isInitialized) speechRecognitionManager.cancelRecognition()
     }
 
     /**
@@ -300,12 +313,7 @@ class VoiceRecognitionHandler(
             mainHandler.removeCallbacks(finishTimeoutRunnable)
         }
 
-        if (sessionAbandoned) {
-            sessionAbandoned = false
-            lastPartialText = ""
-            onVoiceComplete()
-            return
-        }
+        if (sessionAbandoned) return
 
         if (suppressDuplicateFinal) {
             // 抬起时已提交，忽略迟到的重复最终结果
@@ -343,19 +351,26 @@ class VoiceRecognitionHandler(
     // 增量语音模式：先结束 composing，再只提交增量，避免重复与整段重写。
     private fun commitFinal(ic: InputConnection, finalText: String, partial: String) {
         ic.finishComposingText()
+        var committed = false
         if (partial.isNotEmpty() && finalText.startsWith(partial)) {
             val remainder = finalText.substring(partial.length)
             if (remainder.isNotEmpty()) {
-                ic.commitText(remainder, 1)
+                committed = ic.commitText(remainder, 1)
             } else {
+                committed = true
                 Log.d(TAG, "commitFinal: remainder empty, only finished composing")
             }
         } else {
-            // 最终结果与部分结果不一致：删除已上屏的部分，再提交完整结果
             if (partial.isNotEmpty()) {
                 ic.deleteSurroundingText(partial.length, 0)
             }
-            ic.commitText(finalText, 1)
+            committed = ic.commitText(finalText, 1)
+        }
+        if (committed) {
+            voiceCommittedText += finalText
+            textWrittenByVoiceInput = voiceCommittedText
+        } else {
+            textWrittenByVoiceInput = ""
         }
         Log.d(TAG, "commitFinal: final='$finalText', partial='$partial'")
     }
@@ -413,8 +428,9 @@ class VoiceRecognitionHandler(
         // 应用替换成等长文本）时保守不动，避免误判丢字。
         if (onScreen.length >= lastWrittenText.length) return
         consumedEnginePrefix = lastPartialText
-        // "撤销语音输入"按会话开始时的框长度计算删除量，外部清空后基线要跟着落到当前框内容
-        textLengthBeforeVoiceInput = onScreen.length
+        voiceCommittedText = ""
+        textWrittenByVoiceInput = ""
+        voiceInputPrefixAnchor = runCatching { ic.getTextBeforeCursor(32, 0)?.toString() }.getOrNull().orEmpty()
         lastWrittenText = ""
         Log.d(TAG, "输入框已被外部清空/取走内容，本会话已识别文本记为已消费: '$consumedEnginePrefix'")
     }
@@ -470,7 +486,8 @@ class VoiceRecognitionHandler(
         
         if (ic != null) {
             onComposingWritten()
-            ic.setComposingText(cleanText, 1)
+            val written = ic.setComposingText(cleanText, 1)
+            textWrittenByVoiceInput = if (written) voiceCommittedText + cleanText else ""
             lastWrittenText = cleanText
             // 首次写入后回读一次，确认该应用确实回显 composing 文本（之后才允许做"被外部消费"判定）
             verifyInputBoxEcho(ic, cleanText)
@@ -479,11 +496,12 @@ class VoiceRecognitionHandler(
     }
 
     private fun handleSpeechStateChange(state: RecognitionState) {
+        if (sessionAbandoned) return
         Log.d(TAG, "Speech state changed: $state")
+        // New recognition admission, not an asynchronous LISTENING callback, reopens this gate.
         if (state == RecognitionState.LISTENING) {
             lastPartialText = ""
             suppressDuplicateFinal = false
-            sessionAbandoned = false
             resetInputBoxBookkeeping()
         }
         // 收尾等待最终结果期间，引擎 stop 产生的 IDLE 不覆盖"正在识别..."显示

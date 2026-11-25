@@ -811,7 +811,20 @@ private fun StrokeSpaceButton(
 ) {
     val density = LocalDensity.current
     val currentOnSwipeUp by rememberUpdatedState(onSwipeUp)
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
 
     Box(
         modifier = modifier
@@ -851,9 +864,11 @@ private fun StrokeSpaceButton(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(shadowModifier)
+                .then(shadowLayer)
                 .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
                 .background(backgroundColor)
+                // 高光/压暗必须排在 background 之后才可见（否则被键面底色盖住）
+                .then(bevelLayer)
         )
         Text(
             text = "空格",

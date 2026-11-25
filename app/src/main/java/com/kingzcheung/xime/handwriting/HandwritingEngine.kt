@@ -1,8 +1,11 @@
 package com.kingzcheung.xime.handwriting
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.widget.Toast
 import com.kingzcheung.xime.model.ModelStorage
 import com.kingzcheung.xime.service.InferenceClient
 import com.kingzcheung.xime.util.FileLogger
@@ -42,17 +45,60 @@ object HandwritingEngine {
     @Volatile
     private var modelCheckPositive = false
 
+    /** 绑定/加载失败的用户提示节流：30s 内最多一次，避免连续落笔时刷屏。 */
+    private const val BIND_FAILURE_TOAST_INTERVAL_MS = 30_000L
+    @Volatile
+    private var lastBindFailureToastMs: Long? = null
+
+    /** 实际弹提示的出口；单测替换成收集器，不依赖 Android Toast。 */
+    internal var toastDispatcher: (String) -> Unit = { msg ->
+        val ctx = appContext
+        if (ctx != null) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /**
+     * :inference 绑定/模型加载失败的用户提示（节流）。
+     *
+     * 此前失败只有日志，用户看到的是「手写板写了没候选」，无从判断是模型没装、
+     * 服务进程没起来还是 binder 断了。这里给一次可读提示，30s 内不重复。
+     */
+    internal fun notifyBindFailure(nowMs: Long = SystemClock.elapsedRealtime()) {
+        synchronized(this) {
+            val last = lastBindFailureToastMs
+            if (last != null && nowMs - last < BIND_FAILURE_TOAST_INTERVAL_MS) return
+            lastBindFailureToastMs = nowMs
+        }
+        toastDispatcher("手写识别服务未就绪，请稍后重试")
+    }
+
+    /** 仅供测试重置状态。 */
+    internal fun resetToastThrottleForTest() {
+        lastBindFailureToastMs = null
+        toastDispatcher = { msg ->
+            val ctx = appContext
+            if (ctx != null) {
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     fun initialize(context: Context): Boolean {
         if (initialized && inferenceClient?.isBound() == true) return true
 
         val ctx = context.applicationContext
-        val modelDir = ModelStorage.getModelDir(ctx, "ochwpro")
+        val modelDir = runCatching { ModelStorage.getModelDir(ctx, "ochwpro") }.getOrNull() ?: return false
         // 兼容旧版：旧版手写模型在 filesDir 根目录
         ModelStorage.migrateLegacyForModel(ctx, "ochwpro")
-        val modelFile = File(modelDir, "ochwpro.onnx")
-        val charIndexFile = File(modelDir, "char_index.json")
+        val modelFile = runCatching { com.kingzcheung.xime.model.ModelPaths.child(modelDir, "ochwpro.onnx") }.getOrNull() ?: return false
+        val charIndexFile = runCatching { com.kingzcheung.xime.model.ModelPaths.child(modelDir, "char_index.json") }.getOrNull() ?: return false
 
-        if (!modelFile.exists() || !charIndexFile.exists()) {
+        if (!modelFile.isFile || !charIndexFile.isFile) {
             Log.w(TAG, "Model files not found: $modelFile, $charIndexFile")
             return false
         }
@@ -75,6 +121,7 @@ object HandwritingEngine {
             val bound = runBlocking { client.ensureBound() }
             if (!bound) {
                 Log.e(TAG, "Failed to bind InferenceService for handwriting")
+                notifyBindFailure()
                 return false
             }
             val loaded = runBlocking {
@@ -86,6 +133,7 @@ object HandwritingEngine {
             }
             if (!loaded) {
                 Log.e(TAG, "Failed to load handwriting model in inference process")
+                notifyBindFailure()
                 return false
             }
 
@@ -123,7 +171,8 @@ object HandwritingEngine {
         val exists = runCatching {
             ModelStorage.migrateLegacyForModel(context, "ochwpro")
             val modelDir = ModelStorage.getModelDir(context, "ochwpro")
-            File(modelDir, "ochwpro.onnx").exists() && File(modelDir, "char_index.json").exists()
+            com.kingzcheung.xime.model.ModelPaths.child(modelDir, "ochwpro.onnx").isFile &&
+                com.kingzcheung.xime.model.ModelPaths.child(modelDir, "char_index.json").isFile
         }.getOrDefault(false)
         modelCheckAtMs = now
         if (exists) modelCheckPositive = true

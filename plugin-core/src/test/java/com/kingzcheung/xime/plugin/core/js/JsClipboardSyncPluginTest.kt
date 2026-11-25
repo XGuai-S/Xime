@@ -118,6 +118,31 @@ class JsClipboardSyncPluginTest {
     }
 
     @Test
+    fun `connection test distinguishes successful null from rejected and missing methods`() {
+        for ((script, expected) in listOf(
+            "globalThis.plugin = {clipboardSync: {test: async () => null}}" to null,
+            "globalThis.plugin = {clipboardSync: {test: async () => { throw new Error('offline') }}}" to "连接测试执行失败",
+            "globalThis.plugin = {clipboardSync: {}}" to "插件未提供连接测试",
+        )) {
+            val dir = tmp.newFolder()
+            val entry = File(dir, "main.js").apply { writeText(script) }
+            val store = InMemoryConfigStore()
+            val runtime = JsScriptRuntime("com.test.connection", dir, "main.js", store)
+            try {
+                assertTrue(runtime.load())
+                val info = PluginInfo(
+                    id = "com.test.connection", name = "测试", description = "测试", iconResId = 0,
+                    versionCode = 1, versionName = "1.0", path = entry.absolutePath, type = "clipboard_sync",
+                )
+                val adapter = JsClipboardSyncPluginAdapter(runtime, PluginContext(application = Application(), pluginInfo = info, configStore = store))
+                assertEquals(expected, runBlocking { adapter.testConnection() })
+            } finally {
+                runtime.close()
+            }
+        }
+    }
+
+    @Test
     fun `main js loads and exposes sync contract`() {
         val store = InMemoryConfigStore()
         val adapter = newAdapter(store, MockHttpHostApi())

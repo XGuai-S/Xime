@@ -10,7 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * 自动备份调度器：周期由 xime.yaml `backup.auto_interval_hours` 配置（默认 12 小时），
+ * 自动备份调度器：周期由 xime.yaml `backup.auto_interval_hours` 配置（默认 24 小时），
  * 距上次成功备份超过周期时自动执行云备份（配置了 WebDAV 等备份插件且启用、已配置就绪时）。
  *
  * 为什么用「Application 协程 + 时间戳」而不是 AlarmManager/WorkManager：
@@ -65,6 +65,8 @@ object AutoBackup {
                     delay(POLL_MS)
                     continue
                 }
+                // maybeAutoBackup 内部已把「还没到周期」放在最前面判（一次 SharedPreferences 读），
+                // 未到期的轮询是近乎零成本的，不需要在这里再做前置判断。
                 try {
                     val ran = BackupManager.maybeAutoBackup(context)
                     if (ran) FileLogger.i(TAG, "自动备份检查已执行（周期 ${interval / 3600_000}h）")

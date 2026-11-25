@@ -3,6 +3,15 @@ package com.kingzcheung.xime.settings
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.kingzcheung.xime.clipboard.ClipboardBackup
+import com.kingzcheung.xime.clipboard.ClipboardBackupCodec
+import com.kingzcheung.xime.clipboard.ClipboardBackupRecord
+import com.kingzcheung.xime.clipboard.ClipboardImageStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
@@ -27,6 +36,8 @@ import java.util.zip.ZipInputStream
  * - `_xime_backup/plugin_configs/<pluginId>.json`   插件配置（密文原样，安全换机不解密）
  * - `_xime_backup/plugins.xml`                      插件注册表（含启用状态）
  * - `_xime_backup/plugins/<pluginId>/…`             插件包（仅完整备份，包体可能数 MB）
+ * - `_xime_backup/clipboard/manifest.json`           普通历史/快捷发送（排除 OTP，Room 合并）
+ * - `_xime_backup/clipboard/images/<sha256>.<ext>`    清单声明的图片资源
  *
  * 恢复后：rime 文件重启输入会话生效；插件/设置在重启应用后生效（插件随 Application 重建加载）。
  * 注意：userdb 为 leveldb，运行中打快照存在一致性风险（文件级覆盖合并），
@@ -103,68 +114,142 @@ object BackupManager {
     /**
      * 云备份到远端。返回 BackupResult（失败含原因）。
      *
-     * 打包前先触发一次引擎 sync：librime 把各 userdb 导出成
-     * `rime/sync/<installation_id>/` 下的 `*.userdb.txt` 文本快照，随包上传（恢复侧再合并）。
-     * 引擎未就绪时按"仅打包现有快照"降级，并在成功消息里说明，不阻断备份。
+     * **优先文件级增量**：插件支持 `backup.pushFile` 时，本地打包后按内容哈希只上传
+     * 变化的文件（见 [IncrementalBackup]）；插件不支持或远端查询失败时回退整包上传。
+     *
+     * 不再触发 librime `sync` 导出 `*.userdb.txt` 快照：那份快照是整包时代的产物，
+     * 文件级备份直接传 rime 目录里的原始文件，恢复时逐文件写回，不需要先导出再合并。
      */
     suspend fun backupNow(
         context: Context,
         plugin: BackupPlugin
     ): com.kingzcheung.xime.plugin.core.api.BackupResult = backupMutex.withLock {
-        // 先刷新自造词快照（引擎未就绪则用现有快照并在成功消息里说明）
-        val dictSnapshotNote = if (SyncManager.syncNow(context).isSuccess) {
-            Log.i(TAG, "Backup: 自造词快照已刷新")
-            null
-        } else {
-            Log.w(TAG, "Backup: 引擎未就绪，使用现有自造词快照（可能非最新）")
-            "（自造词快照未刷新：需先唤起键盘一次）"
-        }
-        // 流式打包到 cacheDir：包体不驻留内存（含方案词典与插件包时可达数十 MB）
-        val (fileName, archive) = RimeExportManager.buildArchiveToFile(context)
-            .getOrElse {
-                FileLogger.w(TAG, "备份打包失败: ${it.message}", it)
-                return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = it.message)
-            }
-        return@withLock try {
-            Log.i(TAG, "Backup: name=$fileName size=${archive.length()}")
-            val result = plugin.pushBackup(fileName, archive)
-            if (result.ok) {
-                // 上传成功即一次完整备份，刷新卡片状态
+        val runId = BackupRunLog.begin(BackupRunTarget.CLOUD)
+        var archive: File? = null
+        try {
+            val coroutineContext = currentCoroutineContext()
+            val checkActive = { coroutineContext.ensureActive() }
+
+            // ── 第一选择：文件级增量 ──────────────────────────────────
+            val incremental = IncrementalBackup.backup(context, plugin, runId, checkActive)
+            incremental.getOrNull()?.let { outcome ->
+                checkActive()
                 SettingsPreferences.setLastBackupAt(context, System.currentTimeMillis())
-                // 按 xime.yaml backup.keep_count 清理远端旧备份，只保留最近 N 份。
-                // 失败不影响本次备份结果（仅记日志）——清理是维护性动作，不让它
-                // 反过来把「备份成功」变成失败。
-                pruneRemoteBackups(context, plugin)
-                if (dictSnapshotNote != null) result.copy(message = dictSnapshotNote) else result
-            } else result
+                BackupRunLog.finish(runId, BackupRunOutcome.SUCCESS)
+                val msg = if (outcome.uploaded == 0) {
+                    "没有变化，无需上传（共 ${outcome.skipped} 个文件已是最新）"
+                } else {
+                    "已增量上传 ${outcome.uploaded} 个文件（${outcome.skipped} 个未变），共 " +
+                        "${outcome.bytes / 1024} KB"
+                }
+                FileLogger.i(TAG, "增量备份完成：$msg")
+                return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = true, message = msg)
+            }
+            incremental.exceptionOrNull()?.let {
+                if (it is CancellationException) throw it
+                // 增量中途失败：不立刻放弃，回退整包再试一次（整包是更保守的路径）
+                FileLogger.w(TAG, "增量备份失败，回退整包: ${it.message}")
+            }
+
+            // ── 回退：整包上传（老插件 / 增量失败） ────────────────────
+            BackupRunLog.stage(runId, BackupRunStage.PACKING)
+            val packed = RimeExportManager.buildArchiveToFile(context, runId, checkActive).getOrElse {
+                if (it is CancellationException) throw it
+                BackupRunLog.finish(runId, BackupRunOutcome.PACKING_FAILED)
+                FileLogger.w(TAG, "完整备份打包失败")
+                return@withLock com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = "完整备份打包失败")
+            }
+            val (fileName, packedFile) = packed
+            archive = packedFile
+            checkActive()
+            BackupRunLog.stage(runId, BackupRunStage.UPLOADING)
+            val result = plugin.pushBackup(fileName, packedFile)
+            checkActive()
+            if (!result.ok) {
+                BackupRunLog.finish(runId, BackupRunOutcome.UPLOAD_FAILED)
+                return@withLock result.copy(message = "完整备份上传未完成")
+            }
+            SettingsPreferences.setLastBackupAt(context, System.currentTimeMillis())
+            try {
+                if (!pruneRemoteBackups(context, plugin, runId, fileName, result.id)) BackupRunLog.remoteCleanupFailed(runId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                BackupRunLog.remoteCleanupFailed(runId)
+            }
+            checkActive()
+            BackupRunLog.finish(runId, BackupRunOutcome.SUCCESS)
+            result
+        } catch (e: CancellationException) {
+            BackupRunLog.finish(runId, BackupRunOutcome.CANCELLED)
+            throw e
+        } catch (_: Exception) {
+            BackupRunLog.finish(runId, BackupRunOutcome.FAILED)
+            FileLogger.w(TAG, "完整云备份流程未完成")
+            com.kingzcheung.xime.plugin.core.api.BackupResult(ok = false, message = "完整云备份流程未完成")
         } finally {
-            archive.delete()
+            runCatching { archive?.delete() }
         }
     }
 
     /**
      * 清理远端备份目录，只保留最近 [BackupConfig.keepCount] 份（含刚上传的）。
      *
-     * listBackups 已按创建时间**倒序**返回（WebDAV 插件按 createdAt 排序），
-     * 直接取前 N 个保留、其余逐个 [deleteBackup]。远端不提供时间戳（createdAt=0）
-     * 时也按列表顺序保留前 N——此时顺序即插件返回顺序，与展示一致。
+     * 仅整理已识别的完整备份，按有效时间倒序保留；未知文件、无时间戳及本次上传均不删除。
+     * 本次上传尚未出现在列表时延后清理，避免过期列表导致误删。
      *
      * keepCount <= 0 表示不清理（保留全部历史）。
      */
-    private suspend fun pruneRemoteBackups(context: Context, plugin: BackupPlugin) {
-        val keepCount = KeysConfigHelper.loadBackupConfig(context).keepCount
-        if (keepCount <= 0) return
-        val remote = plugin.listBackups() ?: return
-        if (remote.size <= keepCount) return
-        val toDelete = remote.drop(keepCount) // 保留前 keepCount 个（最新），删后面更旧的
+    private suspend fun pruneRemoteBackups(
+        context: Context,
+        plugin: BackupPlugin,
+        runId: Long,
+        uploadedName: String,
+        uploadedId: String?,
+    ): Boolean = cleanupRemoteBackups(
+        plugin, KeysConfigHelper.loadBackupConfig(context).keepCount, uploadedName, uploadedId, runId,
+    )
+
+    internal suspend fun cleanupRemoteBackups(
+        plugin: BackupPlugin,
+        keepCount: Int,
+        uploadedName: String,
+        uploadedId: String?,
+        runId: Long = 0L,
+    ): Boolean {
+        if (keepCount <= 0) return true
+        BackupRunLog.stage(runId, BackupRunStage.CLEANING_REMOTE)
+        val remote = plugin.listBackups() ?: return false
+        // 同一 ID 的冲突元数据不能证明归属，整组保留。
+        val unambiguous = remote.groupBy { it.id }.values.filter { group -> group.distinct().size == 1 }.map { it.first() }
+        val managed = unambiguous.filter { it.id.isNotBlank() && isManagedFullBackupName(it.name) }
+        val uploaded = managed.singleOrNull {
+            it.name == uploadedName && (uploadedId.isNullOrBlank() || it.id == uploadedId)
+        } ?: return false
+        val toDelete = managed.asSequence()
+            .filter { it.id != uploaded.id && it.createdAt > 0 }
+            .sortedWith(compareByDescending<RemoteBackupEntry> { it.createdAt }.thenBy { it.id })
+            .drop(keepCount - 1)
+            .toList()
+        var deleted = 0
         for (entry in toDelete) {
-            val ok = runCatching { plugin.deleteBackup(entry.id) }.getOrDefault(false)
-            Log.i(
-                TAG,
-                "Backup: 清理旧备份 ${entry.name}（id=${entry.id}）= ${if (ok) "成功" else "失败"} 保留${keepCount}份"
-            )
+            val ok = try {
+                plugin.deleteBackup(entry.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (ok) deleted++
         }
-        Log.i(TAG, "Backup: 远端清理完成，保留最近 $keepCount 份，删除 ${toDelete.size} 份")
+        Log.i(TAG, "Backup: 远端历史整理，保留 $keepCount 份，已删除 $deleted 份")
+        return deleted == toDelete.size
+    }
+
+    private fun isManagedFullBackupName(name: String): Boolean {
+        val date = Regex("^(?:Xime完整备份|Xime配置)-([0-9]{4}-[0-9]{2}-[0-9]{2})\\.zip$")
+            .matchEntire(name)?.groupValues?.get(1) ?: return false
+        return runCatching { java.time.LocalDate.parse(date) }.isSuccess
     }
 
     /** 列出远端备份条目（透传插件；失败返回 null）。 */
@@ -186,6 +271,11 @@ object BackupManager {
         val intervalMs = KeysConfigHelper.loadBackupConfig(context).autoIntervalHours.let { hours ->
             if (hours <= 0) return false else hours * 60 * 60 * 1000L
         }
+        // 还没到周期就直接返回：这是最便宜的判据（一次 SharedPreferences 读），
+        // 而周期通常是 12/24 小时——绝大多数轮询到这里就该结束，
+        // 不必再走「取插件列表 + 逐个查配置」那套。
+        val last = SettingsPreferences.getLastBackupAt(context)
+        if (System.currentTimeMillis() - last < intervalMs) return false
         val enabled = ExtensionManager.getEnabledBackupPlugins(context)
         val plugin = enabled.firstOrNull { it.first == SettingsPreferences.getBackupPluginId(context) }
             ?: enabled.firstOrNull()
@@ -195,8 +285,6 @@ object BackupManager {
             Log.i(TAG, "AutoBackup: 备份插件未配置完整，跳过自动备份")
             return false
         }
-        val last = SettingsPreferences.getLastBackupAt(context)
-        if (System.currentTimeMillis() - last < intervalMs) return false
         Log.i(TAG, "AutoBackup: 距上次备份 ${(System.currentTimeMillis() - last) / 3600_000}h（周期 ${intervalMs / 3600_000}h），开始自动备份")
         val result = backupNow(context, plugin.second)
         if (!result.ok) {
@@ -222,23 +310,39 @@ object BackupManager {
         backupMutex.withLock {
         // 恢复必须与备份互斥：否则 AutoBackup 的定时检查可能在「恢复写到一半」时
         // 把半新半旧的 rime 目录打包上传，覆盖掉云端唯一一份好备份。
+        //
+        // 用户在备份列表里选了具体 id，就恢复那个**整包**——这是列表的语义。
+        // 之前无条件优先"文件级镜像恢复"会无视所选 id：选了 3 天前的旧包，
+        // 实际恢复的却是当前镜像，时间点回滚完全失效。
+        // 只有按 id 拿不到整包（镜像模式可能只留清单没有历史包）时才回退增量镜像恢复。
         val download = plugin.pullBackup(id)
-            ?: run {
-                FileLogger.w(TAG, "从远端下载备份包失败（id=$id）")
-                return@withLock Result.failure(Exception("下载备份包失败"))
+        if (download != null) {
+            return@withLock try {
+                val outcome = restoreFromArchive(context, download.file)
+                if (outcome.isSuccess) {
+                    FileLogger.i(TAG, "备份恢复完成：${outcome.getOrNull()}")
+                } else {
+                    FileLogger.w(TAG, "备份恢复失败: ${outcome.exceptionOrNull()?.message}")
+                }
+                outcome
+            } finally {
+                // 恢复完释放落盘句柄（删除宿主缓存文件；幂等）
+                plugin.releaseBackup(download.blobId)
             }
-        return@withLock try {
-            val outcome = restoreFromArchive(context, download.file)
-            if (outcome.isSuccess) {
-                FileLogger.i(TAG, "备份恢复完成：${outcome.getOrNull()}")
-            } else {
-                FileLogger.w(TAG, "备份恢复失败: ${outcome.exceptionOrNull()?.message}")
-            }
-            outcome
-        } finally {
-            // 恢复完释放落盘句柄（删除宿主缓存文件；幂等）
-            plugin.releaseBackup(download.blobId)
         }
+
+        // 回退：文件级镜像恢复（远端只有持续同步的镜像、没有该 id 的整包时）
+        FileLogger.w(TAG, "按 id 下载整包失败（id=$id），回退文件级镜像恢复")
+        val coroutineContext = currentCoroutineContext()
+        val checkActive = { coroutineContext.ensureActive() }
+        val incremental = IncrementalBackup.restore(context, plugin, checkActive)
+            ?: return@withLock Result.failure(Exception("下载备份包失败"))
+        if (incremental.isSuccess) {
+            FileLogger.i(TAG, "文件级备份恢复完成")
+        } else {
+            FileLogger.w(TAG, "文件级备份恢复失败: ${incremental.exceptionOrNull()?.message}")
+        }
+        return@withLock incremental
         }
 
     /**
@@ -254,7 +358,7 @@ object BackupManager {
         val temp = File.createTempFile("local-import-", ".zip", context.cacheDir)
         return@withLock try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                temp.outputStream().use { output -> input.copyTo(output) }
+                copyLocalImportBounded(input, temp)
             } ?: return@withLock Result.failure(Exception("无法读取所选文件"))
             if (!isBackupPackage(temp)) {
                 return@withLock Result.failure(
@@ -262,6 +366,8 @@ object BackupManager {
                 )
             }
             restoreFromArchive(context, temp)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "importLocal failed", e)
             Result.failure(e)
@@ -269,6 +375,32 @@ object BackupManager {
             temp.delete()
         }
         }
+
+    /**
+     * 有界流式拷贝本地导入包到缓存临时文件。
+     *
+     * 一次 `copyTo` 没有上限：误选/恶意的超大文件会把 cacheDir 写满，
+     * 且中间没有取消检查。这里按 [MAX_ARCHIVE_FILE_BYTES] 硬性截断，
+     * 超限即失败（调用方负责删临时文件），每个分片检查一次协程取消。
+     */
+    private suspend fun copyLocalImportBounded(input: java.io.InputStream, target: File) {
+        var total = 0L
+        val buffer = ByteArray(64 * 1024)
+        target.outputStream().use { output ->
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > MAX_ARCHIVE_FILE_BYTES) {
+                    throw java.io.IOException(
+                        "备份包超过 ${MAX_ARCHIVE_FILE_BYTES / 1024 / 1024}MB 上限，已中止导入"
+                    )
+                }
+                output.write(buffer, 0, read)
+            }
+        }
+    }
 
     /** 判定一个 zip 是否是本应用的备份包（看中央目录里有没有 `_xime_backup/` 条目，不解压）。 */
     fun isBackupPackage(archive: File): Boolean {
@@ -290,7 +422,7 @@ object BackupManager {
         // 用户看到的就是「提示恢复成功，重启后设置一点没变」。
         // 云端恢复与本机整包导入都走这里（另一组 restoreArchive(context, …) 重载早已传了
         // 两个 writer，只有这条主路径漏了）。
-        val outcome = restoreArchiveOutcome(
+        val outcome = restoreWithMirror(context) { restoreArchiveOutcome(
             context.filesDir,
             { prefsName, json ->
                 restorePrefsJson(context.getSharedPreferences(prefsName, Context.MODE_PRIVATE), json)
@@ -298,12 +430,13 @@ object BackupManager {
             archive,
             visibleConfigWriter = { text -> UserConfigDir.writeCustomConfig(context, text) },
             userDataWriter = { fileName, text -> restoreUserDataFile(context, fileName, text) },
-        ).onSuccess {
+            clipboardRestorer = { records, staging -> ClipboardBackup.restore(context, records, staging) },
+        ) }.onSuccess {
             Log.i(TAG, "Restore done -> ${context.filesDir.path}")
         }.onFailure { e ->
             Log.e(TAG, "restoreArchive failed", e)
         }
-        return outcome.map { afterRestore(context, it) }
+        return outcome.map { afterRestore(context, it); it }.completion()
     }
 
     /**
@@ -316,6 +449,11 @@ object BackupManager {
      * 引擎未就绪（冷启动直接进设置页）时记 pending 标记，由 IME 服务引擎就绪后补做。
      */
     private suspend fun afterRestore(context: Context, outcome: RestoreOutcome) {
+        // 恢复是「绕过 save 直接写盘」：AutoWordStore.dataVersion 不会自增，运行中的
+        // 输入法服务据此判定「词库没变」→ 不重载 → 用户恢复完立刻打字看到的仍是旧候选，
+        // 只能靠之后某次 save 的三方合并慢慢自愈。这里显式推一格版本号，让下个会话重载。
+        runCatching { com.kingzcheung.xime.service.AutoWordStore.invalidateForExternalChange() }
+            .onFailure { Log.w(TAG, "Restore: 词库版本失效标记失败", it) }
         if (outcome.dictSnapshotCount > 0) {
             // 词库不直接覆盖 leveldb：快照交给 librime `UserDictManager::Restore` 按时间戳合并
             // （与词库同步同语义）：备份后本机新打的词不会被旧备份吃掉。
@@ -331,43 +469,64 @@ object BackupManager {
                     SettingsPreferences.setPendingDictMerge(context, mergedCount == 0)
                 }
                 .onFailure { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     Log.w(TAG, "Restore: 引擎未就绪，自造词快照待合并（pending）", e)
                     SettingsPreferences.setPendingDictMerge(context, true)
                 }
         }
-        // default.custom.yaml 已随包恢复（启用方案列表）：重新镜像进 default.yaml。
-        // default.yaml 本身不进包（派生基座），避免恢复时把旧版本基座一起盖回来。
-        try {
-            SchemaManager.applyEnabledSchemasToDefaultYaml(context)
-        } catch (e: Exception) {
-            Log.e(TAG, "Restore: 重新镜像 schema_list 失败", e)
-        }
-        // 把刚恢复的私有 rime 内容推回可见镜像并刷新同步基线。
-        //
-        // 为什么必须做：恢复是覆盖式写入 `files/rime/`，但可见目录
-        // `/storage/emulated/0/rime/` 里还留着**恢复前的旧副本**，且基线清单没跟上。
-        // 用户随后点「重新部署」(oiz → reloadConfig) 会先调 RimeUserFileSync.sync()，
-        // 三向比对发现「可见改了/私有也变了 + 基线过期」，按冲突规则保留可见旧版本
-        // 并写回私有目录——于是刚恢复的内容被旧文件盖掉，表现为「恢复完再部署没用」。
-        // 这里用**单向强制镜像**（私有→可见，覆盖+重置基线），恢复内容成为权威；
-        // 之后 reloadConfig 再触发普通 sync 时两侧与基线一致，是空操作，不再冲突。
-        try {
-            RimeUserFileSync.forceSyncPrivateToVisible(context)
-        } catch (e: Exception) {
-            Log.e(TAG, "Restore: 可见目录同步失败", e)
+    }
+
+    /** Runs file publication and its mirror before ordinary sync can observe a mixed state. */
+    private fun restoreWithMirror(
+        context: Context,
+        restore: () -> Result<RestoreOutcome>,
+    ): Result<RestoreOutcome> = RimeUserFileSync.withRestoreSyncLock {
+        restore().map { outcome ->
+            val failures = outcome.failures.toMutableSet()
+            val paths = outcome.restoredRimePaths.toMutableSet()
+            if ("default.custom.yaml" in paths) {
+                try {
+                    if (SchemaManager.applyEnabledSchemasToDefaultYaml(context)) paths += "default.yaml"
+                    else failures += RestoreFailure.SCHEMAS
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    failures += RestoreFailure.SCHEMAS
+                }
+            }
+            // 必须先按恢复清单镜像顶层源文件：旧备份的未启用方案可能仍平铺在顶层，
+            // 后面的 ensureSchemeLayout 会把它们移进 schemes/，再镜像就会报源缺失。
+            try {
+                RimeUserFileSync.forceSyncPrivateToVisible(context, paths)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                failures += RestoreFailure.MIRROR
+            }
+            // 布局整理在镜像之后：两边都拿到恢复文件，再各自归档未启用方案。
+            try {
+                SchemaManager.ensureSchemeLayout(context)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // 布局整理失败不影响恢复结果本身（文件已经写好了），只记日志
+            }
+            outcome.copy(failures = failures)
         }
     }
 
     /** 校验 zip 条目路径并解压覆盖（rime 文件 + META 元数据路由），Android 入口。 */
     fun restoreArchive(context: Context, archive: File): Result<Unit> {
         val filesDir = context.filesDir
-        return restoreArchive(filesDir, { prefsName, json ->
+        return restoreWithMirror(context) { restoreArchiveOutcome(filesDir, { prefsName, json ->
             restorePrefsJson(context.getSharedPreferences(prefsName, Context.MODE_PRIVATE), json)
         }, archive, visibleConfigWriter = { text ->
             UserConfigDir.writeCustomConfig(context, text)
         }, userDataWriter = { fileName, text ->
             restoreUserDataFile(context, fileName, text)
-        }).onSuccess {
+        }, clipboardRestorer = { records, staging ->
+            ClipboardBackup.restore(context, records, staging)
+        }) }.completion().onSuccess {
             Log.i(TAG, "Restore done -> ${filesDir.path}")
         }.onFailure { e ->
             Log.e(TAG, "restoreArchive failed", e)
@@ -377,13 +536,15 @@ object BackupManager {
     /** 字节流入口（内存解压；本地导入等小包场景），内部复用文件流核心。 */
     fun restoreArchive(context: Context, bytes: ByteArray): Result<Unit> {
         val filesDir = context.filesDir
-        return restoreArchive(filesDir, { prefsName, json ->
+        return restoreWithMirror(context) { restoreArchiveOutcome(filesDir, { prefsName, json ->
             restorePrefsJson(context.getSharedPreferences(prefsName, Context.MODE_PRIVATE), json)
-        }, bytes, visibleConfigWriter = { text ->
+        }, bytes.inputStream(), visibleConfigWriter = { text ->
             UserConfigDir.writeCustomConfig(context, text)
         }, userDataWriter = { fileName, text ->
             restoreUserDataFile(context, fileName, text)
-        })
+        }, clipboardRestorer = { records, staging ->
+            ClipboardBackup.restore(context, records, staging)
+        }) }.completion()
     }
 
     /**
@@ -392,7 +553,26 @@ object BackupManager {
      * @param entryCount        落盘条目总数（0 → 视为空包失败）
      * @param dictSnapshotCount 落盘的自造词快照文件数（`sync/<id>/` 下的 `*.userdb.txt`）
      */
-    internal data class RestoreOutcome(val entryCount: Int, val dictSnapshotCount: Int)
+    internal enum class RestoreFailure(val label: String) {
+        PREFERENCES("设置"), USER_DATA("用户词表"), CONFIG("配置"), CLIPBOARD("剪贴板"),
+        MIRROR("可见目录同步"), SCHEMAS("启用方案"),
+    }
+
+    internal class PartialRestoreException(val failures: Set<RestoreFailure>) : java.io.IOException(
+        "文件恢复已完成，部分内容未恢复：" + failures.sortedBy { it.ordinal }.joinToString("、") { it.label },
+    )
+
+    internal data class RestoreOutcome(
+        val entryCount: Int,
+        val dictSnapshotCount: Int,
+        val restoredRimePaths: Set<String> = emptySet(),
+        val failures: Set<RestoreFailure> = emptySet(),
+    )
+
+    private fun Result<RestoreOutcome>.completion(): Result<Unit> = fold(
+        onSuccess = { if (it.failures.isEmpty()) Result.success(Unit) else Result.failure(PartialRestoreException(it.failures)) },
+        onFailure = { Result.failure(it) },
+    )
 
     /**
      * 恢复一张用户数据表：优先写可见目录（与 xime.yaml 同级，用户可直接查看），
@@ -405,9 +585,9 @@ object BackupManager {
      */
     private fun restoreUserDataFile(context: Context, fileName: String, text: String): Boolean {
         if (UserConfigDir.writeText(context, fileName, text)) return true
-        return runCatching {
-            File(context.filesDir, fileName).writeText(text)
-        }.isSuccess
+        // 注意：AtomicFileWriter.write 失败时返回 false 而**不抛异常**，
+        // 这里必须直接采纳布尔值；用 runCatching{}.isSuccess 会把失败误判成成功。
+        return com.kingzcheung.xime.util.AtomicFileWriter.write(File(context.filesDir, fileName), text)
     }
 
     /**
@@ -424,10 +604,11 @@ object BackupManager {
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
         archive: File,
         visibleConfigWriter: ((String) -> Boolean)? = null,
-        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
+        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null,
+        clipboardRestorer: ((List<ClipboardBackupRecord>, File) -> Unit)? = null
     ): Result<Unit> = restoreArchiveOutcome(
-        filesDir, prefsRestorer, archive.inputStream(), visibleConfigWriter, userDataWriter
-    ).map { }
+        filesDir, prefsRestorer, archive.inputStream(), visibleConfigWriter, userDataWriter, clipboardRestorer
+    ).completion()
 
     /** 字节入口：语义与文件入口一致（校验规则共用一份实现）。 */
     fun restoreArchive(
@@ -435,19 +616,21 @@ object BackupManager {
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
         bytes: ByteArray,
         visibleConfigWriter: ((String) -> Boolean)? = null,
-        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
+        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null,
+        clipboardRestorer: ((List<ClipboardBackupRecord>, File) -> Unit)? = null
     ): Result<Unit> = restoreArchiveOutcome(
-        filesDir, prefsRestorer, bytes.inputStream(), visibleConfigWriter, userDataWriter
-    ).map { }
+        filesDir, prefsRestorer, bytes.inputStream(), visibleConfigWriter, userDataWriter, clipboardRestorer
+    ).completion()
 
     private fun restoreArchiveOutcome(
         filesDir: File,
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
         archive: File,
         visibleConfigWriter: ((String) -> Boolean)? = null,
-        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
+        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null,
+        clipboardRestorer: ((List<ClipboardBackupRecord>, File) -> Unit)? = null
     ): Result<RestoreOutcome> = restoreArchiveOutcome(
-        filesDir, prefsRestorer, archive.inputStream(), visibleConfigWriter, userDataWriter
+        filesDir, prefsRestorer, archive.inputStream(), visibleConfigWriter, userDataWriter, clipboardRestorer
     )
 
     /** 字节入口（internal 供单测断言条目计数）：语义与文件入口一致。 */
@@ -456,9 +639,11 @@ object BackupManager {
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
         bytes: ByteArray,
         visibleConfigWriter: ((String) -> Boolean)? = null,
-        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
+        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null,
+        clipboardRestorer: ((List<ClipboardBackupRecord>, File) -> Unit)? = null,
+        transactionIo: RestoreTransactionIo = RestoreTransactionIo(),
     ): Result<RestoreOutcome> = restoreArchiveOutcome(
-        filesDir, prefsRestorer, bytes.inputStream(), visibleConfigWriter, userDataWriter
+        filesDir, prefsRestorer, bytes.inputStream(), visibleConfigWriter, userDataWriter, clipboardRestorer, transactionIo
     )
 
     private fun restoreArchiveOutcome(
@@ -466,7 +651,9 @@ object BackupManager {
         prefsRestorer: (prefsName: String, json: ByteArray) -> Unit,
         rawInput: java.io.InputStream,
         visibleConfigWriter: ((String) -> Boolean)? = null,
-        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null
+        userDataWriter: ((fileName: String, text: String) -> Boolean)? = null,
+        clipboardRestorer: ((List<ClipboardBackupRecord>, File) -> Unit)? = null,
+        transactionIo: RestoreTransactionIo = RestoreTransactionIo(),
     ): Result<RestoreOutcome> {
         // 两阶段恢复：阶段一全部解到 staging（可随时整目录丢弃），阶段二逐文件换入 + 事务日志。
         // 换入按**文件**进行而不是整目录替换：备份包刻意排除 build/、*.userdb/、default.yaml、
@@ -475,14 +662,22 @@ object BackupManager {
         val rollback = File(filesDir, ROLLBACK_DIR_NAME)
         val journal = File(filesDir, JOURNAL_FILE_NAME)
         val plan = mutableListOf<String>()
+        val transaction = RestoreFileTransaction(filesDir, staging, rollback, journal, transactionIo)
+        var ownsStaging = false
         try {
-            discardTransaction(staging, rollback, journal)
-            staging.mkdirs()
+            if (!transaction.prepare()) return Result.failure(Exception("上次恢复事务未完成，已保留原文件与恢复日志"))
+            ownsStaging = true
+            if (!staging.mkdirs() && !staging.isDirectory) return Result.failure(Exception("恢复暂存目录不可用"))
             val stagingRime = File(staging, "rime")
             var entryCount = 0
+            /** 真正落盘/入计划的条目数（只含文件条目）；目录条目算预算但不算内容。 */
+            var fileEntryCount = 0
             var dictSnapshotCount = 0
             var totalBytes = 0L
             var formatVersion = 0
+            val clipboardEntries = mutableSetOf<String>()
+            val clipboardImages = mutableSetOf<String>()
+            var clipboardImageBytes = 0L
             // prefs 与「可见目录」写入是不可回滚的副作用：先攒在内存，等文件全部换入后再提交，
             // 避免出现「配置写进去了、文件没换上」的割裂态。
             val pendingPrefs = mutableListOf<Pair<String, ByteArray>>()
@@ -498,16 +693,48 @@ object BackupManager {
             ZipInputStream(rawInput).use { zis ->
                 while (true) {
                     val entry = zis.nextEntry ?: break
-                    if (entry.isDirectory) continue
                     val name = entry.name
+                    // 目录条目也要计入条目数预算：否则海量空目录条目可绕过条目上限
                     entryCount++
                     if (entryCount > MAX_ENTRY_COUNT) {
                         return Result.failure(
                             Exception("备份包条目过多（> $MAX_ENTRY_COUNT），已中止")
                         )
                     }
+                    if (entry.isDirectory) {
+                        // 目录条目正常是空正文；带正文的目录条目会绕过解压预算，直接拒绝
+                        if (zis.read() >= 0) {
+                            return Result.failure(Exception("备份包包含带正文的目录条目: $name"))
+                        }
+                        zis.closeEntry()
+                        continue
+                    }
+                    fileEntryCount++
                     if (name.startsWith(META_PREFIX)) {
                         val rel = name.removePrefix(META_PREFIX)
+                        if (rel.startsWith(ClipboardBackupCodec.PREFIX)) {
+                            require(clipboardEntries.add(rel)) { "剪贴板备份包含重复条目" }
+                            val limit = when {
+                                rel == ClipboardBackupCodec.MANIFEST -> ClipboardBackupCodec.MAX_MANIFEST_BYTES.toLong()
+                                ClipboardBackupCodec.isImageEntry(rel) -> ClipboardBackupCodec.MAX_IMAGE_BYTES
+                                else -> throw IllegalArgumentException("非法剪贴板备份路径")
+                            }
+                            val data = zis.readBounded(limit)
+                            totalBytes += data.size
+                            require(totalBytes <= MAX_TOTAL_BYTES) { "备份包解压后超过大小上限" }
+                            if (rel == ClipboardBackupCodec.MANIFEST) {
+                                pendingMemBytes += data.size
+                                require(pendingMemBytes <= MAX_PENDING_MEMORY_BYTES) { "备份包元数据超过内存预算" }
+                            } else {
+                                clipboardImages += rel
+                                clipboardImageBytes += data.size
+                                require(clipboardImages.size <= ClipboardBackupCodec.MAX_IMAGES &&
+                                    clipboardImageBytes <= ClipboardBackupCodec.MAX_IMAGE_TOTAL_BYTES) { "剪贴板图片超过总量上限" }
+                            }
+                            stageBytes(staging, rel, data)
+                            zis.closeEntry()
+                            continue
+                        }
                         val data = zis.readBounded(MAX_META_ENTRY_BYTES)
                         totalBytes += data.size
                         if (totalBytes > MAX_TOTAL_BYTES) {
@@ -555,7 +782,12 @@ object BackupManager {
                                 }
                             }
                             rel.startsWith("plugins/") -> {
-                                val relPath = "plugins/" + rel.removePrefix("plugins/")
+                                val pluginPath = rel.removePrefix("plugins/").replace('\\', '/')
+                                require(!isRootedEntryName(pluginPath) &&
+                                    pluginPath.split('/').none { it == ".." || it == "." || it.isEmpty() }) {
+                                    "备份包包含非法插件路径"
+                                }
+                                val relPath = "plugins/$pluginPath"
                                 stageBytes(staging, relPath, data)
                                 plan += relPath
                             }
@@ -572,7 +804,7 @@ object BackupManager {
                     }
                     // 条目名必须与 plan 用同一个规范化结果：plan 记的是 relName，
                     // 若这里用原始 name，含反斜杠或 "./" 前缀的条目会写成另一个文件名，
-                    // commitPlan 里 `!src.isFile → continue` 静默跳过，用户看到「恢复成功」但少文件。
+                    // 旧换入实现曾跳过缺失源文件，导致静默「恢复成功」但少文件。
                     val normalizedName = name.replace('\\', '/').removePrefix("./")
                     val target = File(stagingRime, normalizedName)
                     val canonicalRoot = stagingRime.canonicalPath + File.separator
@@ -650,7 +882,7 @@ object BackupManager {
                     zis.closeEntry()
                 }
             }
-            if (entryCount == 0) return Result.failure(Exception("备份包为空"))
+            if (fileEntryCount == 0) return Result.failure(Exception("备份包为空"))
             // 版本闸：拒绝更高版本的包（旧版应用会静默丢掉它不认识的字段）
             if (formatVersion > FORMAT_VERSION) {
                 return Result.failure(
@@ -663,57 +895,88 @@ object BackupManager {
             if (formatVersion == 0) {
                 FileLogger.w(TAG, "恢复：包内无 $MANIFEST_ENTRY（v1 旧包），按兼容模式恢复")
             }
+            val clipboardRecords = if (clipboardEntries.isEmpty()) null else {
+                require(ClipboardBackupCodec.MANIFEST in clipboardEntries) { "剪贴板资源缺少清单" }
+                ClipboardBackupCodec.decode(File(staging, ClipboardBackupCodec.MANIFEST).readBytes()).also {
+                    ClipboardBackupCodec.validateResources(it, staging, clipboardImages)
+                    require(it.isEmpty() || clipboardRestorer != null) { "此恢复入口未提供剪贴板合并器" }
+                }
+            }
+            if (!clipboardRecords.isNullOrEmpty()) {
+                // 只在预检期间持锁，退出后才换入文件；restorer 会再次取同一锁并复检。
+                runBlocking(Dispatchers.IO) {
+                    ClipboardImageStore.mutationMutex.withLock {
+                        ClipboardBackupCodec.validateExistingImages(filesDir, clipboardRecords)
+                    }
+                }
+            }
             // —— 阶段二：换入（带事务日志，可回滚） ——
-            if (!commitPlan(filesDir, staging, rollback, journal, plan)) {
+            if (!transaction.commit(plan)) {
                 return Result.failure(
-                    Exception("备份恢复换入失败，已回滚到恢复前状态；详情见日志")
+                    Exception("备份恢复文件事务未完成；已保留尚需处理的恢复材料，请重试或检查恢复日志")
                 )
             }
-            // 文件已换入，提交不可回滚的副作用（失败只记日志，不回滚文件：
-            // 设置项本就是合并写，少恢复几个键比让用户丢掉刚恢复的文件代价小得多）
+            // 文件已提交：继续各项副作用，并向外报告部分完成，不回滚已恢复的文件。
+            val failures = linkedSetOf<RestoreFailure>()
             pendingPrefs.forEach { (prefsName, data) ->
                 try {
                     prefsRestorer(prefsName, data)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    FileLogger.e(TAG, "恢复设置失败：$prefsName", e)
+                    failures += RestoreFailure.PREFERENCES
+                    FileLogger.e(TAG, "恢复设置未完成", e)
                 }
+            }
+            fun restoreWithFallback(primary: () -> Boolean, fallback: () -> Unit): Boolean {
+                try {
+                    if (primary()) return true
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) { }
+                return try {
+                    fallback()
+                    true
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) { false }
             }
             pendingUserData.forEach { (fileName, text) ->
-                val routed = userDataWriter?.invoke(fileName, text) ?: false
-                if (!routed) {
-                    runCatching { File(filesDir, fileName).writeText(text) }
-                        .onFailure { FileLogger.w(TAG, "恢复用户数据表失败：$fileName", it) }
-                }
+                if (!restoreWithFallback({ userDataWriter?.invoke(fileName, text) ?: false }, {
+                    // 写失败要抛出：restoreWithFallback 靠异常判定 fallback 是否成功
+                    if (!com.kingzcheung.xime.util.AtomicFileWriter.write(File(filesDir, fileName), text)) {
+                        throw java.io.IOException("写入失败: $fileName")
+                    }
+                })) failures += RestoreFailure.USER_DATA
             }
             pendingUserConfig.forEach { (relName, text) ->
-                val routed = visibleConfigWriter?.invoke(text) ?: false
-                if (!routed) {
+                if (!restoreWithFallback({ visibleConfigWriter?.invoke(text) ?: false }, {
                     val fallback = File(filesDir, "rime/$relName")
-                    runCatching {
-                        fallback.parentFile?.mkdirs()
-                        fallback.writeText(text)
-                    }.onFailure { FileLogger.w(TAG, "恢复用户配置失败：$relName", it) }
+                    check(fallback.parentFile!!.isDirectory || fallback.parentFile!!.mkdirs())
+                    if (!com.kingzcheung.xime.util.AtomicFileWriter.write(fallback, text)) {
+                        throw java.io.IOException("写入失败: $relName")
+                    }
+                })) failures += RestoreFailure.CONFIG
+            }
+            if (!clipboardRecords.isNullOrEmpty()) {
+                try {
+                    clipboardRestorer?.invoke(clipboardRecords, staging)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    failures += RestoreFailure.CLIPBOARD
                 }
             }
-            return Result.success(RestoreOutcome(entryCount, dictSnapshotCount))
+            return Result.success(RestoreOutcome(fileEntryCount, dictSnapshotCount,
+                plan.filter { it.startsWith("rime/") }.mapTo(linkedSetOf()) { it.removePrefix("rime/") }, failures))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             return Result.failure(e)
         } finally {
-            staging.deleteRecursively()
-            // 回滚目录只在「回滚本身失败」时保留：里面是恢复前的原始文件，
-            // 删掉就等于把用户数据一起删了，宁可留一个可人工取回的目录。
-            // journal 必须跟 rollback **同进退**：留着 rollback 却删了 journal，
-            // 下次启动 recoverInterruptedRestore 只会看到「没有日志 = 正常结束」，
-            // 于是这份回滚材料永不还原、也永不清理，用户得到的是半新半旧的 rime 目录。
-            if (rollback.listFiles()?.isEmpty() != false) {
-                rollback.deleteRecursively()
-                journal.delete()
-            } else {
-                FileLogger.e(
-                    TAG,
-                    "回滚未完成：保留 rollback=${rollback.path} 与 journal=${journal.path} 待下次启动重试",
-                )
-            }
+            runCatching { rawInput.close() }
+            // 旧事务恢复失败时不接管其暂存目录；日志/原件仍待恢复时也不清理任何材料。
+            if (ownsStaging && transaction.canDiscardStaging()) staging.deleteRecursively()
         }
     }
 
@@ -723,212 +986,28 @@ object BackupManager {
         writeChecked(target, staging, data)
     }
 
-    /**
-     * 阶段二：把 staging 里 [plan] 列出的每个文件换入 [filesDir]，逐条写事务日志。
-     *
-     * 每个文件：原目标先移入 [rollback]（记 `M`）→ staging 文件移入目标（记 `W`）。
-     * 任一步失败立即按日志反向撤销；进程若在此间被杀，下次启动由
-     * [recoverInterruptedRestore] 用同一份日志完成撤销。备份包范围外的文件
-     * （build/、*.userdb/、default.yaml 等不在 plan 里）完全不受影响。
-     */
-    private fun commitPlan(
-        filesDir: File,
-        staging: File,
-        rollback: File,
-        journal: File,
-        plan: List<String>
-    ): Boolean {
-        rollback.deleteRecursively()
-        rollback.mkdirs()
-        journal.writeText("")
-        // 事务日志改成「单流 + 立刻落盘」：
-        // - 旧实现每条 appendText 一次 open/close，且**先 movePath 再记录**。
-        //   movePath 与记录之间被杀 → rollback 里有原文件但日志没有 M 行 →
-        //   rollbackByJournal 永远搬不回去，用户数据就卡在半新半旧。
-        // - 现在是「先写 M 行并 fsync，再移动」，进程在任何时刻被杀，日志都至少覆盖
-        //   已经发生的移动；缓冲未落盘导致整段丢失的窗口也没了。
-        val journalOut = runCatching { java.io.FileOutputStream(journal, true) }.getOrNull()
-        fun journalLine(line: String) {
-            val out = journalOut ?: return
-            runCatching {
-                out.write(line.toByteArray(Charsets.UTF_8))
-                out.flush()
-                out.fd.sync()
-            }
-        }
-        var failure: Exception? = null
-        var skipped = 0
-        try {
-            for (rel in plan) {
-                val src = File(staging, rel)
-                if (!src.isFile) {
-                    // 计划里有、staging 里没有：说明条目名规范化不一致（历史上用原始 name
-                    // 写 staging、用 relName 记 plan）。至少要留痕，不能再静默「恢复成功」。
-                    skipped++
-                    FileLogger.w(TAG, "恢复换入：staging 缺少条目 $rel，已跳过")
-                    continue
-                }
-                val dst = File(filesDir, rel)
-                dst.parentFile?.mkdirs()
-                if (dst.exists()) {
-                    val bak = File(rollback, rel)
-                    bak.parentFile?.mkdirs()
-                    journalLine("M $rel\n")
-                    if (!movePath(dst, bak)) throw java.io.IOException("旧文件暂存失败: $rel")
-                }
-                if (!movePath(src, dst)) throw java.io.IOException("换入失败: $rel")
-                journalLine("W $rel\n")
-            }
-        } catch (e: Exception) {
-            failure = e
-        } finally {
-            runCatching { journalOut?.close() }
-        }
-        if (failure == null) {
-            if (skipped > 0) FileLogger.w(TAG, "恢复完成，但有 $skipped 个条目缺失（见上方日志）")
-            journal.delete()
-            rollback.deleteRecursively()
-            return true
-        }
-        FileLogger.e(TAG, "备份恢复换入失败，开始回滚", failure)
-        val ok = rollbackByJournal(filesDir, rollback, journal)
-        if (!ok) {
-            FileLogger.e(TAG, "回滚不完整：${rollback.path} 保留了恢复前的原始文件")
-        }
-        return false
-    }
 
     /**
-     * 按事务日志反向撤销：`W` 删除已换入的新文件，`M` 把原文件从备份目录移回。
+     * 按事务日志恢复：未提交的 M/W 撤销换入，末尾 C 标记只清理已提交原件。
      *
-     * 进程在换入中途被杀也能安全执行（日志是追加写的，末尾半行会被忽略）。
-     * @return 全部撤销成功 true；有残留 false（此时保留 [rollback] 供人工取回）
+     * 仅重放完整且安全的日志；半行或非法记录保留材料并拒绝继续。
+     * @return 事务恢复或清理完成 true；材料仍待处理 false
      */
-    private fun rollbackByJournal(filesDir: File, rollback: File, journal: File): Boolean {
-        if (!journal.isFile) return true
-        val lines = runCatching { journal.readLines() }.getOrDefault(emptyList())
-        var complete = true
-        for (line in lines.asReversed()) {
-            if (line.length < 3) continue
-            val op = line.substring(0, 1)
-            val rel = line.substring(2)
-            if (rel.isEmpty() || isRootedEntryName(rel) || rel.contains("..")) {
-                complete = false
-                continue
-            }
-            when (op) {
-                "W" -> {
-                    // 换入的新文件：删掉，回到「原文件还在备份目录」的状态
-                    val dst = File(filesDir, rel)
-                    if (dst.exists() && !dst.deleteRecursively()) complete = false
-                }
-                "M" -> {
-                    val bak = File(rollback, rel)
-                    if (bak.exists()) {
-                        val dst = File(filesDir, rel)
-                        if (dst.exists()) dst.deleteRecursively()
-                        if (!movePath(bak, dst)) complete = false
-                    }
-                }
-            }
-        }
-        if (complete) {
-            journal.delete()
-            rollback.deleteRecursively()
-        }
-        return complete
-    }
+    private fun rollbackByJournal(filesDir: File, rollback: File, journal: File): Boolean =
+        RestoreFileTransaction(filesDir, File(filesDir, STAGING_DIR_NAME), rollback, journal).rollback()
 
     /**
-     * 启动自检：上一次恢复是否在换入途中被中断，是则整体撤销。
+     * 启动自检：上一次恢复中断时，按提交标记撤销未提交换入或重试已提交清理。
      *
      * 必须由 Application 在 IO 线程调用（恢复中途被杀是常态：输入法常驻进程被 LMK 回收）。
-     * 没有事务日志时是廉价的一次 `File.exists()`。
+     * 没有日志时仍检查孤儿回滚原件，不能把日志缺失视为可直接清理。
      */
     fun recoverInterruptedRestore(context: Context) {
-        val filesDir = context.filesDir
-        val journal = File(filesDir, JOURNAL_FILE_NAME)
-        val staging = File(filesDir, STAGING_DIR_NAME)
-        val rollback = File(filesDir, ROLLBACK_DIR_NAME)
-        if (!journal.isFile) {
-            // 没有日志 = 上次恢复正常结束（或根本没跑过），顺手清掉可能残留的 staging
-            if (staging.exists()) staging.deleteRecursively()
-            return
-        }
-        FileLogger.w(TAG, "检测到未完成的备份恢复事务，开始回滚")
-        val ok = rollbackByJournal(filesDir, rollback, journal)
-        staging.deleteRecursively()
-        if (ok) {
-            FileLogger.w(TAG, "未完成的备份恢复已回滚到恢复前状态")
+        val transaction = RestoreFileTransaction(context.filesDir)
+        if (transaction.prepare()) {
+            FileLogger.w(TAG, "恢复文件事务检查完成")
         } else {
-            FileLogger.e(TAG, "未完成的备份恢复回滚不彻底，原文件保留在 ${rollback.path}")
-        }
-    }
-
-    /**
-     * 开始新恢复前清理上一次事务残留。
-     *
-     * **不能无条件删除 rollback 与 journal**：若上一次恢复在「换入」阶段被杀、还没被
-     * [recoverInterruptedRestore] 撤销就再次发起恢复，`.restore-rollback` 里装的是
-     * 恢复前的原始文件、`.restore-journal` 是撤销所需的清单。直接删掉等于把用户数据
-     * 连同回滚能力一起丢弃，之后既回不去也说不清配置为什么坏了。
-     *
-     * 正确顺序：先按 journal 撤销上一次未完成的事务（把原始文件还回去），再清 staging。
-     */
-    private fun discardTransaction(staging: File, rollback: File, journal: File) {
-        if (journal.isFile) {
-            FileLogger.w(TAG, "检测到上一次未完成的恢复事务，先按 journal 回滚，再开始新的恢复")
-            // staging = File(filesDir, STAGING_DIR_NAME)，故 parentFile 即 filesDir
-            val filesDir = staging.parentFile ?: staging
-            if (!rollbackByJournal(filesDir, rollback, journal)) {
-                // 回滚本身就失败了：此时 rollback 目录里是**恢复前唯一一份**原始文件，
-                // journal 是唯一的撤销清单。都不能删 —— 删掉就既回不去也查不清，
-                // 只能让用户手抄。保留下来交给下次启动的 recoverInterruptedRestore。
-                FileLogger.e(
-                    TAG,
-                    "上一次事务回滚不完整，原文件与 journal 一并保留：rollback=${rollback.path} journal=${journal.path}",
-                )
-                staging.deleteRecursively()
-                return
-            }
-        }
-        staging.deleteRecursively()
-        rollback.deleteRecursively()
-        journal.delete()
-    }
-
-    /** 移动文件或目录：优先 rename（同卷原子），失败退回递归复制 + 删除。 */
-    private fun movePath(src: File, dst: File): Boolean {
-        if (!src.exists()) return true
-        dst.parentFile?.mkdirs()
-        if (src.renameTo(dst)) return true
-        return try {
-            if (!copyTreeTo(src, dst)) return false
-            src.deleteRecursively()
-            true
-        } catch (e: Exception) {
-            FileLogger.e(TAG, "移动失败：${src.path} -> ${dst.path}", e)
-            false
-        }
-    }
-
-    private fun copyTreeTo(src: File, dst: File): Boolean {
-        if (src.isDirectory) {
-            if (!dst.exists() && !dst.mkdirs()) return false
-            val children = src.listFiles() ?: return true
-            for (child in children) {
-                if (!copyTreeTo(child, File(dst, child.name))) return false
-            }
-            return true
-        }
-        return try {
-            dst.parentFile?.mkdirs()
-            src.inputStream().use { input ->
-                dst.outputStream().use { output -> input.copyTo(output) }
-            }
-            true
-        } catch (e: Exception) {
-            false
+            FileLogger.e(TAG, "恢复文件事务尚未完成，已保留暂存、原文件和恢复日志")
         }
     }
 
@@ -947,6 +1026,14 @@ object BackupManager {
     /** 元数据 id 安全性：非空且不含路径分隔符（防 marketplace/manifests 目录穿越）。 */
     private fun isSafeId(id: String): Boolean =
         id.isNotBlank() && !id.contains('/') && !id.contains('\\') && id != "." && id != ".."
+
+    /**
+     * 备份包**压缩体**大小上限（本地 SAF 导入与远端恢复共用同一个包）。
+     *
+     * 取值理由：与解压侧 [MAX_TOTAL_BYTES]（1GB）同量级——正常完整备份只有几十 MB，
+     * 1GB 压缩包已远超任何真实备份，而继续放大只会让「先落盘再解包」白占缓存。
+     */
+    internal const val MAX_ARCHIVE_FILE_BYTES = 1_024L * 1024 * 1024
 
     /** 备份包条目数上限（正常完整备份约数百个文件，留足余量）。 */
     private const val MAX_ENTRY_COUNT = 20_000
@@ -1070,7 +1157,7 @@ object BackupManager {
                 }
             }
         }
-        editor.apply()
+        check(editor.commit()) { "恢复设置写入未完成" }
         if (skipped > 0) {
             FileLogger.w(TAG, "恢复设置：已跳过 $skipped 个插件授权/启用类敏感键（需用户重新确认）")
         }

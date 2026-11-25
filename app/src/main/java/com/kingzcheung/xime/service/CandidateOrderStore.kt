@@ -154,6 +154,18 @@ object CandidateOrderStore {
         if (candidates.isEmpty() || code.isEmpty()) return null
         val frequency = collectFrequency(table, code)
         if (frequency.isEmpty()) return null
+        // 同权保持原顺序；已降序时无需创建排序副本。
+        var previousWeight = Int.MAX_VALUE
+        var needsReorder = false
+        for (candidate in candidates) {
+            val weight = frequency[candidate] ?: Int.MIN_VALUE
+            if (weight > previousWeight) {
+                needsReorder = true
+                break
+            }
+            previousWeight = weight
+        }
+        if (!needsReorder) return null
 
         val order = candidates.withIndex().sortedWith(
             compareByDescending<IndexedValue<String>> { frequency[it.value] ?: Int.MIN_VALUE }
@@ -381,10 +393,16 @@ object CandidateOrderStore {
             val changed = !dictFile.exists() || dictFile.readText() != text
             if (changed) {
                 dictFile.parentFile?.mkdirs()
-                dictFile.writeText(text)
+                // 原子写：LMK 杀进程时 writeText 会留半截词典，候选排序全丢。
+                // 返回的 changed 只表示内容变化，写失败要单独记日志才可排查。
+                if (!com.kingzcheung.xime.util.AtomicFileWriter.write(dictFile, text)) {
+                    com.kingzcheung.xime.util.FileLogger.w("CandidateOrderStore", "排序表落盘失败: ${dictFile.absolutePath}")
+                }
                 runCatching {
                     visible.parentFile?.mkdirs()
-                    visible.writeText(text)
+                    if (!com.kingzcheung.xime.util.AtomicFileWriter.write(visible, text)) {
+                        com.kingzcheung.xime.util.FileLogger.w("CandidateOrderStore", "排序表镜像落盘失败: ${visible.absolutePath}")
+                    }
                 }
             }
             // 旧位置残留无论如何都清掉（迁移遗留，不影响内容判定）

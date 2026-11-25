@@ -49,17 +49,33 @@ fun SpaceKeyButton(
     var isPressed by remember { mutableStateOf(false) }
     val longPressTimeout = 400L
     val scope = rememberCoroutineScope()
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
-    
+    val depthColor = if (isPressed) backgroundColor.copy(alpha = 0.7f) else backgroundColor
+    // 立体感两层：阴影在 clip 之前（需外扩），高光必须在 background 之后才可见。
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+
     Box(
         modifier = modifier
             .height((44 * LocalStretchFactor.current).dp)
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
             .background(
                 if (isPressed) backgroundColor.copy(alpha = 0.7f)
                 else backgroundColor
             )
+            .then(bevelLayer)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)

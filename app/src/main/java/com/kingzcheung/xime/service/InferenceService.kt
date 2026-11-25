@@ -10,6 +10,12 @@ import com.kingzcheung.xime.handwriting.HandwritingNativeEngine
 import org.json.JSONObject
 import java.io.File
 
+/** `:inference` 空闲退出的纯判据，便于单测钉住边界（不依赖 Android 运行时）。 */
+internal object InferenceIdlePolicy {
+    fun shouldExit(idleMs: Long, stillLoaded: Boolean, idleDelayMs: Long): Boolean =
+        idleMs >= idleDelayMs && !stillLoaded
+}
+
 class InferenceService : Service() {
 
     companion object {
@@ -41,12 +47,16 @@ class InferenceService : Service() {
             // 只做"已卸载后"的进程退出。
             val stillLoaded = runCatching { NativeOnnxEngine.isInitialized() }.getOrDefault(false) ||
                 runCatching { HandwritingNativeEngine.isInitialized() }.getOrDefault(false)
-            if (stillLoaded) {
-                Log.i(TAG, "idle exit skipped: model still loaded")
+            if (!InferenceIdlePolicy.shouldExit(idle, stillLoaded, IDLE_EXIT_DELAY_MS)) {
+                Log.i(TAG, "idle exit skipped: model still loaded or not idle long enough")
                 return
             }
             Log.i(TAG, "idle exit: releasing :inference process")
-            stopSelf()
+            // stopSelf 对「只被绑定」的服务不会终止进程——进程会变成 cached empty 继续驻留
+            // （与 :asr 踩过的是同一个坑）。这里先释放 native 共享环境，再直接结束自己；
+            // 客户端 onDisconnected + ensureEngineReady 会在下次调用时重新绑定并重载模型。
+            runCatching { NativeOnnxEngine.releaseSharedEnv() }
+            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 
@@ -82,11 +92,11 @@ class InferenceService : Service() {
             touchUse()
             try {
                 when (modelId) {
-                    MODEL_PREDICTION -> {
+                    MODEL_PREDICTION -> synchronized(predictionLock) {
                         NativeOnnxEngine.release()
                         predictionVocab = null
                     }
-                    MODEL_HANDWRITING -> {
+                    MODEL_HANDWRITING -> synchronized(handwritingLock) {
                         HandwritingNativeEngine.release()
                         HandwritingInference.clearChars()
                     }
@@ -113,11 +123,15 @@ class InferenceService : Service() {
             touchUse()
             // 模型未加载时（如进程重启后客户端状态未同步）直接返回空，
             // 避免在未初始化的 native 引擎上推理导致进程崩溃
-            if (!NativeOnnxEngine.isInitialized()) {
-                Log.w(TAG, "predict called before model loaded, returning empty")
-                return mutableListOf()
+            // 判定与推理必须同锁：binder 线程池并发，另一线程的 unload/重载会在两步之间
+            // 释放 ORT session，推理落到已释放的 native 对象上直接 SIGSEGV。
+            val candidates = synchronized(predictionLock) {
+                if (!NativeOnnxEngine.isInitialized()) {
+                    Log.w(TAG, "predict called before model loaded, returning empty")
+                    return mutableListOf()
+                }
+                NativeOnnxEngine.predict(text, topK)
             }
-            val candidates = NativeOnnxEngine.predict(text, topK)
             val result = mutableListOf<String>()
             for (c in candidates) {
                 result.add(c.text)
@@ -130,12 +144,15 @@ class InferenceService : Service() {
             if (modelId != MODEL_HANDWRITING) return mutableListOf()
             // 模型未加载时（如进程重启后客户端状态未同步）直接返回空，
             // 避免在未初始化的 native 引擎上推理导致进程崩溃
-            if (!HandwritingNativeEngine.isInitialized()) {
-                Log.w(TAG, "recognizeHandwriting called before model loaded, returning empty")
-                return mutableListOf()
-            }
             val strokes = HandwritingInference.decodeStrokes(points, strokePointCounts)
-            val candidates = HandwritingInference.recognize(strokes, topK)
+            // 同 predict：判定与识别同锁，防止并发 unload 释放 session
+            val candidates = synchronized(handwritingLock) {
+                if (!HandwritingNativeEngine.isInitialized()) {
+                    Log.w(TAG, "recognizeHandwriting called before model loaded, returning empty")
+                    return mutableListOf()
+                }
+                HandwritingInference.recognize(strokes, topK)
+            }
             val result = mutableListOf<String>()
             for (c in candidates) {
                 result.add(c.char)
@@ -194,7 +211,17 @@ class InferenceService : Service() {
         return success
     }
 
-    private fun loadPredictionModel(modelPath: String, vocabPath: String): Boolean {
+    /** 联想 / 手写 native session 的生命周期锁：加载、释放、推理互斥。 */
+    private val predictionLock = Any()
+    private val handwritingLock = Any()
+
+    private fun loadPredictionModel(modelPath: String, vocabPath: String): Boolean =
+        synchronized(predictionLock) { loadPredictionModelLocked(modelPath, vocabPath) }
+
+    private fun loadHandwritingModel(modelPath: String, charIndexPath: String): Boolean =
+        synchronized(handwritingLock) { loadHandwritingModelLocked(modelPath, charIndexPath) }
+
+    private fun loadPredictionModelLocked(modelPath: String, vocabPath: String): Boolean {
         if (!loadOnnxLibs()) return false
 
         val vocabFile = File(vocabPath)
@@ -232,7 +259,7 @@ class InferenceService : Service() {
         return true
     }
 
-    private fun loadHandwritingModel(modelPath: String, charIndexPath: String): Boolean {
+    private fun loadHandwritingModelLocked(modelPath: String, charIndexPath: String): Boolean {
         if (!loadOnnxLibs()) return false
         // 先释放旧 session：重复加载时避免 ORT 双 session 并存推高内存（同联想模型）
         if (HandwritingNativeEngine.isInitialized()) {

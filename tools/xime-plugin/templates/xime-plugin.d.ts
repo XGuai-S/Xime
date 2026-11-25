@@ -396,6 +396,29 @@ interface XimeBackupPushResult {
   message?: string;
 }
 
+/**
+ * 文件级增量备份：单文件上传参数（v3.1）。
+ *
+ * `blobId` 交给 `host.http.upload` 流式发送——不要把文件内容读进 JS 堆。
+ * `sha256` 是宿主算好的内容哈希，插件可存为远端元数据供下次比对，不要求。
+ */
+interface XimeBackupFilePushArgs {
+  /** 远端相对路径，如 `rime/user.yaml`、`_xime_backup/settings.json` */
+  path: string;
+  /** 内容 SHA-256（小写十六进制） */
+  sha256: string;
+  size: number;
+  /** 宿主 blob 句柄：`host.http.upload(method, url, headers, blobId)` */
+  blobId: string;
+}
+
+/** 文件级增量备份：远端文件条目（sha256 可为空串，宿主以自身清单为准）。 */
+interface XimeBackupFileItem {
+  path: string;
+  sha256?: string;
+  size?: number;
+}
+
 interface XimeBackupExtension {
   /** 上传备份包（resolve true / {ok, id?, message?} 表示结果；包经 host.http.upload 流式发送）。 */
   push(args: XimeBackupPushArgs): boolean | XimeBackupPushResult | null | Promise<boolean | XimeBackupPushResult | null>;
@@ -410,6 +433,21 @@ interface XimeBackupExtension {
   remove(id: string): boolean | Promise<boolean>;
   /** 连接测试（resolve null = 成功；字符串 = 错误消息）。 */
   test(): string | boolean | null | Promise<string | boolean | null>;
+
+  // ---- 文件级增量备份（v3.1，全部可选）----
+  //
+  // 四个都实现时宿主走增量：按内容哈希只上传变化的文件，远端按单文件存储。
+  // 不实现时宿主自动回退整包 [push]/[pull]，老插件无需改动。
+
+  /** 列出远端已有文件（null = 查询失败；远端为空时 resolve 空数组）。 */
+  listFiles?(): XimeBackupFileItem[] | null | Promise<XimeBackupFileItem[] | null>;
+  /** 上传单个文件（覆盖同名）。 */
+  pushFile?(args: XimeBackupFilePushArgs):
+    boolean | XimeBackupPushResult | null | Promise<boolean | XimeBackupPushResult | null>;
+  /** 下载单个文件：resolve `host.http.download` 的 blob 句柄；null = 失败。 */
+  pullFile?(path: string): string | null | Promise<string | null>;
+  /** 删除远端单个文件（不存在也算成功）。 */
+  removeFile?(path: string): boolean | Promise<boolean>;
 }
 
 // ============================================================
@@ -561,7 +599,11 @@ interface XimeHttp {
   /**
    * 流式下载：2xx 响应体由宿主落盘为 blob（body 为空，blobId/size 有效）；
    * 非 2xx 仍把错误页读进内存（用 body/text 展示原因）。
-   * 落盘句柄由宿主在搬运后释放（如 `backup.pull` 返回的句柄由宿主恢复流程消费）。
+   *
+   * **用完必须 `releaseBlob(r.blobId)`**：blob 句柄是跨插件共享的有限槽位
+   * （宿主限 32 个），只下载不释放会把槽位占满，令所有插件的
+   * `download` / `backup.pull` 全部失败。宿主在插件卸载时会兜底回收，
+   * 但长驻插件应自行及时释放。
    */
   download(
     method: string,
@@ -569,6 +611,11 @@ interface XimeHttp {
     headers: Record<string, string>,
     timeoutMillis?: number
   ): Promise<XimeHttpResponse>;
+  /**
+   * 释放下载落盘的 blob 句柄，归还共享槽位（幂等：未知 id 直接 resolve）。
+   * 只能释放本插件自己下载的句柄。
+   */
+  releaseBlob(blobId: string): Promise<boolean>;
   /** 打开 SSE 流，resolve sessionId（回调携带该 id）；失败 reject `XimeError` */
   stream(
     url: string,

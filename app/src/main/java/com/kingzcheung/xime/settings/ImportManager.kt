@@ -48,6 +48,7 @@ object ImportManager {
         val displayName = queryDisplayName(context, uri)
             ?: return@withContext ImportResult.Failed("无法识别文件名")
         val name = SchemaManager.sanitizeDisplayName(displayName)
+        if (name.isEmpty()) return@withContext ImportResult.Failed("文件名非法")
 
         if (isPluginFile(name)) {
             when (val r = PluginManager.installerManager.installPluginFromUri(uri)) {
@@ -81,6 +82,7 @@ object ImportManager {
         autoEnable: Boolean = true,
     ): ImportResult = withContext(Dispatchers.IO) {
         val safe = SchemaManager.sanitizeDisplayName(name)
+        if (safe.isEmpty()) return@withContext ImportResult.Failed("文件名非法")
 
         if (isPluginFile(safe)) {
             when (val r = PluginManager.installerManager.installPlugin(file, source = PluginSource.FILE)) {

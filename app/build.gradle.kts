@@ -89,8 +89,8 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261353
-        versionName = "3.4.09"
+        versionCode = 20261392
+        versionName = "3.4.48"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -123,6 +123,7 @@ android {
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
+                keystoreProperties.getProperty("storeType")?.let { storeType = it }
             }
         }
     }
@@ -145,13 +146,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 有 keystore.properties 时使用 release 密钥（CI 通过 secrets 注入，走这条）；
-            // 本地没有该文件时回退到 debug 密钥，保证 assembleRelease 产物可直接安装，
-            // 否则 AGP 会产出未签名 APK（apksigner 报 DOES NOT VERIFY），无法安装。
+            // 正式包只使用原 release 密钥；缺少配置时保持未签名，避免生成无法覆盖原版的伪更新包。
             signingConfig = if (keystorePropertiesFile.exists()) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                null
             }
         }
     }

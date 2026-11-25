@@ -8,8 +8,13 @@ import com.kingzcheung.xime.plugin.core.model.PluginInfo
 import com.kingzcheung.xime.plugin.core.model.PluginSource
 import com.kingzcheung.xime.plugin.core.model.PluginToolbarButton
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -192,7 +197,17 @@ class InstallerManager(
 ) {
     companion object {
         private const val PLUGINS_DIR = "plugins"
+        private val installMutex = Mutex()
         private const val MANIFEST_JSON = "manifest.json"
+
+        /** 卸载时插件目录的改名暂存位置（与 plugins 根目录同文件系统，保证 rename 原子）。 */
+        private const val UNINSTALL_STAGING_DIR = "plugin-uninstall-staging"
+
+        /** 安装解压暂存区（每次安装一个 `install-*` 子目录，成功后整体删除）。 */
+        private const val INSTALL_STAGING_DIR = "plugin-install-staging"
+
+        /** 暂存子目录超过这个时长才视为遗留物（避免误清正在进行的流程）。 */
+        private const val STALE_STAGING_MS = 10 * 60 * 1000L
 
         /** xipk 包大小上限（10MB）：插件是脚本+资源，超过即拒绝安装。 */
         private const val MAX_ARCHIVE_FILE_BYTES = 10 * 1024 * 1024
@@ -322,34 +337,110 @@ class InstallerManager(
         File(context.filesDir, PLUGINS_DIR).apply { mkdirs() }
     }
 
+    /**
+     * 清理卸载流程遗留的暂存目录。
+     *
+     * 卸载是「改名暂存 → 注销注册表并落盘 → 真删暂存」三步。若进程在第 2 步前后被杀
+     * （卸载中崩溃 / 系统回收），暂存目录会留下且**没有任何代码再清理它**——
+     * 插件文件被改名搬进暂存区后既不算已安装、也不会被删，磁盘永久占用。
+     *
+     * 这里在每次安装/卸载开始前顺手清一次（幂等、失败忽略）：
+     * 此刻不会有正在进行的卸载（外层持 installMutex），所以暂存区里的内容一定是遗留物。
+     */
+    /**
+     * 卸载暂存清理：卸载是「先把插件目录移到暂存、再删」的两步操作，只要外层持
+     * installMutex，暂存区里的一切都必然是上次崩溃的遗留物——不需要年龄判断，
+     * 全部清掉才能保证下次卸载不会撞上旧目录。
+     */
+    private fun cleanupStaleUninstallStaging() =
+        cleanupStagingDir(UNINSTALL_STAGING_DIR, respectAge = false)
+
+    /**
+     * 清理安装解压暂存区里的遗留 `install-*` 目录。
+     *
+     * 安装中途进程被杀（LMK / 用户强杀）会留下整个解压树；原来只清卸载暂存区，
+     * 安装暂存区无人回收，每崩一次就永久占一份磁盘（解压后的插件目录 + previous 备份）。
+     * 外层持 installMutex 时调用，此刻不会有正在进行的安装，内容是遗留物。
+     */
+    /**
+     * 安装暂存清理：安装的 `install-*` 目录在流程内会被反复读写，
+     * 只清「超过 [STALE_STAGING_MS] 没动过」的，避免误删正在进行的流程。
+     */
+    private fun cleanupStaleInstallStaging() =
+        cleanupStagingDir(INSTALL_STAGING_DIR, respectAge = true)
+
+    private fun cleanupStagingDir(dirName: String, respectAge: Boolean) {
+        val stagingRoot = File(context.filesDir, dirName)
+        // 暂存根必须是真实目录：若它被替换成符号链接（攻击面），绝不能顺着链接去删
+        // 目标路径下的内容——那等于帮攻击者清理痕迹。直接放弃清理并告警。
+        if (!stagingRoot.isDirectory) return
+        if (java.nio.file.Files.isSymbolicLink(stagingRoot.toPath())) {
+            Log.w("InstallerManager", "暂存根是符号链接，拒绝清理: $dirName")
+            return
+        }
+        val children = stagingRoot.listFiles() ?: return
+        // 安装暂存只清「确实属于历史遗留」的目录：跳过刚创建的（可能是本次流程正在用）。
+        // 卸载暂存无此顾虑（见 cleanupStaleUninstallStaging 注释）。
+        val cutoff = System.currentTimeMillis() - STALE_STAGING_MS
+        for (child in children) {
+            if (respectAge && child.lastModified() > cutoff) continue
+            if (!deleteInstallTree(child)) {
+                Log.w("InstallerManager", "遗留暂存清理失败（下次再试）: $dirName/${child.name}")
+            }
+        }
+        if (stagingRoot.listFiles()?.isEmpty() == true) stagingRoot.delete()
+    }
+
     suspend fun installPlugin(
         pluginFile: File,
         forceOverwrite: Boolean = false,
         onlyIfNewer: Boolean = false,
         source: PluginSource = PluginSource.FILE
     ): InstallResult = withContext(Dispatchers.IO) {
+        installMutex.withLock {
+            // 清掉上次安装/卸载中崩溃留下的暂存目录（幂等）
+            runCatching { cleanupStaleUninstallStaging() }
+            runCatching { cleanupStaleInstallStaging() }
+            installPluginLocked(pluginFile, forceOverwrite, onlyIfNewer, source)
+        }
+    }
+
+    private suspend fun installPluginLocked(
+        pluginFile: File,
+        forceOverwrite: Boolean,
+        onlyIfNewer: Boolean,
+        source: PluginSource
+    ): InstallResult {
         if (!pluginFile.exists()) {
-            return@withContext InstallResult.Failure("插件文件不存在")
+            return InstallResult.Failure("插件文件不存在")
         }
         if (pluginFile.length() > MAX_ARCHIVE_FILE_BYTES) {
-            return@withContext InstallResult.Failure(
+            return InstallResult.Failure(
                 "插件包超过大小上限（${MAX_ARCHIVE_FILE_BYTES / 1024 / 1024}MB），拒绝安装"
             )
         }
 
         val pluginConfig = when (val parsed = parsePluginConfig(pluginFile)) {
-            is PluginParseResult.Failure -> return@withContext InstallResult.Failure(parsed.reason)
+            is PluginParseResult.Failure -> return InstallResult.Failure(parsed.reason)
             is PluginParseResult.Success -> parsed.config
         }
         val pluginId = pluginConfig.id
         if (!isValidPluginId(pluginId)) {
-            return@withContext InstallResult.Failure("非法插件 id: $pluginId（仅允许字母/数字/下划线/连字符，点号分段，最长 64）")
+            return InstallResult.Failure("非法插件 id: $pluginId（仅允许字母/数字/下划线/连字符，点号分段，最长 64）")
         }
         val entryScript = pluginConfig.entryScript ?: "main.js"
         if (!isValidEntryScript(entryScript)) {
-            return@withContext InstallResult.Failure("非法入口脚本: $entryScript")
+            return InstallResult.Failure("非法入口脚本: $entryScript")
         }
-        val pluginDir = getPluginDirectory(pluginId)
+        val pluginDir = try {
+            getPluginDirectory(pluginId).also {
+                require(it.canonicalFile == File(pluginsDir.canonicalFile, pluginId)) {
+                    "插件目录指向非法位置: $pluginId"
+                }
+            }
+        } catch (e: Exception) {
+            return InstallResult.Failure("插件目录校验失败: ${e.message}", e)
+        }
 
         // 校验插件声明的宿主版本范围
         val hostVersion = com.kingzcheung.xime.plugin.core.util.VersionUtil.getHostVersionName(context)
@@ -368,14 +459,14 @@ class InstallerManager(
                     append("）")
                 }
             }
-            return@withContext InstallResult.Failure(range)
+            return InstallResult.Failure(range)
         }
 
         val existingPlugin = pluginRegistry.getPluginById(pluginId)
 
         // JS 插件无版本号概念：只有首次安装或强制覆盖才重新解压
         if (!forceOverwrite && existingPlugin != null) {
-            return@withContext InstallResult.Success(existingPlugin)
+            return InstallResult.Success(existingPlugin)
         }
 
         // onlyIfNewer（内置 assets 启动同步）：已装版本 >= 本次包版本时保留已装，
@@ -385,51 +476,55 @@ class InstallerManager(
                 pluginConfig.version, existingPlugin.versionName
             ) <= 0
         ) {
-            return@withContext InstallResult.Success(existingPlugin)
+            return InstallResult.Success(existingPlugin)
         }
 
-        if (pluginDir.exists()) {
-            pluginDir.deleteRecursively()
-        }
-        pluginDir.mkdirs()
-
+        var work: File? = null
+        var backup: File? = null
         try {
-            extractPluginArchive(pluginFile, pluginDir)
-            val entryFile = File(pluginDir, entryScript)
-            if (!entryFile.exists()) {
-                throw IllegalArgumentException("插件入口脚本不存在: $entryScript")
+            val stagingRoot = File(context.filesDir, INSTALL_STAGING_DIR)
+            require(stagingRoot.canonicalFile == File(context.filesDir.canonicalFile, INSTALL_STAGING_DIR)) {
+                "插件暂存目录指向非法位置"
             }
+            check(stagingRoot.isDirectory || stagingRoot.mkdirs()) { "无法创建插件安装暂存目录" }
+            val installWork = java.nio.file.Files.createTempDirectory(stagingRoot.toPath(), "install-").toFile()
+            work = installWork
+            val staged = File(installWork, "staged")
+            check(staged.mkdir()) { "无法创建插件解压目录" }
+            val previous = File(installWork, "previous")
+            backup = previous
+            extractPluginArchive(pluginFile, staged)
+            val stagedEntry = File(staged, entryScript)
+            require(stagedEntry.isFile && stagedEntry.canRead()) { "插件入口脚本不存在或不可读: $entryScript" }
 
-            val pluginInfo = PluginInfo(
-                id = pluginConfig.id,
-                name = pluginConfig.name,
-                iconResId = 0,
-                description = pluginConfig.description,
-                versionCode = 0,
-                versionName = pluginConfig.version,
-                path = entryFile.absolutePath,
-                type = pluginConfig.type,
-                enabled = existingPlugin?.enabled ?: true,
-                installTime = existingPlugin?.installTime ?: System.currentTimeMillis(),
-                source = source,
-                minHostVersion = pluginConfig.minHostVersion,
-                maxHostVersion = pluginConfig.maxHostVersion,
-                trustLevel = com.kingzcheung.xime.plugin.core.util.PluginSignatureUtil.classifyScriptPlugin(source),
-                entryScript = entryScript,
-                declaredHosts = pluginConfig.declaredHosts,
-                allowCustomHosts = pluginConfig.allowCustomHosts,
-                toolbarButtons = pluginConfig.toolbarButtons,
-                manifestIcon = pluginConfig.icon,
-                capabilities = pluginConfig.capabilities,
-                platforms = pluginConfig.platforms
-            )
-
-            if (existingPlugin != null) {
-                pluginRegistry.updatePlugin(pluginInfo)
-            } else {
-                pluginRegistry.addPlugin(pluginInfo)
+            currentCoroutineContext().ensureActive()
+            val pluginInfo = PluginDirectoryCommit().replace(staged, pluginDir, previous) {
+                pluginRegistry.publishInstalledPlugin(pluginId) { latestPlugin ->
+                    PluginInfo(
+                        id = pluginConfig.id,
+                        name = pluginConfig.name,
+                        iconResId = 0,
+                        description = pluginConfig.description,
+                        versionCode = 0,
+                        versionName = pluginConfig.version,
+                        path = File(pluginDir, entryScript).absolutePath,
+                        type = pluginConfig.type,
+                        enabled = latestPlugin?.enabled ?: true,
+                        installTime = latestPlugin?.installTime ?: System.currentTimeMillis(),
+                        source = source,
+                        minHostVersion = pluginConfig.minHostVersion,
+                        maxHostVersion = pluginConfig.maxHostVersion,
+                        trustLevel = com.kingzcheung.xime.plugin.core.util.PluginSignatureUtil.classifyScriptPlugin(source),
+                        entryScript = entryScript,
+                        declaredHosts = pluginConfig.declaredHosts,
+                        allowCustomHosts = pluginConfig.allowCustomHosts,
+                        toolbarButtons = pluginConfig.toolbarButtons,
+                        manifestIcon = pluginConfig.icon,
+                        capabilities = pluginConfig.capabilities,
+                        platforms = pluginConfig.platforms
+                    )
+                }
             }
-            pluginRegistry.flushToDisk()
 
             // 覆盖安装（更新）后必须重载正在运行的实例：注册表/插件中心显示的是新版本号，
             // 但内存里跑的还是旧 JS——`JsScriptRuntime.load()` 只在加载时读过一次入口脚本，
@@ -439,10 +534,19 @@ class InstallerManager(
             // archiveId"，更新后不重载 → 旧 JS 读不到 archiveId → 备份报"备份包为空"。
             reloadIfRunning(pluginId)
 
-            InstallResult.Success(pluginInfo)
+            return InstallResult.Success(pluginInfo)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            pluginDir.deleteRecursively()
-            InstallResult.Failure("插件安装失败: ${e.message}", e)
+            return InstallResult.Failure("插件安装失败: ${e.message}", e)
+        } finally {
+            work?.let { installWork ->
+                if (backup?.exists() != true) {
+                    deleteInstallTree(installWork)
+                } else {
+                    Log.e("InstallerManager", "插件安装备份保留，恢复路径: ${backup.absolutePath}")
+                }
+            }
         }
     }
 
@@ -474,17 +578,68 @@ class InstallerManager(
      * （PluginsSettingsViewModel.uninstallPlugin）已按此顺序调用。
      */
     suspend fun uninstallPlugin(pluginId: String): Boolean = withContext(Dispatchers.IO) {
+        installMutex.withLock {
+            runCatching { cleanupStaleUninstallStaging() }
+            uninstallPluginLocked(pluginId)
+        }
+    }
+
+    private fun uninstallPluginLocked(pluginId: String): Boolean {
         if (!isValidPluginId(pluginId)) {
             Log.e("InstallerManager", "uninstallPlugin 拒绝非法 id: $pluginId")
-            return@withContext false
+            return false
         }
         val pluginDir = getPluginDirectory(pluginId)
+
+        // 步骤 1：目录先**改名暂存**，不直接删。
+        // 旧实现先删目录再注销注册表，落盘失败时（磁盘满 / rename 失败）插件脚本已不可恢复，
+        // 而内存注册项已被抹掉、flushToDisk 的异常被吞 → 仍返回 true，重启后 plugins.json
+        // 里的旧注册项复活但入口脚本已丢（插件列表里有、点开报错）。
+        var staged: File? = null
         if (pluginDir.exists()) {
-            pluginDir.deleteRecursively()
+            val stagingRoot = File(context.filesDir, UNINSTALL_STAGING_DIR)
+            val stagedDir = try {
+                require(
+                    stagingRoot.canonicalFile == File(context.filesDir.canonicalFile, UNINSTALL_STAGING_DIR)
+                ) { "插件卸载暂存目录指向非法位置" }
+                check(stagingRoot.isDirectory || stagingRoot.mkdirs()) { "无法创建插件卸载暂存目录" }
+                File(stagingRoot, "$pluginId-${System.nanoTime()}").also {
+                    require(it.canonicalFile.parentFile == stagingRoot.canonicalFile) { "暂存目录指向非法位置" }
+                }
+            } catch (e: Exception) {
+                Log.e("InstallerManager", "卸载插件暂存目录创建失败: $pluginId", e)
+                return false
+            }
+            if (!pluginDir.renameTo(stagedDir)) {
+                Log.e("InstallerManager", "卸载插件目录暂存失败: ${pluginDir.absolutePath}")
+                return false
+            }
+            staged = stagedDir
         }
+
+        // 步骤 2：注销注册项并确认落盘成功，失败则回滚目录与注册项。
+        val removed = pluginRegistry.getPluginById(pluginId)
         pluginRegistry.removePlugin(pluginId)
-        pluginRegistry.flushToDisk()
-        true
+        if (!pluginRegistry.flushToDisk()) {
+            removed?.let { pluginRegistry.addPlugin(it) }
+            val restored = staged?.let { pluginDir.exists() || it.renameTo(pluginDir) } ?: true
+            if (!restored) {
+                Log.e(
+                    "InstallerManager",
+                    "卸载回滚失败，插件目录暂存于 ${staged?.absolutePath}，需人工恢复到 ${pluginDir.absolutePath}"
+                )
+            }
+            Log.e("InstallerManager", "卸载插件失败（注册表落盘失败）: $pluginId")
+            return false
+        }
+
+        // 步骤 3：注册表已落盘，才真正删除暂存目录（删除失败只是留垃圾，卸载已生效）。
+        staged?.let {
+            if (!deleteInstallTree(it)) {
+                Log.w("InstallerManager", "卸载后暂存目录清理失败（可忽略）: ${it.absolutePath}")
+            }
+        }
+        return true
     }
 
     suspend fun installPluginFromUri(uri: Uri): InstallResult = withContext(Dispatchers.IO) {
@@ -492,16 +647,36 @@ class InstallerManager(
             val file = File(uri.path ?: return@withContext InstallResult.Failure("无法解析文件路径"))
             installPlugin(file, forceOverwrite = true, source = PluginSource.FILE)
         } else {
-            val tempFile = File(context.cacheDir, "plugin_import_${System.currentTimeMillis()}.xipk")
+            var tempFile: File? = null
             try {
+                val imported = File.createTempFile("plugin_import_", ".xipk", context.cacheDir)
+                tempFile = imported
                 context.contentResolver.openInputStream(uri)?.use { input ->
-                    tempFile.outputStream().use { output -> input.copyTo(output) }
+                    imported.outputStream().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var remaining = MAX_ARCHIVE_FILE_BYTES
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer, 0, minOf(buffer.size, remaining + 1))
+                            if (count < 0) break
+                            if (count == 0) throw java.io.IOException("导入流未返回数据")
+                            require(count <= remaining) { "插件包超过大小上限（${MAX_ARCHIVE_FILE_BYTES / 1024 / 1024}MB）" }
+                            output.write(buffer, 0, count)
+                            remaining -= count
+                        }
+                    }
                 } ?: return@withContext InstallResult.Failure("无法读取文件")
-                installPlugin(tempFile, forceOverwrite = true, source = PluginSource.FILE)
+                installPlugin(imported, forceOverwrite = true, source = PluginSource.FILE)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 InstallResult.Failure("插件导入失败: ${e.message}", e)
             } finally {
-                if (tempFile.exists()) tempFile.delete()
+                try {
+                    tempFile?.delete()
+                } catch (e: Exception) {
+                    Log.w("InstallerManager", "插件导入临时文件清理失败", e)
+                }
             }
         }
     }

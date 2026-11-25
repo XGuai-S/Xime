@@ -562,6 +562,25 @@ class RimeEngine {
         }
     }
 
+    /**
+     * 可空版 [getComposition]：拿不到引擎锁（部署/长编译持锁中）时返回 null，
+     * 而不是用一个「空组合」冒充真实状态。
+     *
+     * 主线程刷新路径必须用这个版本：锁竞争失败时若把空 composition 写回 UI，
+     * 用户正在打的候选栏会突然清空、输入框 composing 被清（表现为「字没了」）。
+     */
+    fun getCompositionOrNull(): RimeComposition? {
+        if (!isInitialized) return null
+        if (!rimeLock.tryLock()) return null
+        return try {
+            nativeGetComposition()
+        } catch (_: Exception) {
+            null
+        } finally {
+            rimeLock.unlock()
+        }
+    }
+
     fun selectCandidate(index: Int): Boolean {
         return tryLocked(false) {
             if (!nativeHasSession()) return@tryLocked false

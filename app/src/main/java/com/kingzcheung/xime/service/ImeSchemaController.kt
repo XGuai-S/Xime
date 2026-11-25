@@ -33,8 +33,13 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
     internal fun reloadConfig() {
 
         service.mainHandler.post {
+            // 与输入法界面里其它 Toast 完全一致：Service 上下文 + LENGTH_SHORT。
+            // 顺序上先弹提示再收键盘——收起后 Service 失去前台窗口，
+            // Android 11+ 对后台应用的 Toast 有限制。
+            android.widget.Toast.makeText(
+                service, "方案部署中...", android.widget.Toast.LENGTH_SHORT
+            ).show()
             service.requestHideSelf(0)
-            android.widget.Toast.makeText(service, "方案部署中...", android.widget.Toast.LENGTH_SHORT).show()
         }
         
         // 部署投递到 key-processing 队列：与按键/切换同队列串行执行，
@@ -56,14 +61,17 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 // 部署），所以只改它们时 hash 一致 → 编译被跳过 → 表现为「重载了但词库
                 // 没变」。这里先合并手改（切主线程，与上屏写入同线程），有改动就落盘
                 // 重新生成派生 dict，并强制走一遍维护/编译。
-                val userDataChanged = withContext(Dispatchers.Main) { service.reconcileUserDataFiles() }
+                // M01 修复：reconcile / flush 都要读写磁盘（各 Store 要先 stat+读两份文件，
+                // 再写回派生 dict），绝不能放在 Main 上——用户点「部署方案」时如果配置文件
+                // 很大或存储繁忙，主线程会被慢 IO 卡住（典型 ANR 面）。
+                // 内存表的改动由 wordTablesLock 保护，不再要求「必须主线程」，因此改到 IO：
+                // 慢 IO 在统一 IO 域内串行，主线程只负责最后的 toast。
+                val userDataChanged = withContext(Dispatchers.IO) { service.reconcileUserDataFiles() }
                 if (userDataChanged) {
+                    withContext(Dispatchers.IO) { service.flushWordDataForReload() }
                     withContext(Dispatchers.Main) {
-                        service.flushWordDataForReload()
                         android.widget.Toast.makeText(
-                            service,
-                            "词库有改动，正在重新编译...",
-                            android.widget.Toast.LENGTH_SHORT,
+                            service, "词库有改动，正在重新编译...", android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
                 }
@@ -108,7 +116,9 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                         currentSchemaId = currentSchemaId,
                     )
                     service.updateUI()
-                    android.widget.Toast.makeText(service, "方案部署完成", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(
+                        service, "方案部署完成", android.widget.Toast.LENGTH_SHORT
+                    ).show()
                 }
             } catch (e: Exception) {
                 FileLogger.e(XimeInputMethodService.TAG, "Failed to reload config", e)

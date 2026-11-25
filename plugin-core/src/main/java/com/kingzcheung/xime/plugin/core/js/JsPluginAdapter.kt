@@ -130,8 +130,11 @@ open class JsPluginAdapter(
     }
 
     override fun onLoad(context: PluginContext) {
-        if (runtime.load()) {
-            runtime.callOnLoad()
+        if (!runtime.load()) {
+            throw IllegalStateException("插件脚本加载失败: ${pluginContext.pluginId}")
+        }
+        if (!runtime.callOnLoad()) {
+            throw IllegalStateException("插件初始化失败: ${pluginContext.pluginId}")
         }
     }
 

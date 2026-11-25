@@ -8,11 +8,11 @@ import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.runBlocking
 import java.io.File
 
 object OnnxAssociationEngine {
@@ -20,23 +20,36 @@ object OnnxAssociationEngine {
 
     @Volatile
     private var isInitialized = false
+    @Volatile
     private var warmupStarted = false
     private val warmupJob = SupervisorJob()
     private val warmupScope = CoroutineScope(Dispatchers.Default + warmupJob)
     private var inferenceClient: InferenceClient? = null
+
+    // 卸载专用作用域：不能用 warmupScope，release 会对它 cancelChildren，把卸载任务一并取消。
+    private val unloadScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Volatile
+    private var pendingUnload: Job? = null
 
     suspend fun initialize(context: Context): Boolean {
         if (isInitialized) {
             FileLogger.d(TAG, "Already initialized")
             return true
         }
+        // 单例长期持有 loader 与 InferenceClient：只用应用上下文，避免钉住已销毁的输入法服务
+        val appContext = context.applicationContext
 
         ModelRuntime.register(
             id = "predictive_text",
-            loader = { initialize(context) },
+            loader = { initialize(appContext) },
             releaser = { release() },
             label = "智能联想模型"
         )
+
+        // 上一次 release 的后台卸载还在飞：必须等它结束再加载，否则会卸掉新模型
+        awaitPendingUnload(pendingUnload, 3_000L) {
+            FileLogger.w(TAG, "上一次模型卸载超过 3s 未结束，继续加载")
+        }
 
         try {
             // 模型 id 由设置决定，支持 small/base 等多版本共存切换
@@ -49,19 +62,19 @@ object OnnxAssociationEngine {
 
             val filesToCheck = listOf("vocab.json", "model_int8_dynamic.onnx")
             for (fileName in filesToCheck) {
-                val file = File(modelDir, fileName)
-                if (!file.exists()) {
+                val file = com.kingzcheung.xime.model.ModelPaths.child(modelDir, fileName)
+                if (!file.isFile) {
                     FileLogger.e(TAG, "$fileName not found at ${file.absolutePath}")
                     return false
                 }
                 FileLogger.d(TAG, "$fileName exists: ${file.length()} bytes")
             }
 
-            val modelFile = File(modelDir, "model_int8_dynamic.onnx")
-            val vocabFile = File(modelDir, "vocab.json")
+            val modelFile = com.kingzcheung.xime.model.ModelPaths.child(modelDir, "model_int8_dynamic.onnx")
+            val vocabFile = com.kingzcheung.xime.model.ModelPaths.child(modelDir, "vocab.json")
             FileLogger.d(TAG, "Using model: ${modelFile.name} (${modelFile.length()} bytes)")
 
-            val client = InferenceClient(context)
+            val client = InferenceClient(appContext)
             // 先释放旧 client 的绑定，避免每次 initialize 泄漏一个 ServiceConnection
             // （ServiceConnectionLeaked：切换预测设置时反复 initialize 累积泄漏）
             inferenceClient?.unbind()
@@ -143,11 +156,17 @@ object OnnxAssociationEngine {
         // 会让预热协程（含 InferenceClient 绑定）在释放后继续存活。
         warmupJob.cancelChildren()
         warmupStarted = false
-        inferenceClient?.apply {
-            runBlocking { runCatching { unloadModel(InferenceClient.MODEL_PREDICTION) } }
-            unbind()
-        }
+        // unloadModel 是同步 binder 调用，推理进程忙时会阻塞；release 可能由系统内存回调
+        // 在主线程触发，所以卸载放到后台。initialize 会先等这个任务结束，避免晚到的卸载
+        // 把刚加载好的新模型卸掉。
+        val oldClient = inferenceClient
         inferenceClient = null
+        if (oldClient != null) {
+            pendingUnload = unloadScope.launch {
+                runCatching { oldClient.unloadModel(InferenceClient.MODEL_PREDICTION) }
+                oldClient.unbind()
+            }
+        }
         ModelRuntime.markUnloaded("predictive_text")
         FileLogger.d(TAG, "Prediction model released")
     }

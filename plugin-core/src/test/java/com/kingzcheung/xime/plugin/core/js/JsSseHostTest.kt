@@ -54,6 +54,7 @@ class JsSseHostTest {
     private class MockSseHostApi : SseHostApi {
         var connectedUrl: String? = null
         var connectedHeaders: Map<String, String> = emptyMap()
+        var connectedTimeoutMillis: Int? = null
         var listener: SseHostListener? = null
         var closedIds = mutableListOf<Int>()
         var returnId = 100
@@ -68,7 +69,10 @@ class JsSseHostTest {
         ): Int {
             connectedUrl = url
             connectedHeaders = headers
+            connectedTimeoutMillis = timeoutMillis
             this.listener = listener
+            // 与宿主实现一致：id 在建连前经 listener 交付
+            listener.onSessionAllocated(returnId)
             return returnId
         }
         override fun close(sessionId: Int) { closedIds.add(sessionId) }
@@ -84,8 +88,10 @@ class JsSseHostTest {
         assertTrue("等待条件超时", condition())
     }
 
+    private var runtimeCounter = 0
+
     private fun buildRuntime(sseMock: MockSseHostApi?, httpMock: MockHttpHostApi?): JsScriptRuntime {
-        val dir = tempFolder.newFolder("sse_test")
+        val dir = tempFolder.newFolder("sse_test_${runtimeCounter++}")
         File(dir, "main.js").writeText(
             """
             globalThis.plugin = {
@@ -115,6 +121,14 @@ class JsSseHostTest {
                 }, "{}", 120000);
               },
 
+              request_with_timeout: async function(ms) {
+                return host.http.request("POST", "https://api.example.com/v1/chat", {}, "{}", ms);
+              },
+
+              stream_with_timeout: async function(ms) {
+                return host.http.stream("https://api.example.com/stream", {}, ms);
+              },
+
               sse: {
                 onData: function(sessionId, text) { globalThis.plugin.received.push(text); },
                 onDone: function(sessionId, fullText) { globalThis.plugin.doneText = fullText; },
@@ -131,6 +145,29 @@ class JsSseHostTest {
             httpHostApi = httpMock,
             sseHostApi = sseMock
         )
+    }
+
+    @Test
+    fun `自然结束或错误的 SSE 会话不留在 close 清理集合`() {
+        for (terminalError in listOf(false, true)) {
+            val sse = MockSseHostApi().apply { returnId = if (terminalError) 201 else 200 }
+            val runtime = buildRuntime(sse, MockHttpHostApi())
+            var closed = false
+            try {
+                assertTrue(runtime.load())
+                assertEquals(if (terminalError) 201 else 200, (runtime.callAsync("open_stream") as Number).toInt())
+                if (terminalError) sse.listener?.onError("failed") else sse.listener?.onDone("finished")
+                awaitUntil {
+                    if (terminalError) runtime.call("get_error")?.toString() == "failed"
+                    else runtime.call("get_done")?.toString() == "finished"
+                }
+                runtime.close()
+                closed = true
+                assertEquals("终止会话由宿主事件结束，runtime.close 不应再次 close", emptyList<Int>(), sse.closedIds)
+            } finally {
+                if (!closed) runtime.close()
+            }
+        }
     }
 
     @Test
@@ -160,9 +197,9 @@ class JsSseHostTest {
             awaitUntil { runtime.call("get_error")?.toString() == "服务端限流" }
             assertEquals("onError 交付错误", "服务端限流", runtime.call("get_error")?.toString())
 
-            // 主动关停
+            // 自然结束/错误后会话已从活动集合移除，重复 close 不再关闭已完成连接
             runtime.callAsync("close_stream")
-            assertEquals("closeStream 携带会话 id", listOf(100), sse.closedIds)
+            assertEquals("自然结束后不重复关闭会话", emptyList<Int>(), sse.closedIds)
         } finally {
             runtime.close()
         }
@@ -192,6 +229,41 @@ class JsSseHostTest {
             runtime.callAsync("sync_request")
             assertEquals("timeoutMillis 透传", 120000, http.lastTimeoutMillis)
             assertEquals("URL 透传", "https://api.example.com/v1/chat", http.lastUrl)
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun `超过宿主上限的 timeoutMillis 被截断到上限`() {
+        val http = MockHttpHostApi()
+        val sse = MockSseHostApi()
+        val runtime = buildRuntime(sse, http)
+        try {
+            assertTrue(runtime.load())
+
+            // 10 分钟请求 → 截断到宿主上限（与 SSE 默认读超时 120s 对齐）
+            runtime.callAsync("request_with_timeout", 600_000)
+            assertEquals(
+                "request 超时被截断",
+                JsScriptRuntime.MAX_HTTP_TIMEOUT_MS,
+                http.lastTimeoutMillis
+            )
+
+            runtime.callAsync("stream_with_timeout", 600_000)
+            assertEquals(
+                "stream 超时被截断",
+                JsScriptRuntime.MAX_HTTP_TIMEOUT_MS,
+                sse.connectedTimeoutMillis
+            )
+
+            // 上限以内的值原样透传
+            runtime.callAsync("request_with_timeout", 30_000)
+            assertEquals("未超限时原样透传", 30_000, http.lastTimeoutMillis)
+
+            // 0 / 负数视为未声明（用宿主默认）
+            runtime.callAsync("request_with_timeout", 0)
+            assertNull("非正数按未声明处理", http.lastTimeoutMillis)
         } finally {
             runtime.close()
         }

@@ -72,10 +72,10 @@ class XimeApplication : Application(), ImageLoaderFactory {
         CorrectionPriors.enabled = SettingsPreferences.isCorrectorEnabled(this)
         // 启动自检：确认生效 schema 里挂上了 correction_translator（写文件日志）
         if (CorrectionPriors.enabled) {
-            Thread {
-                runCatching { Thread.sleep(4000) }
-                runCatching { CorrectionPriors.selfCheck(SettingsPreferences.getCurrentSchema(this)) }
-            }.start()
+            applicationScope.launch {
+                kotlinx.coroutines.delay(4000)
+                runCatching { CorrectionPriors.selfCheck(SettingsPreferences.getCurrentSchema(this@XimeApplication)) }
+            }
         }
         AppFonts.initialize(this)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()

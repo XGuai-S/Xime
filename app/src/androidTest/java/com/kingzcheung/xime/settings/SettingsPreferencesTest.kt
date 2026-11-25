@@ -55,21 +55,15 @@ class SettingsPreferencesTest {
     }
 
     @Test
-    fun soundAndVibrationDefaultsAndUpdatesWork() {
+    fun soundDefaultsAndUpdatesWork() {
         assertTrue(SettingsPreferences.isSoundEnabled(context))
         assertEquals(50, SettingsPreferences.getSoundVolume(context))
-        assertTrue(SettingsPreferences.isVibrationEnabled(context))
-        assertEquals(50, SettingsPreferences.getVibrationIntensity(context))
 
         SettingsPreferences.setSoundEnabled(context, false)
         SettingsPreferences.setSoundVolume(context, 72)
-        SettingsPreferences.setVibrationEnabled(context, false)
-        SettingsPreferences.setVibrationIntensity(context, 66)
 
         assertFalse(SettingsPreferences.isSoundEnabled(context))
         assertEquals(72, SettingsPreferences.getSoundVolume(context))
-        assertFalse(SettingsPreferences.isVibrationEnabled(context))
-        assertEquals(66, SettingsPreferences.getVibrationIntensity(context))
     }
 
     @Test
@@ -79,15 +73,6 @@ class SettingsPreferencesTest {
         
         SettingsPreferences.setSoundVolume(context, 100)
         assertEquals(100, SettingsPreferences.getSoundVolume(context))
-    }
-
-    @Test
-    fun vibrationIntensityBoundaryValues() {
-        SettingsPreferences.setVibrationIntensity(context, 0)
-        assertEquals(0, SettingsPreferences.getVibrationIntensity(context))
-        
-        SettingsPreferences.setVibrationIntensity(context, 100)
-        assertEquals(100, SettingsPreferences.getVibrationIntensity(context))
     }
 
     @Test

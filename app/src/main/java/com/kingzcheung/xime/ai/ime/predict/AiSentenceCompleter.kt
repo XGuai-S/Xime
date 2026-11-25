@@ -4,6 +4,7 @@ import com.kingzcheung.xime.ai.data.AppSettings
 import com.kingzcheung.xime.ai.data.ToneStyle
 import com.kingzcheung.xime.ai.network.AiPipelineEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -30,8 +31,7 @@ data class CompletionCacheKey(
  * - Waits [DEBOUNCE_MS] (`350ms`) of typing idle time before issuing a network request.
  * - Immediately cancels any pending debounce or in-flight network request when the user presses
  *   a new key, backspace, punctuation, or switches panels.
- * - Maintains an in-memory LRU cache (`capacity = 32`) keyed by `(contextBeforeCursor.takeLast(200), activeStyle.id)`
- *   to return cached completions immediately without redundant token consumption.
+ * - Reuses up to 32 cached completions within the same app, settings snapshot and style.
  */
 class AiSentenceCompleter(
     private val scope: CoroutineScope,
@@ -61,7 +61,14 @@ class AiSentenceCompleter(
         }
     )
 
+    private class CacheScope(
+        val appName: String,
+        val settings: AppSettings,
+        val style: ToneStyle,
+    )
+
     private val cacheLock = Any()
+    private var cacheScope: CacheScope? = null
     private val lruCache = object : LinkedHashMap<CompletionCacheKey, String>(
         cacheCapacity.coerceAtLeast(1),
         0.75f,
@@ -82,8 +89,10 @@ class AiSentenceCompleter(
      * Cancels any active 350ms debounce timer or in-flight network completion request immediately.
      */
     fun cancel() {
-        activeJob?.cancel()
-        activeJob = null
+        synchronized(cacheLock) {
+            activeJob?.cancel()
+            activeJob = null
+        }
     }
 
     fun getCached(contextBeforeCursor: String, styleId: String): String? {
@@ -109,6 +118,7 @@ class AiSentenceCompleter(
 
     fun clearCache() {
         synchronized(cacheLock) {
+            cacheScope = null
             lruCache.clear()
         }
     }
@@ -116,9 +126,8 @@ class AiSentenceCompleter(
     /**
      * Schedules an AI sentence completion request:
      * - Returns `null` without scheduling if `settings.aiCompletionEnabled == false`,
-     *   `isIncognitoMode == true`, or `contextBeforeCursor` is blank.
-     * - If `(contextBeforeCursor.takeLast(200), activeStyle.id)` hits the LRU cache,
-     *   delivers the cached suggestion directly without making a network request.
+     *   either incognito flag is set, or `contextBeforeCursor` is blank.
+     * - Delivers a cache hit synchronously within the current cache scope.
      * - Otherwise debounces for [debounceMs] (`350ms`) before invoking [executor].
      */
     fun scheduleCompletion(
@@ -129,69 +138,61 @@ class AiSentenceCompleter(
         isIncognitoMode: Boolean = false,
         onResult: (String) -> Unit
     ): Job? {
-        cancel()
-        if (!settings.aiCompletionEnabled || isIncognitoMode) {
-            return null
-        }
         val contextTail = normalizeContextWindow(contextBeforeCursor)
-        if (contextTail.isEmpty()) {
-            return null
-        }
-
         val key = CompletionCacheKey(contextTail = contextTail, styleId = activeStyle.id)
-        val cachedHit = synchronized(cacheLock) { lruCache[key] }
-        if (cachedHit != null) {
-            onResult(cachedHit)
-            return null
-        }
-
-        val job = scope.launch {
-            try {
-                if (debounceMs > 0L) {
-                    delay(debounceMs)
-                }
-                ensureActive()
-
-                val secondCheck = synchronized(cacheLock) { lruCache[key] }
-                if (secondCheck != null) {
-                    onResult(secondCheck)
-                    return@launch
-                }
-
-                val result = executor.complete(
-                    settings = settings,
-                    activeStyle = activeStyle,
-                    contextBeforeCursor = contextTail,
-                    targetAppName = targetAppName
-                )
-                ensureActive()
-
-                result.onFailure { e ->
-                    com.kingzcheung.xime.util.FileLogger.d(
-                        "AiSentenceCompleter", "complete failed: ${e.message}"
-                    )
-                }
-                result.onSuccess { rawSuggestion ->
-                    val cleaned = cleanCompletionOutput(rawSuggestion, contextTail)
-                    com.kingzcheung.xime.util.FileLogger.d(
-                        "AiSentenceCompleter",
-                        "complete ok: rawLen=${rawSuggestion.length} cleanedLen=${cleaned.length}"
-                    )
-                    if (cleaned.isNotEmpty()) {
-                        synchronized(cacheLock) {
-                            lruCache[key] = cleaned
-                        }
-                        ensureActive()
-                        onResult(cleaned)
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                // Network errors in background sentence completion fail silently without disrupting typing
+        val (cached, job) = synchronized(cacheLock) {
+            cancel()
+            if (!settings.aiCompletionEnabled || isIncognitoMode || settings.manualIncognitoMode) {
+                clearCache()
+                return null
             }
+            val previous = cacheScope
+            val requestScope = if (previous != null && previous.appName == targetAppName &&
+                previous.settings === settings && previous.style == activeStyle
+            ) {
+                previous
+            } else {
+                lruCache.clear()
+                CacheScope(targetAppName, settings, activeStyle).also { cacheScope = it }
+            }
+            if (contextTail.isEmpty()) return null
+            val hit = lruCache[key]
+            val pending = if (hit == null) scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    if (debounceMs > 0L) delay(debounceMs)
+                    ensureActive()
+                    val secondCheck = synchronized(cacheLock) {
+                        if (cacheScope !== requestScope) return@launch
+                        lruCache[key]
+                    }
+                    if (secondCheck != null) {
+                        ensureActive()
+                        onResult(secondCheck)
+                        return@launch
+                    }
+
+                    val result = executor.complete(settings, activeStyle, contextTail, targetAppName)
+                    ensureActive()
+                    val cleaned = cleanCompletionOutput(result.getOrThrow(), contextTail)
+                    if (cleaned.isEmpty()) return@launch
+                    synchronized(cacheLock) {
+                        ensureActive()
+                        if (cacheScope !== requestScope) return@launch
+                        lruCache[key] = cleaned
+                    }
+                    ensureActive()
+                    onResult(cleaned)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Background completion failures must not disrupt typing.
+                }
+            } else null
+            activeJob = pending
+            hit to pending
         }
-        activeJob = job
+        if (cached != null) onResult(cached)
+        job?.start()
         return job
     }
 

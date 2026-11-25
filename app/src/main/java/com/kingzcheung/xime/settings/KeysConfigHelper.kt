@@ -313,6 +313,9 @@ object KeysConfigHelper {
     private const val XIME_CONFIG_FILE = "xime.yaml"
     private const val XIME_CUSTOM_CONFIG_FILE = "xime.custom.yaml"
 
+    /** [correctionSchemas] 的 stat 节流窗口（热路径每键调用，不能每键都 stat）。 */
+    private const val CORRECTION_SCHEMAS_CHECK_INTERVAL_MS = 3_000L
+
     /**
      * 由 `layout.rows` 引用的功能键 id（行为在其对应 `keys.<id>` 配置）。
      * 布局行里出现这些 id 时，渲染层按 id 选择功能键组件而非字母键。
@@ -703,11 +706,27 @@ object KeysConfigHelper {
     private var _correctionSchemas: Set<String> = emptySet()
     private var _correctionSchemasStamp: Pair<Long, Long>? = null
 
+    /** 上次真正去 stat custom 文件的时刻（elapsedRealtime）。见 [correctionSchemas]。 */
+    @Volatile
+    private var _correctionSchemasCheckedAt = 0L
+
     /**
      * 启用邻键误触纠错的方案 id 集合（xime.yaml 顶层 correction.schemas，
      * xime.custom.yaml 同路径追加，与内置取并集）。解析失败/未配置时为空集。
+     *
+     * **热路径调用**（每个字母键一次）：旧实现每次都要 `exists()` + `lastModified()`
+     * + `length()` 三个 syscall 才判定缓存命中，等于每键白付三次文件系统调用。
+     * 这里加时间节流：距上次检查不足 [CORRECTION_SCHEMAS_CHECK_INTERVAL_MS] 时
+     * 直接返回缓存。用户改配置最多 3 秒后生效，对配置类数据完全够用。
      */
     fun correctionSchemas(context: Context): Set<String> {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (_correctionSchemasStamp != null &&
+            now - _correctionSchemasCheckedAt < CORRECTION_SCHEMAS_CHECK_INTERVAL_MS
+        ) {
+            return _correctionSchemas
+        }
+        _correctionSchemasCheckedAt = now
         val customFile = File(context.filesDir, "rime/$XIME_CUSTOM_CONFIG_FILE")
         val stamp = if (customFile.exists()) {
             customFile.lastModified() to customFile.length()

@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import logo from './assets/logo.png'
+import { createWirelessClient } from './wireless-client.js'
+
+const wireless = createWirelessClient(window.location.search)
 
 const ACCEPT = '.yaml,.zip,.tar.gz,.tgz,.gram,.jpg,.jpeg,.png,.xipk,.ttf,.otf,.woff,.woff2'
 const SUPPORTED = /\.(yaml|zip|tar\.gz|tgz|gram|jpe?g|png|xipk|ttf|otf|woff2?)$/i
@@ -134,7 +137,7 @@ export default function App() {
     const fd = new FormData()
     fd.append('file', file)
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/upload', true)
+    wireless.openUpload(xhr)
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) update(id, { progress: Math.round((e.loaded / e.total) * 100) })
     }
@@ -154,7 +157,7 @@ export default function App() {
     setLoading(true)
     setTreeErr(null)
     try {
-      const res = await fetch('/tree')
+      const res = await wireless.request('/tree')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setTree(data)
@@ -204,7 +207,7 @@ export default function App() {
 
   const openFile = useCallback(async (node) => {
     try {
-      const res = await fetch(`/read?path=${encodeURIComponent(node.path)}`)
+      const res = await wireless.request('/read', undefined, node.path)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setPreview({ node, text: await res.text() })
     } catch (e) {
@@ -214,7 +217,8 @@ export default function App() {
 
   const downloadFile = useCallback((node) => {
     const a = document.createElement('a')
-    a.href = `/download?path=${encodeURIComponent(node.path)}`
+    a.href = wireless.downloadUrl(node.path)
+    a.referrerPolicy = 'no-referrer'
     a.download = node.name
     document.body.appendChild(a)
     a.click()
@@ -225,7 +229,7 @@ export default function App() {
     const label = node.isDir ? '目录' : '文件'
     if (!window.confirm(`确定删除${label} ${node.name} 吗？`)) return
     try {
-      const res = await fetch('/delete', {
+      const res = await wireless.request('/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: node.path }),

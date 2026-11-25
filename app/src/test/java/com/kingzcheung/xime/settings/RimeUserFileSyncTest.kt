@@ -62,12 +62,16 @@ class RimeUserFileSyncTest {
             "build/XGuai_flypy.table.bin",
             "build/XGuai_flypy.prism.bin",
             "build/XGuai_flypy.schema.yaml",
-            "XGuai_flypy.userdb",
-            "pinyin_simp.userdb",
             "installation.yaml",
             "user.yaml",
         ).forEach {
             assertTrue("$it 应补入镜像", RimeUserFileSync.shouldMirrorRuntime(it))
+        }
+        // *.userdb 例外：它是 leveldb 二进制库（内含 LOCK/LOG/MANIFEST），
+        // 对用户没有可读价值，用户明确要求不在可见目录显示。
+        // 可见目录本身不参与引擎加载，缺它不影响任何功能。
+        listOf("XGuai_flypy.userdb", "pinyin_simp.userdb", "wubi86.userdb/LOG").forEach {
+            assertFalse("$it 不该补入镜像（userdb 不显示）", RimeUserFileSync.shouldMirrorRuntime(it))
         }
     }
 

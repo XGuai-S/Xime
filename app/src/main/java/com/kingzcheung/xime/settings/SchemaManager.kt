@@ -100,6 +100,290 @@ object SchemaManager {
     fun getRimeDir(context: Context): File =
         File(context.filesDir, "rime")
 
+    /**
+     * 保证方案目录布局就绪：把平铺方案收进 `rime/schemes/<方案>/`，再把 schemes 镜像回顶层。
+     *
+     * 在 rime 初始化链路里调用（引擎启动**之前**）。做三件事：
+     * 1. **首次迁移**：把顶层方案文件搬进 schemes/（幂等，见 [migrateLayoutToSchemes]）
+     * 2. **补建**：备份恢复后顶层有文件但 schemes/ 是空的 → 从顶层重建
+     * 3. **镜像**：把 schemes/ 里的文件链接回顶层，让 librime 能扫到
+     *
+     * 任何一步失败都只记日志、不阻断启动——布局是"整理"，方案本身还在，
+     * 退回平铺状态也能正常输入。
+     */
+    fun ensureSchemeLayout(context: Context, rimeDir: File = getRimeDir(context)) {
+        if (!rimeDir.isDirectory) return
+        try {
+            // 0) 内置方案缺失时从 assets 补齐。
+            //
+            // 这是"保险"，不是常规路径：历史上 3.4.30 的「删除未启用方案文件夹」逻辑
+            // 把 english/numbers/wubi98/wubi86_pinyin/wubi86_trad/wubi86_trad_pinyin
+            // 六个内置方案的文件从设备上删掉了，导致它们永久消失、设置页里再也看不到。
+            // 用户只能从 sync/ 备份手动捞回来。
+            //
+            // 判据：assets 里有、但设备上既不在顶层也不在任何方案文件夹里的内置方案。
+            // 只补内置的（用户从市场装的方案不在 assets 里，天然不受影响）。
+            runCatching { restoreMissingBuiltinSchemes(context, rimeDir) }
+                .onFailure { FileLogger.w(TAG, "补齐缺失内置方案失败", it) }
+
+            val enabled = getEnabledSchemas(context)
+
+            // 1) 先清幽灵目录：schemes/ 里已经没有对应顶层方案的残留。
+            //    必须早于迁移——残留目录里的 schema 会被 resolveOwnership 当成
+            //    现存方案，从而被"复活"并继续镜像到根目录。
+            runCatching { SchemaLayout.removeGhostSchemeFolders(rimeDir, enabled) }
+                .onFailure { FileLogger.w(TAG, "清理幽灵方案目录失败", it) }
+
+            // 2) 增量补齐。每次都跑，而不是"schemes/ 存在就跳过"。
+            //    曾经写成 `if (!schemes.exists()) migrate()`，结果升级后 schemes/ 已由
+            //    旧版本建好，新增的方案配置/词库**永远补不进去**
+            //    （线上实测：目录里只有旧的 schema+dict，新加的 .custom.yaml 一直缺）。
+            //    migrateLayoutToSchemes 是增量的（目标存在且大小相同就跳过），
+            //    每次跑不会重复写文件，代价只是一次目录遍历。
+            migrateLayoutToSchemes(rimeDir)
+
+            // 3) 同步已启用方案的文件夹：只有启用的方案有文件夹（用户要求），
+            //    且每个文件夹包含它引用的**全部**配置与词库（硬链接，不占多份空间）。
+            if (enabled.isEmpty()) {
+                // 一个都没启用（首次启动/配置为空）：全量镜像，至少让默认方案可用
+                SchemaLayout.mirrorToRoot(rimeDir)
+            } else {
+                // 3a) 归档未启用方案的文件：移进各自的 schemes/ 文件夹，顶层保持干净。
+                //     必须在 syncEnabledSchemeFolders **之前**：
+                //     先归档让顶层只剩启用方案的文件，再让 sync 统一建文件夹、
+                //     补全依赖闭包。顺序反了会导致"刚建好又被归档"的来回搬运。
+                runCatching { SchemaLayout.archiveDisabledSchemeFiles(rimeDir, enabled) }
+                    .onFailure { FileLogger.w(TAG, "归档未启用方案文件失败", it) }
+                // 3b) 为**所有已安装方案**建文件夹并补全依赖闭包（硬链接，不占多份空间）。
+                runCatching { SchemaLayout.syncEnabledSchemeFolders(rimeDir, enabled) }
+                    .onFailure { FileLogger.w(TAG, "同步方案文件夹失败", it) }
+                SchemaLayout.mirrorEnabledSchemes(rimeDir, enabled)
+            }
+            // 5) 清理垃圾文件（*.bak / *.log / *.tmp），它们不参与任何功能，
+            //    但会让目录显得乱，还会被备份打包进去。
+            runCatching { SchemaLayout.cleanJunkFiles(rimeDir) }
+                .onFailure { FileLogger.w(TAG, "清理垃圾文件失败", it) }
+
+            // 6) 可见目录 /sdcard/rime/ 也要整理：用户看到的是它，不是私有目录。
+            //
+            // 之前只整理私有目录，可见目录里一直停在 3.4.25 时代的旧结构
+            // （11 个按 schema_id 命名的目录、内容不全），用户看到的就是"没归纳"。
+            runCatching { ensureVisibleSchemeLayout(context, enabled) }
+                .onFailure { FileLogger.w(TAG, "整理可见目录方案布局失败", it) }
+        } catch (e: Exception) {
+            FileLogger.w(TAG, "方案目录布局整理失败（退回平铺，不影响输入）", e)
+        }
+    }
+
+    /**
+     * 从 APK 内置资产补齐设备上缺失的内置方案。
+     *
+     * 只补「assets 里有、设备上完全找不到」的方案（顶层和 schemes/ 都没有）。
+     * 已存在的方案一律不动——避免覆盖用户对内置方案的修改。
+     *
+     * @return 补齐的文件数
+     */
+    internal fun restoreMissingBuiltinSchemes(context: Context, rimeDir: File): Int {
+        val assets = context.assets.list("rime").orEmpty()
+        if (assets.isEmpty()) return 0
+
+        // 设备上已有的方案 id（顶层 + 方案文件夹）
+        val present = mutableSetOf<String>()
+        rimeDir.listFiles { f -> f.name.endsWith(".schema.yaml") }
+            .orEmpty().forEach { present += it.name.removeSuffix(".schema.yaml") }
+        SchemaLayout.discoverSchemeFiles(rimeDir).values.flatten()
+            .filter { it.name.endsWith(".schema.yaml") }
+            .forEach { present += it.name.removeSuffix(".schema.yaml") }
+
+        // assets 里有但设备上没有的方案
+        val missing = assets
+            .filter { it.endsWith(".schema.yaml") }
+            .map { it.removeSuffix(".schema.yaml") }
+            .filter { it !in present }
+        if (missing.isEmpty()) return 0
+
+        var restored = 0
+        missing.forEach { sid ->
+            // 该方案相关的全部资产文件：<id>.schema.yaml / <id>.dict.yaml / <id>.custom.yaml
+            val related = assets.filter { name ->
+                name == "$sid.schema.yaml" || name == "$sid.dict.yaml" || name == "$sid.custom.yaml"
+            }
+            related.forEach { name ->
+                val target = File(rimeDir, name)
+                if (target.exists()) return@forEach
+                runCatching {
+                    context.assets.open("rime/$name").use { input ->
+                        target.outputStream().use { out -> input.copyTo(out) }
+                    }
+                    restored++
+                }.onFailure { FileLogger.w(TAG, "补齐内置方案文件失败：$name", it) }
+            }
+        }
+        if (restored > 0) {
+            FileLogger.i(TAG, "补齐缺失内置方案：${missing.size} 个方案、$restored 个文件")
+        }
+        return restored
+    }
+
+    /**
+     * 整理**可见目录** `/sdcard/rime/` 的方案布局。
+     *
+     * 用户通过文件管理器看到的是这个目录，所以它的 schemes/ 必须与私有目录一致。
+     * 私有目录是权威源：这里把私有目录的 schemes 整体同步过去，并清掉可见侧的旧残留。
+     *
+     * 只做**单向镜像**（私有 → 可见）：
+     * - 可见侧多余的文件/目录（旧版本留下的 id 命名目录）删除
+     * - 私有侧有的文件补到可见侧
+     *
+     * 不反向读取：可见侧的 schemes 是派生产物，用户改它没有意义
+     * （真要改方案应该改顶层文件，那部分由 RimeUserFileSync 正常双向同步）。
+     */
+    private fun ensureVisibleSchemeLayout(context: Context, enabledSchemaIds: List<String>) {
+        if (!UserConfigDir.isSupported) return
+        if (!UserConfigDir.hasWritePermission(context)) return
+        syncVisibleSchemesForTest(getRimeDir(context), RimeUserFileSync.mirrorDir(context))
+    }
+
+    /**
+     * 可见目录 schemes 同步的纯目录实现（不依赖 Android Context，便于单测回滚路径）。
+     */
+    internal fun syncVisibleSchemesForTest(privateRime: File, visibleRime: File) {
+        if (!privateRime.isDirectory || !visibleRime.isDirectory) return
+
+        val privSchemes = File(privateRime, SchemaLayout.SCHEMES_DIR)
+        val visSchemes = File(visibleRime, SchemaLayout.SCHEMES_DIR)
+        if (!privSchemes.isDirectory) return
+
+        // 先写到临时目录，全部成功后再替换旧的。
+        //
+        // 曾经的写法是「先删后建」：删除成功但复制中途失败（空间不足 / 权限变化 / 用户
+        // 正在文件管理器里操作）会让 schemes/ 直接变空，用户看到方案全没了，
+        // 要等下次启动才能恢复。改成 staging + 原子替换后，失败时旧内容仍在。
+        val staging = File(visibleRime, "${SchemaLayout.SCHEMES_DIR}.tmp")
+        if (staging.isDirectory) runCatching { staging.deleteRecursively() }
+        if (!staging.mkdirs()) {
+            FileLogger.w(TAG, "可见目录 schemes 同步跳过：无法创建临时目录")
+            return
+        }
+
+        var copied = 0
+        var failed = 0
+        privSchemes.walkTopDown().filter { it.isFile }.forEach { src ->
+            val rel = src.relativeTo(privSchemes).path
+            val target = File(staging, rel)
+            target.parentFile?.mkdirs()
+            if (runCatching { src.copyTo(target, overwrite = true) }.isSuccess) copied++ else failed++
+        }
+        if (failed > 0) {
+            // 有失败就放弃替换，保留旧的可见结构（宁可不更新，也不能给用户一个残缺的目录）
+            FileLogger.w(TAG, "可见目录 schemes 同步中止：$failed 个文件复制失败，保留原结构")
+            runCatching { staging.deleteRecursively() }
+            return
+        }
+        // 替换旧的 schemes/：旧目录改名成 .old → 建新目录 → 搬运 → 成功后删 .old。
+        //
+        // 不能依赖 `renameTo` 直接把 staging 改名成 schemes：`/sdcard` 是 FUSE，
+        // 目录重命名经常失败（实测失败后 staging 留在原地，schemes.tmp 堆了 29MB）。
+        // 也不能「先删旧再搬」——搬运中途失败会让用户看到 schemes/ 变空、方案全没。
+        // 这里用 .old 备份兜底：搬运阶段有任何失败就把 .old 改回来，
+        // 用户看到的始终是完整的一份。
+        val oldBackup = File(visibleRime, "${SchemaLayout.SCHEMES_DIR}.old")
+        if (oldBackup.isDirectory) runCatching { oldBackup.deleteRecursively() }
+        val hadOld = visSchemes.isDirectory && runCatching { visSchemes.renameTo(oldBackup) }.getOrDefault(false)
+        if (visSchemes.isDirectory && !hadOld) {
+            // rename 失败：保持旧目录原样，放弃本次同步（宁可不更新，也不能给残缺目录）
+            FileLogger.w(TAG, "可见目录 schemes 同步跳过：旧目录无法改名保护")
+            runCatching { staging.deleteRecursively() }
+            return
+        }
+        if (!visSchemes.mkdirs() && !visSchemes.isDirectory) {
+            FileLogger.w(TAG, "可见目录 schemes 同步跳过：无法创建目标目录")
+            if (hadOld) runCatching { oldBackup.renameTo(visSchemes) }
+            runCatching { staging.deleteRecursively() }
+            return
+        }
+
+        var moved = 0
+        var moveFailed = 0
+        staging.walkTopDown().filter { it.isFile }.forEach { src ->
+            val rel = src.relativeTo(staging).path
+            val target = File(visSchemes, rel)
+            target.parentFile?.mkdirs()
+            // 优先 rename（同一文件系统内很快），失败则复制
+            val ok = runCatching { src.renameTo(target) }.getOrDefault(false) ||
+                runCatching { src.copyTo(target, overwrite = true) }.isSuccess
+            if (ok) moved++ else moveFailed++
+        }
+        if (moveFailed > 0) {
+            // 搬运有失败：回滚到旧目录，避免用户看到残缺的 schemes
+            FileLogger.w(TAG, "可见目录 schemes 搬运失败 $moveFailed 个，回滚到旧版本")
+            runCatching { visSchemes.deleteRecursively() }
+            if (hadOld) runCatching { oldBackup.renameTo(visSchemes) }
+            runCatching { staging.deleteRecursively() }
+            return
+        }
+        // 全部成功：删掉旧备份与 staging
+        if (hadOld) runCatching { oldBackup.deleteRecursively() }
+        runCatching { staging.deleteRecursively() }
+            .onFailure { FileLogger.w(TAG, "清理 staging 失败：${it.message}") }
+
+        // 顺手清掉历史残留的 schemes.tmp（旧版本 rename 失败留下的 29MB 垃圾）。
+        // staging 已经在上面删过，这里再删一次是幂等的（目录不存在直接返回）。
+        runCatching {
+            val leftover = File(visibleRime, "${SchemaLayout.SCHEMES_DIR}.tmp")
+            if (leftover.isDirectory) leftover.deleteRecursively()
+        }
+
+        if (moved > 0) {
+            FileLogger.i(TAG, "可见目录 schemes/ 已同步：$moved 个文件")
+        }
+
+        // 顶层的重复文件由 RimeUserFileSync.dedupeVisibleTopLevel 在同步之后统一清理，
+        // 这里不重复处理（两处都做会互相干扰：这里删完，同步又写回来）。
+    }
+
+    /**
+     * 一次性迁移：把 rime 顶层的方案文件收进 `schemes/<方案>/`。
+     *
+     * **只复制/链接，不删顶层原件**——librime 要读顶层，删了就没方案了。
+     * 所以这个迁移本质上是从顶层"备份一份"进 schemes/，然后依靠镜像保持两边一致。
+     *
+     * 幂等：schemes/ 已存在时直接返回（由 [ensureSchemeLayout] 保证不重复调用）。
+     *
+     * @return 迁移的方案数
+     */
+    internal fun migrateLayoutToSchemes(rimeDir: File): Int {
+        // 先清理旧版本用 schema_id 命名的目录（3.4.25 曾建出 schemes/english/ 这种）。
+        // 不清的话升级后会出现 "english" 和 "English" 两个目录，同一个方案两份内容。
+        runCatching { SchemaLayout.removeLegacyIdFolders(rimeDir) }
+            .onFailure { FileLogger.w(TAG, "清理旧方案目录失败", it) }
+
+        val ownership = SchemaLayout.resolveOwnership(rimeDir)
+        if (ownership.isEmpty()) return 0
+        var schemes = 0
+        ownership.entries.groupBy({ it.value }, { it.key }).forEach { (schemeName, files) ->
+            val dir = File(File(rimeDir, SchemaLayout.SCHEMES_DIR), schemeName)
+            var wrote = 0
+            files.forEach { top ->
+                val rel = top.relativeTo(rimeDir).path
+                val target = File(dir, rel)
+                if (target.isFile && target.length() == top.length()) return@forEach
+                target.parentFile?.mkdirs()
+                runCatching {
+                    java.nio.file.Files.createLink(target.toPath(), top.toPath())
+                    wrote++
+                }.recoverCatching {
+                    // 跨文件系统/不支持硬链接：复制一份
+                    top.copyTo(target, overwrite = true)
+                    wrote++
+                }
+            }
+            if (wrote > 0) schemes++
+        }
+        if (schemes > 0) FileLogger.i(TAG, "方案目录迁移完成：$schemes 个方案收进 schemes/")
+        return schemes
+    }
+
     /** 清空 rime/ 目录除 default.yaml、xime.yaml 及受保护文件之外的所有文件。 */
     fun cleanRimeDir(context: Context) {
         val rimeDir = getRimeDir(context)
@@ -440,6 +724,14 @@ object SchemaManager {
                 allOk = false
             }
         }
+        // 安装完成后整理布局：新方案收进 schemes/<方案名>/ 并补全依赖。
+        //
+        // 不整理的话，从市场装的方案会平铺在 rime 顶层、没有自己的文件夹，
+        // 用户看到的目录结构和「导入方案」的两种方式不一致。
+        if (allOk) {
+            runCatching { ensureSchemeLayout(context, rimeDir) }
+                .onFailure { FileLogger.w(TAG, "市场安装后整理方案布局失败", it) }
+        }
         return allOk
     }
 
@@ -502,18 +794,25 @@ object SchemaManager {
     fun applyEnabledSchemasToDefaultYaml(
         context: Context,
         schemaIds: List<String> = getEnabledSchemas(context)
-    ) {
-        if (schemaIds.isEmpty()) return
+    ): Boolean {
+        if (schemaIds.isEmpty()) return false
         val defaultYaml = File(getRimeDir(context), "default.yaml")
-        if (!defaultYaml.exists()) return
-        try {
+        if (!defaultYaml.isFile) return false
+        return try {
             val text = defaultYaml.readText()
             val updated = replaceSchemaListBlock(text, schemaIds)
+            // write 失败返回 false 不抛异常：原来忽略返回值会在写失败时仍返回 true，
+            // 调用方以为方案列表已落盘，重启后配置丢失却查不到任何错误。
             if (updated != text) {
-                defaultYaml.writeText(updated)
+                if (!com.kingzcheung.xime.util.AtomicFileWriter.write(defaultYaml, updated)) {
+                    Log.e(TAG, "写 default.yaml schema_list 失败")
+                    return false
+                }
             }
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write default.yaml schema_list", e)
+            false
         }
     }
 
@@ -684,23 +983,56 @@ object SchemaManager {
         return issues
     }
 
+    /**
+     * 扫描已安装方案。
+     *
+     * 必须同时扫 rime 顶层**和** schemes/<方案名>/：未启用方案的文件会被
+     * [SchemaLayout.archiveDisabledSchemeFiles] 归档进各自文件夹、从顶层移走。
+     * 只扫顶层会让这些方案在设置页里完全消失，用户看到「没有其他可用方案」，
+     * 也就永远无法重新启用它们（等于把功能删了）。
+     *
+     * 同一 schema_id 只保留一条：优先顶层那份，其次文件夹里的。
+     */
     fun discoverSchemas(context: Context): List<SchemaMeta> {
         val rimeDir = getRimeDir(context)
         if (!rimeDir.exists()) return emptyList()
+        return discoverSchemasIn(rimeDir)
+    }
 
-        val schemas = mutableListOf<SchemaMeta>()
-        val schemaFiles = rimeDir.listFiles { f -> f.name.endsWith(".schema.yaml") }
-            ?: return emptyList()
+    /**
+     * [discoverSchemas] 的目录版核心（纯逻辑，可直接单测）。
+     *
+     * 顶层与 `schemes/<方案名>/` 都要扫：未启用方案的文件被
+     * [SchemaLayout.archiveDisabledSchemeFiles] 归档进各自文件夹、从顶层移走，
+     * 只扫顶层会让这些方案在设置页里完全消失（用户看到「没有其他可用方案」，
+     * 也就无法重新启用它们）。
+     *
+     * 同一 schema_id 只保留一条：顶层优先（引擎实际加载的是它），其次文件夹里的。
+     */
+    internal fun discoverSchemasIn(rimeDir: File): List<SchemaMeta> {
+        val byId = LinkedHashMap<String, SchemaMeta>()
 
-        for (file in schemaFiles) {
-            val meta = parseSchemaYaml(file)
-            if (meta != null) {
-                schemas.add(meta)
+        fun add(candidates: List<File>) {
+            for (file in candidates) {
+                val meta = parseSchemaYaml(file) ?: continue
+                if (meta.schemaId !in byId) byId[meta.schemaId] = meta
             }
         }
 
-        schemas.sortBy { it.name }
-        return schemas
+        add(rimeDir.listFiles { f -> f.isFile && f.name.endsWith(".schema.yaml") }.orEmpty().toList())
+
+        val schemesDir = File(rimeDir, SchemaLayout.SCHEMES_DIR)
+        if (schemesDir.isDirectory) {
+            add(
+                schemesDir.listFiles().orEmpty()
+                    .filter { it.isDirectory }
+                    .flatMap { dir ->
+                        dir.listFiles { f -> f.isFile && f.name.endsWith(".schema.yaml") }.orEmpty().toList()
+                    }
+            )
+        }
+
+        return byId.values.sortedBy { it.name }
     }
 
     internal fun parseSchemaYaml(file: File): SchemaMeta? {
@@ -981,19 +1313,10 @@ object SchemaManager {
      * menu / switcher / key_binder 全部配置丢失（下次读取解析失败会回退内置默认）。
      */
     private fun writeTextAtomically(target: File, text: String): Boolean {
-        return try {
-            target.parentFile?.mkdirs()
-            val tmp = File(target.parentFile, "${target.name}.tmp")
-            tmp.writeText(text)
-            if (!tmp.renameTo(target)) {
-                Log.e(TAG, "原子写失败（rename）：${target.name}")
-                tmp.delete()
-                false
-            } else true
-        } catch (e: Exception) {
-            Log.e(TAG, "原子写失败：${target.name}", e)
-            false
-        }
+        // 统一实现：同目录临时文件 → 写入 → fsync → rename。
+        // 早期版本漏了 fsync，掉电后可能出现「文件名在、内容空」。
+        target.parentFile?.mkdirs()
+        return com.kingzcheung.xime.util.AtomicFileWriter.write(target, text)
     }
 
     private fun writeSchemaListOnlyCustom(customFile: File, schemaIds: List<String>) {
@@ -1083,6 +1406,26 @@ object SchemaManager {
             Log.i(TAG, "Legacy uninstall for $schemaId (dict=$dictName)")
         }
 
+        // 删除 schemes/ 里对应的方案文件夹。
+        //
+        // 只删顶层文件不够：布局整理（ensureSchemeLayout）会从 schemes/ 把文件
+        // 重新链接回顶层，用户看到的就是「卸载了但方案还在」。更糟的是
+        // syncEnabledSchemeFolders 会为所有「已安装」方案建文件夹，
+        // 残留的文件夹会让它以为方案仍然存在。
+        runCatching {
+            val schemesDir = File(getRimeDir(context), SchemaLayout.SCHEMES_DIR)
+            if (schemesDir.isDirectory) {
+                schemesDir.listFiles().orEmpty().filter { it.isDirectory }.forEach { dir ->
+                    val hasThisSchema = dir.listFiles { f -> f.name == "$schemaId.schema.yaml" }
+                        ?.isNotEmpty() == true
+                    if (hasThisSchema) {
+                        dir.deleteRecursively()
+                        Log.i(TAG, "Removed scheme folder schemes/${dir.name} for $schemaId")
+                    }
+                }
+            }
+        }.onFailure { Log.w(TAG, "删除方案文件夹失败: $schemaId", it) }
+
         // 从已安装市场列表和启用列表中移除
         SettingsPreferences.removeInstalledMarketId(context, schemaId)
         // 读-改-写走总锁：与并发 toggle 互斥，避免把别人刚启用的方案覆盖掉
@@ -1127,15 +1470,24 @@ object SchemaManager {
     /**
      * 某些 Android 内容提供器会将未知 MIME 类型的文件（如 .yaml）自动追加 .txt 后缀，
      * 导致 xime.custom.yaml 变成 xime.custom.yaml.txt。此处修复已知情况。
+     *
+     * 同时剥掉路径分量：文件名可能来自不可信来源（无线导入的 multipart filename、
+     * 分享 intent 的 displayName），`File(rimeDir, "../../foo")` 会写到 rime/ 之外。
+     * 这里统一只取最后一段，并拒绝 `..`、空名与控制字符；调用方无需再各自校验。
      */
     fun sanitizeDisplayName(name: String): String {
-        return when {
-            name.endsWith(".yaml.txt", ignoreCase = true) ->
-                name.removeSuffix(".txt")
-            name.endsWith(".dict.yaml.txt", ignoreCase = true) ->
-                name.removeSuffix(".txt")
-            else -> name
+        val base = name.replace('\\', '/').substringAfterLast('/')
+        val fixed = when {
+            base.endsWith(".yaml.txt", ignoreCase = true) ->
+                base.removeSuffix(".txt")
+            base.endsWith(".dict.yaml.txt", ignoreCase = true) ->
+                base.removeSuffix(".txt")
+            else -> base
         }
+        // 拒绝空名、`.`/`..` 以及含控制字符的名字（NUL 会让底层截断路径）。
+        if (fixed.isEmpty() || fixed == "." || fixed == "..") return ""
+        if (fixed.any { it < ' ' || it == '\u007f' }) return ""
+        return fixed
     }
 
     /**
@@ -1151,6 +1503,12 @@ object SchemaManager {
         autoEnable: Boolean = true,
     ): ImportResult = withContext(Dispatchers.IO) {
         val name = sanitizeDisplayName(displayName)
+        // 净化后为空说明名字非法（纯 `..`、含控制字符等）。不拦截会退化成
+        // File(dir, "") == dir，后续 copyStreamTo 会往目录本身写而抛异常。
+        if (name.isEmpty()) {
+            FileLogger.w(TAG, "拒绝导入：非法文件名 ${displayName.take(80)}")
+            return@withContext ImportResult(false)
+        }
         if (isFont(name)) {
             // 字体文件：保存到 rime/fonts/，供自定义字体功能使用
             val fontsDir = getFontsDir(context)
@@ -1260,6 +1618,11 @@ object SchemaManager {
                     copyStreamTo(input, target)
                 }
             }
+            // 导入完成后整理布局：新方案收进 schemes/<id>/ 并镜像回顶层。
+            // 放在自动启用之前——方案启用后 UI 会立即读取方案列表，
+            // 那时目录结构应该已经就位。
+            runCatching { ensureSchemeLayout(context, rimeDir) }
+                .onFailure { FileLogger.w(TAG, "导入后整理方案布局失败", it) }
             // 如果是 .schema.yaml 文件，自动启用
             if (autoEnable && name.endsWith(".schema.yaml")) {
                 val schemaId = name.removeSuffix(".schema.yaml")
@@ -1513,7 +1876,7 @@ object SchemaManager {
     internal fun importZipFromStream(inputStream: InputStream, targetDir: File): Boolean {
         return try {
             // 保存到临时文件，以便两趟处理（检测共同根目录 + 解压）
-            val tempFile = File.createTempFile("rime_import_", ".zip", targetDir)
+            val tempFile = File.createTempFile("rime_import_", ".zip")
             try {
                 copyStreamTo(inputStream, tempFile)
                 importZipFromFile(tempFile, targetDir)
@@ -1543,25 +1906,34 @@ object SchemaManager {
                 Log.i(TAG, "Found schema base directory: $baseDir, will strip it on extraction")
             }
 
-            // 第二趟：解压
+            // 第二趟：先解到同级暂存目录（按实际写出字节限额），全部成功后再整体替换进目标目录，
+            // 中途失败不会留下写了一半的方案文件
             var count = 0
-            ZipFile(zipFile).use { zip ->
-                zip.entries().asSequence().forEach { entry ->
-                    val originalName = entry.name
-                    if (entry.isDirectory || isAppleDouble(originalName)) return@forEach
-                    val name = originalName.removePrefix(baseDir)
-                    val file = if (isProtectedImportName(name)) null else safeChild(targetDir, name)
-                    if (file == null) {
-                        FileLogger.d(TAG, "Skip protected/unsafe entry: $name")
-                    } else {
-                        file.parentFile?.mkdirs()
-                        zip.getInputStream(entry).use { input ->
-                            FileOutputStream(file).use { output -> input.copyTo(output) }
+            val budget = ArchiveBudget()
+            val staging = ArchiveStaging.create(targetDir)
+            try {
+                ZipFile(zipFile).use { zip ->
+                    zip.entries().asSequence().forEach { entry ->
+                        val originalName = entry.name
+                        if (entry.isDirectory || isAppleDouble(originalName)) return@forEach
+                        val name = originalName.removePrefix(baseDir)
+                        val file = if (isProtectedImportName(name)) null else safeChild(staging.stagingDir, name)
+                        if (file == null) {
+                            FileLogger.d(TAG, "Skip protected/unsafe entry: $name")
+                        } else {
+                            file.parentFile?.mkdirs()
+                            budget.onEntry()
+                            zip.getInputStream(entry).use { input ->
+                                FileOutputStream(file).use { output -> budget.copy(input, output) }
+                            }
+                            count++
+                            FileLogger.d(TAG, "Staged zip entry: $name")
                         }
-                        count++
-                        FileLogger.d(TAG, "Extracted zip entry: $name")
                     }
                 }
+                if (count > 0) staging.commit()
+            } finally {
+                staging.cleanup()
             }
             FileLogger.i(TAG, "Extracted $count files from zip stream")
             count > 0
@@ -1574,7 +1946,7 @@ object SchemaManager {
     internal fun importTarGzFromStream(inputStream: InputStream, targetDir: File): Boolean {
         return try {
             // 落临时文件后走文件版（统一 gunzip + zip-slip/受保护文件 防护）
-            val tempFile = File.createTempFile("rime_import_", ".tar.gz", targetDir)
+            val tempFile = File.createTempFile("rime_import_", ".tar.gz")
             try {
                 copyStreamTo(inputStream, tempFile)
                 importTarGzFromFile(tempFile, targetDir)
@@ -1606,26 +1978,34 @@ object SchemaManager {
                 Log.i(TAG, "Found schema base directory in tar.gz: $baseDir, will strip it")
             }
 
-            // 第二趟：解压
+            // 第二趟：先解到同级暂存目录（按实际写出字节限额），全部成功后再整体替换进目标目录
             var count = 0
-            TarArchiveInputStream(GzipCompressorInputStream(tarGzFile.inputStream().buffered())).use { tarIn ->
-                var entry = tarIn.nextEntry
-                while (entry != null) {
-                    val originalName = entry.name
-                    if (entry.isDirectory || isAppleDouble(originalName)) {
+            val budget = ArchiveBudget()
+            val staging = ArchiveStaging.create(targetDir)
+            try {
+                TarArchiveInputStream(GzipCompressorInputStream(tarGzFile.inputStream().buffered())).use { tarIn ->
+                    var entry = tarIn.nextEntry
+                    while (entry != null) {
+                        val originalName = entry.name
+                        if (entry.isDirectory || isAppleDouble(originalName)) {
+                            entry = tarIn.nextEntry
+                            continue
+                        }
+                        val name = originalName.removePrefix(baseDir)
+                        val file = if (isProtectedImportName(name)) null else safeChild(staging.stagingDir, name)
+                        if (file == null) {
+                        } else {
+                            file.parentFile?.mkdirs()
+                            budget.onEntry()
+                            FileOutputStream(file).use { output -> budget.copy(tarIn, output) }
+                            count++
+                        }
                         entry = tarIn.nextEntry
-                        continue
                     }
-                    val name = originalName.removePrefix(baseDir)
-                    val file = if (isProtectedImportName(name)) null else safeChild(targetDir, name)
-                    if (file == null) {
-                    } else {
-                        file.parentFile?.mkdirs()
-                        FileOutputStream(file).use { output -> tarIn.copyTo(output) }
-                        count++
-                    }
-                    entry = tarIn.nextEntry
                 }
+                if (count > 0) staging.commit()
+            } finally {
+                staging.cleanup()
             }
             Log.i(TAG, "Extracted $count files from tar.gz")
             count > 0

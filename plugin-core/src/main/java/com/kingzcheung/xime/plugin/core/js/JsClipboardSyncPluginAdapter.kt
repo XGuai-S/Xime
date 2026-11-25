@@ -80,8 +80,10 @@ class JsClipboardSyncPluginAdapter(
 
     override suspend fun testConnection(): String? = withContext(Dispatchers.IO) {
         try {
-            val result = runtime.callAsync(JsPluginContract.PATH_CLIPBOARD_TEST)
-            val v = JsScriptRuntime.jsToKotlin(result)
+            val method = JsPluginContract.PATH_CLIPBOARD_TEST
+            if (!runtime.hasMethod(method)) return@withContext "插件未提供连接测试"
+            val result = runtime.callAsyncResult(method) ?: return@withContext "连接测试执行失败"
+            val v = result.value
             when (v) {
                 null -> null
                 is Boolean -> if (v) null else "连接失败"

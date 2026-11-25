@@ -59,15 +59,28 @@ class PluginRegistry(private val context: Application) {
     fun getPluginById(id: String): PluginInfo? = plugins[id]
 
     fun addPlugin(plugin: PluginInfo) {
-        plugins[plugin.id] = plugin
+        synchronized(this) { plugins[plugin.id] = plugin }
     }
 
     fun updatePlugin(plugin: PluginInfo) {
-        plugins[plugin.id] = plugin
+        synchronized(this) { plugins[plugin.id] = plugin }
     }
 
     fun removePlugin(id: String) {
-        plugins.remove(id)
+        synchronized(this) { plugins.remove(id) }
+    }
+
+    internal fun publishInstalledPlugin(
+        id: String,
+        create: (PluginInfo?) -> PluginInfo
+    ): PluginInfo = synchronized(this) {
+        val next = create(plugins[id])
+        require(next.id == id) { "插件注册 id 不匹配" }
+        val snapshot = plugins.toMutableMap()
+        snapshot[id] = next
+        writeRegistryAtomically(registryFile, encodeRegistryJson(snapshot.values))
+        plugins[id] = next
+        next
     }
 
     /**
@@ -78,17 +91,15 @@ class PluginRegistry(private val context: Application) {
      * 插件目录还在，但元数据空了，用户看到的是「插件全部消失」且只能重装。
      * POSIX rename 本身就是原子替换（同目录内），直接 rename 覆盖即可，无需先删。
      */
-    fun flushToDisk() {
+    /** @return true = 已成功落盘；false = 写入失败（内存状态**未**回滚，调用方需自行恢复）。 */
+    fun flushToDisk(): Boolean {
         synchronized(this) {
-            try {
-                val tmp = File(registryFile.parentFile, "${registryFile.name}.tmp")
-                // 快照一次，避免遍历并发容器期间被别的线程改动
-                tmp.writeText(encodeRegistryJson(plugins.values.toList()))
-                if (!tmp.renameTo(registryFile)) {
-                    Log.e(TAG, "注册表写入失败：rename 失败（旧文件保持不变）")
-                }
+            return try {
+                writeRegistryAtomically(registryFile, encodeRegistryJson(plugins.values.toList()))
+                true
             } catch (e: Exception) {
                 Log.e(TAG, "注册表写入失败", e)
+                false
             }
         }
     }

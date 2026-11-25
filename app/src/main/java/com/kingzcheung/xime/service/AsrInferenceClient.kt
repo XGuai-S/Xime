@@ -81,6 +81,10 @@ class AsrInferenceClient(private val context: Context) {
     private var service: IInferenceAsrService? = null
     private var bound = false
 
+    /** 当前识别会话号（服务端 startAsr 返回）；0 = 没有会话。后续推音频/结束/取消都要带上它。 */
+    @Volatile
+    private var sessionId = 0L
+
     /** 连接等待锁：一次性 CountDownLatch，countDown 后即失效——
      *  重绑前必须在 [ensureBound] 中重建，否则断线重连后会立即假醒。 */
     @Volatile
@@ -175,9 +179,12 @@ class AsrInferenceClient(private val context: Context) {
         touch()
         try {
             asrCallbackStub.attach(callback)
-            requireService().startAsr(modelDir, asrCallbackStub)
+            val id = requireService().startAsr(modelDir, asrCallbackStub)
+            sessionId = id
+            id != 0L
         } catch (e: Exception) {
             FileLogger.e(TAG, "startAsr failed", e)
+            sessionId = 0L
             asrCallbackStub.detach()
             false
         }
@@ -188,7 +195,7 @@ class AsrInferenceClient(private val context: Context) {
         // 这里只写一个 volatile 时间戳，不碰 Handler，20ms 一帧的开销可忽略。
         markActivity()
         try {
-            requireService().pushAsrAudio(audioData)
+            requireService().pushAsrAudio(sessionId, audioData)
         } catch (e: Exception) {
             // 音频帧每 ~20ms 一帧，服务断开时会连续失败；只记 debug，避免日志被刷爆
             FileLogger.d(TAG, "pushAsrAudio dropped: ${e.message}")
@@ -198,11 +205,12 @@ class AsrInferenceClient(private val context: Context) {
     suspend fun stopAsr(): String = withContext(Dispatchers.IO) {
         touch()
         try {
-            requireService().stopAsr()
+            requireService().stopAsr(sessionId)
         } catch (e: Exception) {
             FileLogger.w(TAG, "stopAsr failed: ${e.message}")
             ""
         } finally {
+            sessionId = 0L
             asrCallbackStub.detach()
         }
     }
@@ -210,10 +218,11 @@ class AsrInferenceClient(private val context: Context) {
     fun cancelAsr() {
         touch()
         try {
-            requireService().cancelAsr()
+            requireService().cancelAsr(sessionId)
         } catch (e: Exception) {
             FileLogger.d(TAG, "cancelAsr ignored: ${e.message}")
         }
+        sessionId = 0L
         asrCallbackStub.detach()
     }
 

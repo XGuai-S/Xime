@@ -131,7 +131,7 @@ class JsScriptRuntimeTest {
     fun `infinite loop times out and poisons runtime`() {
         val dir = File("build/js-timeout"); dir.mkdirs()
         val entry = File(dir, "main.js")
-        entry.writeText("globalThis.plugin = { spin: function() { while (true) {} } }")
+        entry.writeText("globalThis.plugin = { spin: function() { while (true) {} }, healthy: () => true }")
         val runtime = JsScriptRuntime(
             "js-timeout", dir, "main.js", MemoryConfigStore(),
             callTimeoutMs = 1_000, callbackTimeoutMs = 300
@@ -145,8 +145,8 @@ class JsScriptRuntimeTest {
         assertTrue("超时应在限时附近返回，实际 ${elapsed}ms", elapsed >= 800 && elapsed < 15_000)
 
         // 中毒后：后续调用立即失败
-        val second = runtime.call("spin")
-        assertNull("中毒后调用应立即返回 null", second)
+        val second = runtime.call("healthy")
+        assertNull("超时后不得再执行其他脚本方法", second)
         runtime.close()
     }
 

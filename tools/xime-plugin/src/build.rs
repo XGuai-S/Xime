@@ -36,13 +36,7 @@ pub async fn build_plugin(plugin_dir: &Path, out_root: &Path, minify: bool) -> a
 
     // 输出根目录规范化为绝对路径：rolldown 的 dir 相对 cwd（插件目录）解释，
     // 相对路径会落到插件目录内（plugins/<name>/build/...），必须绝对化。
-    std::fs::create_dir_all(out_root)
-        .map_err(|e| anyhow::anyhow!("创建输出目录失败 {}: {e}", out_root.display()))?;
-    let out_root = strip_unc_prefix(
-        out_root
-            .canonicalize()
-            .map_err(|e| anyhow::anyhow!("规范化输出目录失败 {}: {e}", out_root.display()))?,
-    );
+    let out_root = strip_unc_prefix(canonicalize_future_path(out_root)?);
 
     let manifest = Manifest::load(&plugin_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -57,6 +51,11 @@ pub async fn build_plugin(plugin_dir: &Path, out_root: &Path, minify: bool) -> a
         .ok_or_else(|| anyhow::anyhow!("无法解析插件目录名: {}", plugin_dir.display()))?;
 
     let out_dir = out_root.join(&plugin_name);
+    ensure_safe_output(&plugin_dir, &out_dir)?;
+    // 只允许替换本工具的产物目录，绝不递归删掉别的插件源码
+    ensure_replaceable_output(&out_dir)?;
+    std::fs::create_dir_all(&out_root)
+        .map_err(|e| anyhow::anyhow!("创建输出目录失败 {}: {e}", out_root.display()))?;
     if out_dir.exists() {
         std::fs::remove_dir_all(&out_dir)
             .map_err(|e| anyhow::anyhow!("清理产物目录失败 {}: {e}", out_dir.display()))?;
@@ -80,6 +79,86 @@ pub async fn build_plugin(plugin_dir: &Path, out_root: &Path, minify: bool) -> a
         out_dir,
         manifest,
     })
+}
+
+fn canonicalize_future_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut probe = absolute.as_path();
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(probe) {
+            Ok(_) => {
+                let mut resolved = probe.canonicalize()?;
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = probe.file_name().ok_or_else(|| {
+                    anyhow::anyhow!("无法规范化输出路径: {}", path.display())
+                })?;
+                suffix.push(name.to_os_string());
+                probe = probe.parent().ok_or_else(|| {
+                    anyhow::anyhow!("无法规范化输出路径: {}", path.display())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn ensure_safe_output(source: &Path, output: &Path) -> anyhow::Result<()> {
+    let source = source.canonicalize()?;
+    let resolved = canonicalize_future_path(output)?;
+    // 插件目录内运行零参数 build 时，默认产物位于 build/plugin-js/<name>。
+    let internal_build = source.join("build");
+    if source.starts_with(&resolved)
+        || (resolved.starts_with(&source) && !resolved.starts_with(internal_build))
+    {
+        anyhow::bail!("产物目录与插件源码冲突: {}", output.display());
+    }
+    Ok(())
+}
+
+/// 判断输出目录能否安全删除重建：只替换带明确工具产物标记的目录。
+///
+/// `ensure_safe_output` 只比对当前源码目录自身，无法挡住「--out 指向另一份
+/// 插件根目录」的情况——那里同名目录是别人的插件源码，递归删除会毁源码。
+fn ensure_replaceable_output(out_dir: &Path) -> anyhow::Result<()> {
+    if !out_dir.exists() {
+        return Ok(());
+    }
+    if !out_dir.is_dir() {
+        anyhow::bail!("产物路径已存在且不是目录: {}", out_dir.display());
+    }
+    // 像源码目录（含 main.ts 或 src/）→ 拒绝，绝不删
+    if out_dir.join(SOURCE_ENTRY).is_file() || out_dir.join("src").is_dir() {
+        anyhow::bail!(
+            "输出目录看起来是插件源码目录，拒绝覆盖删除: {}（请换一个 --out 目录）",
+            out_dir.display()
+        );
+    }
+    // 带本工具产物标记 → 可以替换
+    if out_dir.join("main.js").is_file() || out_dir.join("manifest.json").is_file() {
+        return Ok(());
+    }
+    // 空目录（上次构建中途失败）→ 可以重建
+    if std::fs::read_dir(out_dir)
+        .map_err(|e| anyhow::anyhow!("读取产物目录失败 {}: {e}", out_dir.display()))?
+        .next()
+        .is_none()
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "输出目录内既无 main.js/manifest.json 也无源码特征，为安全起见拒绝删除: {}",
+        out_dir.display()
+    )
 }
 
 /// 批量构建：扫描 `<plugins_root>/*/manifest.json`，逐个编译到 `<out_root>/<name>/`。
@@ -197,6 +276,13 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let target = dst.join(entry.file_name());
+        // 符号链接一律拒绝：跟随会把工作区外文件装进分发包，静默跳过则产物缺文件难排查
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "resources 中不允许符号链接: {}（请用真实文件或目录）",
+                entry.path().display()
+            );
+        }
         if file_type.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
@@ -221,4 +307,146 @@ fn strip_unc_prefix(path: PathBuf) -> PathBuf {
         return PathBuf::from(rest);
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "xipm-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ))
+    }
+
+    /// 造一个最小可编译插件目录（main.ts + manifest.json）。
+    fn write_min_plugin(dir: &Path, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("main.ts"), "const a = 1;\nexport default a;\n").unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{ "id": "writer", "version": "{version}", "type": "tool" }}"#),
+        )
+        .unwrap();
+    }
+
+    /// H12：--out 指向另一份插件根目录时，不得删除其中同名插件源码目录。
+    #[tokio::test]
+    async fn build_refuses_to_delete_foreign_plugin_source() {
+        let root = temp_dir("h12");
+        let source = root.join("plugins/writer");
+        write_min_plugin(&source, "1.0.0");
+        // 另一份插件根目录：内含同名插件源码
+        let other = root.join("other/plugins/writer");
+        write_min_plugin(&other, "9.9.9");
+        std::fs::create_dir_all(other.join("resources")).unwrap();
+        std::fs::write(other.join("resources/keep.txt"), "源码资源").unwrap();
+
+        let err = build_plugin(&source, &root.join("other/plugins"), false)
+            .await
+            .err()
+            .expect("输出根指向另一份插件源码必须报错");
+        let msg = format!("{err}");
+        assert!(msg.contains("源码"), "错误信息未说明拒绝覆盖源码: {msg}");
+        // 对方源码必须完好
+        assert!(other.join("main.ts").is_file(), "对方 main.ts 被删除");
+        assert!(other.join("resources/keep.txt").is_file(), "对方 resources 被删除");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// H12：真正的工具产物目录仍可正常重建（回归保护）。
+    #[tokio::test]
+    async fn build_still_replaces_own_tool_output() {
+        let root = temp_dir("h12-ok");
+        let source = root.join("plugins/writer");
+        write_min_plugin(&source, "1.0.0");
+        let out_root = root.join("build/plugin-js");
+
+        build_plugin(&source, &out_root, false).await.unwrap();
+        assert!(out_root.join("writer/main.js").is_file());
+        // 二次构建（产物目录已存在）必须照常成功
+        build_plugin(&source, &out_root, false).await.unwrap();
+        assert!(out_root.join("writer/main.js").is_file());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// M11：resources 内符号链接被跟随复制 → 必须报错。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_rejects_symlink_in_resources() {
+        let root = temp_dir("m11");
+        let source = root.join("writer");
+        write_min_plugin(&source, "1.0.0");
+        std::fs::create_dir_all(source.join("resources/nested")).unwrap();
+        let outside_file = root.join("secret.txt");
+        std::fs::write(&outside_file, "工作区外文件").unwrap();
+        std::os::unix::fs::symlink(&outside_file, source.join("resources/nested/link.txt")).unwrap();
+
+        let out_root = root.join("out");
+        let err = build_plugin(&source, &out_root, false)
+            .await
+            .err()
+            .expect("resources 含符号链接必须报错");
+        assert!(
+            format!("{err}").contains("符号链接"),
+            "错误信息未指明符号链接: {err}"
+        );
+
+        // 指向目录的符号链接同样必须拒绝
+        std::fs::remove_file(source.join("resources/nested/link.txt")).unwrap();
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("x.txt"), "外部目录文件").unwrap();
+        std::os::unix::fs::symlink(&outside_dir, source.join("resources/linkdir")).unwrap();
+        let err = build_plugin(&source, &out_root, false)
+            .await
+            .err()
+            .expect("resources 含目录符号链接必须报错");
+        assert!(format!("{err}").contains("符号链接"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn output_cannot_replace_source_or_ancestor() {
+        let root = std::env::temp_dir().join(format!(
+            "xipm-path-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let source = root.join("writer");
+        std::fs::create_dir_all(source.join("resources")).unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        assert!(ensure_safe_output(&canonical_source, &canonical_source).is_err());
+        assert!(ensure_safe_output(&canonical_source, &root).is_err());
+        assert!(ensure_safe_output(
+            &canonical_source,
+            &source.join("resources/build/writer"),
+        )
+        .is_err());
+        assert!(ensure_safe_output(&canonical_source, &root.join("build/writer")).is_ok());
+        assert!(ensure_safe_output(
+            &canonical_source,
+            &source.join("build/plugin-js/writer"),
+        ).is_ok());
+        assert!(ensure_safe_output(&canonical_source, &source.join("src/writer")).is_err());
+        #[cfg(unix)]
+        {
+            let alias = root.with_extension("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            assert!(ensure_safe_output(&canonical_source, &alias.join("writer")).is_err());
+            std::fs::remove_file(alias).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

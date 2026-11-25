@@ -2,6 +2,7 @@ package com.kingzcheung.xime.model
 
 import android.content.Context
 import com.kingzcheung.xime.util.FileLogger
+import kotlinx.coroutines.runBlocking
 import java.io.File
 
 object ModelManager {
@@ -52,23 +53,17 @@ object ModelManager {
 
     fun isModelDownloaded(context: Context, model: ModelInfo): Boolean {
         // 检测前先尝试迁移旧路径模型到统一目录，保证已下载的旧版可用
+        if (runCatching { ModelPaths.validateFiles(model.files); ModelStorage.getModelDir(context, model.id) }.isFailure) return false
         ModelStorage.migrateLegacyForModel(context, model.id)
         val dir = getModelStorageDir(context, model) ?: return false
         if (!dir.exists()) return false
-
-        return model.files.all { fileInfo ->
-            val file = if (model.archiveUrl != null) {
-                findFileInDir(dir, fileInfo.name)
-            } else {
-                File(dir, fileInfo.name)
-            }
-            file.exists() && file.length() > 0
-        }
+        val files = resolveFiles(dir, model) ?: return false
+        return files.all { it.isFile && it.length() > 0 }
     }
 
     fun getModelStorageDir(context: Context, model: ModelInfo): File? {
         // 统一规则：所有模型一律存 filesDir/models/<id>/
-        return ModelStorage.getModelDir(context, model.id)
+        return runCatching { ModelStorage.getModelDir(context, model.id) }.getOrNull()
     }
 
     fun getModelStorageDir(context: Context, id: String): File? {
@@ -76,19 +71,17 @@ object ModelManager {
         return getModelStorageDir(context, model)
     }
 
+    /** 该模型是否正被下载/删除事务占用（存储清理入口用来跳过进行中的模型目录）。 */
+    fun isModelBusy(context: Context, id: String): Boolean =
+        ModelOperationGate.isDownloading(context, id)
+
     fun getModelSizeOnDisk(context: Context, id: String): Long {
         val model = getModel(id) ?: return 0
         val dir = getModelStorageDir(context, model) ?: return 0
         if (!dir.exists()) return 0
 
-        return model.files.sumOf { fileInfo ->
-            val file = if (model.archiveUrl != null) {
-                findFileInDir(dir, fileInfo.name)
-            } else {
-                File(dir, fileInfo.name)
-            }
-            if (file.exists()) file.length() else 0
-        }
+        val files = resolveFiles(dir, model) ?: return 0
+        return files.sumOf { if (it.isFile) it.length() else 0L }
     }
 
     fun getDownloadedModels(context: Context): List<ModelInfo> {
@@ -114,7 +107,10 @@ object ModelManager {
         onProgress: (ModelDownloadState) -> Unit,
         version: ModelVersion? = null
     ) {
-        ModelDownloader.downloadModel(context, model, onProgress, version)
+        // 下载事务进模型目录的串行域：与删除/迁移互斥，删除入口可取消这里的任务
+        ModelOperationGate.runExclusive(context, model.id, download = true) {
+            ModelDownloader.downloadModel(context, model, onProgress, version)
+        }
     }
 
     fun deleteModel(context: Context, id: String): Boolean {
@@ -122,17 +118,30 @@ object ModelManager {
         return deleteModel(context, model)
     }
 
+    /**
+     * 删除模型文件：先取消该模型的活动下载并等它结束，再在串行域内删文件，
+     * 保证不会与「逐文件提交」交错，也不会让回滚覆盖别的操作。
+     */
     fun deleteModel(context: Context, model: ModelInfo): Boolean {
+        val download = ModelOperationGate.activeDownload(context, model.id)
+        download?.cancel()
+        if (download != null) runCatching { runBlocking { download.join() } }
+        return runCatching {
+            runBlocking {
+                ModelOperationGate.runExclusive(context, model.id) { deleteModelLocked(context, model) }
+            }
+        }.getOrDefault(false)
+    }
+
+    /** 调用方必须已持有该模型的串行域。 */
+    private fun deleteModelLocked(context: Context, model: ModelInfo): Boolean {
         val dir = getModelStorageDir(context, model) ?: return false
         if (!dir.exists()) return false
 
+        val files = resolveFiles(dir, model) ?: return false
+        if (files.any { it.exists() && !it.isFile }) return false
         var success = true
-        for (fileInfo in model.files) {
-            val file = if (model.archiveUrl != null) {
-                findFileInDir(dir, fileInfo.name)
-            } else {
-                File(dir, fileInfo.name)
-            }
+        for (file in files) {
             if (file.exists() && !file.delete()) {
                 success = false
             }
@@ -144,17 +153,14 @@ object ModelManager {
         return success
     }
 
-    private fun findFileInDir(dir: File, fileName: String): File {
-        val direct = File(dir, fileName)
-        if (direct.exists()) return direct
-
-        dir.listFiles()?.forEach { child ->
-            if (child.isDirectory) {
-                val found = findFileInDir(child, fileName)
-                if (found.exists()) return found
+    private fun resolveFiles(dir: File, model: ModelInfo): List<File>? = runCatching {
+        ModelPaths.validateFiles(model.files)
+        model.files.map { file ->
+            if (model.archiveUrl != null) {
+                ModelPaths.findFile(dir, file.name) ?: ModelPaths.child(dir, file.name)
+            } else {
+                ModelPaths.child(dir, file.name)
             }
         }
-
-        return direct
-    }
+    }.getOrNull()
 }

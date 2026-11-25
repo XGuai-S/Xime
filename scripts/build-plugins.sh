@@ -15,11 +15,9 @@ CLI="$PROJECT_DIR/tools/xime-plugin/target/release/xipm"
 # 随包内置的插件清单（新增内置插件时加到这里）
 BUNDLED_PLUGINS="webdav-backup"
 
-# 1) 编译 CLI（首次或源码变更时；之后 cargo 会快速跳过）
-if [ ! -x "$CLI" ]; then
-    echo "→ 构建插件工具链 xipm ..."
-    ( cd "$PROJECT_DIR/tools/xime-plugin" && cargo build --release )
-fi
+# 1) 编译 CLI（Cargo 增量编译会快速跳过未变化的源码）
+echo "→ 检查并构建插件工具链 xipm ..."
+( cd "$PROJECT_DIR/tools/xime-plugin" && cargo build --release )
 
 if [ ! -x "$CLI" ]; then
     echo "✗ 未找到 $CLI，构建失败" >&2

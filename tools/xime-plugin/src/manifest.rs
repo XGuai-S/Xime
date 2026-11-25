@@ -87,6 +87,13 @@ impl Manifest {
         if self.version.trim().is_empty() {
             return Err("version 不能为空".to_string());
         }
+        // version 参与 xipk 包文件名，必须是安全文件名成分
+        if !is_valid_version(&self.version) {
+            return Err(format!(
+                "非法 version: {}（仅允许字母/数字/点/下划线/连字符，且不能是 . 或 ..）",
+                self.version
+            ));
+        }
         Ok(())
     }
 
@@ -207,6 +214,18 @@ pub fn is_valid_entry(name: &str) -> bool {
         && !name.contains("..")
 }
 
+/// version：参与 xipk 包文件名，只允许安全文件名成分（字母/数字/点/下划线/连字符），
+/// 且不能是 "." / ".."（避免路径穿越与空文件名）。
+pub fn is_valid_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && version != "."
+        && version != ".."
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +249,34 @@ mod tests {
         assert!(!is_valid_entry(""));
         assert!(!is_valid_entry("libs/main.js"));
         assert!(!is_valid_entry("../main.js"));
+    }
+
+    /// M10：version 参与包文件名，校验必须拒绝路径成分。
+    #[test]
+    fn version_validation() {
+        for bad in ["1.0.0/evil", "1.0.0\\evil", "..", ".", "../..", "1/../../x", " 1.0.0", "1.0.0\n", ""] {
+            assert!(!is_valid_version(bad), "应拒绝 version: {bad:?}");
+        }
+        for ok in ["1.0.0", "0.0.0", "1.2.3-beta_1", "20240101"] {
+            assert!(is_valid_version(ok), "应接受 version: {ok:?}");
+        }
+    }
+
+    /// M10：manifest 校验阶段即拒绝路径穿越 version，错误信息要指明 version。
+    #[test]
+    fn parse_rejects_unsafe_version() {
+        for bad in ["1.0.0/evil", "..", "../..", "1/../../x"] {
+            let text = format!(r#"{{ "id": "demo", "version": "{bad}", "type": "tool" }}"#);
+            let manifest: Manifest = json5::from_str(&text).unwrap();
+            let err = manifest
+                .validate()
+                .expect_err("含路径成分的 version 必须被拒绝");
+            assert!(err.contains("version"), "错误信息未指明 version: {err}");
+        }
+        // 正常版本号不受影响
+        let manifest: Manifest =
+            json5::from_str(r#"{ "id": "demo", "version": "1.2.3-beta.1" }"#).unwrap();
+        manifest.validate().unwrap();
     }
 
     #[test]

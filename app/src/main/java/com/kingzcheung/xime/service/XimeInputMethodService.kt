@@ -178,6 +178,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     companion object {
         internal const val TAG = "XimeInputMethodService"
+
         private const val DARK_MODE_LIGHT = 0
         private const val DARK_MODE_DARK = 1
         private const val DARK_MODE_SYSTEM = 2
@@ -223,7 +224,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     
     internal lateinit var clipboardManager: ClipboardManager
 
-    internal var clipboardSyncBridge: ClipboardSyncBridge? = null
+    private var clipboardSyncBridgeInternal: ClipboardSyncBridge? = null
+    internal val clipboardSyncBridge: ClipboardSyncBridge?
+        get() = if (SettingsPreferences.isClipboardSyncEnabled(this)) clipboardSyncBridgeInternal else null
     
     internal lateinit var keyboardContainer: VoiceKeyboardContainer
     
@@ -239,9 +242,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 每个排队项都是 LAZY 协程对象——同时占内存并让延迟持续累积，表现为「越打越慢、
      * 候选栏迟到几拍」。改为有界后，积压时丢弃新任务，用「丢一次响应」换取「不让整个
      * 键盘陷进延迟泥潭」；丢弃由 [com.kingzcheung.xime.service.ImeKeyRouter.sendKeyJob] 留痕。
-     * 容量 64 ≈ 1 秒手速余量（人手极限约 10 键/秒），再多就属积压。
+     * 容量 64 只限制等待中的任务，正在执行的任务不占该容量。
      */
-    internal val keyJobs = Channel<Job>(capacity = 64)
+    internal val keyJobs = createKeyJobQueue()
     internal val uiEventChannel = Channel<suspend () -> Unit>(Channel.CONFLATED)
 
 
@@ -265,19 +268,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal var deleteGeneration = 0
 
     init {
-        // 按键任务按入队顺序在 key-process 单线程上执行（天然 FIFO），主线程只负责
-        // 按序 start，不做 join 等待——打字时主线程不再被 rime 处理 + 候选刷新阻塞，
-        // 候选/预编辑区刷新与按键反馈解耦，连续快速输入不卡顿不跟手。
-        // 单线程 executor 保证 job 串行执行，顺序与入队一致；UI 更新经 uiEventChannel
-        // （CONFLATED）回主线程。
+        // 每次只启动一个任务并挂起等待完成；主线程仍可处理 UI，不把积压搬进 executor。
         serviceScope.launch {
-            keyJobs.consumeEach { job ->
-                try {
-                    job.start()
-                } catch (e: Throwable) {
-                    // 单个按键任务启动失败不能让消费者协程退出，否则后续按键/候选点选会永久堆积失效
-                    FileLogger.e(TAG, "key job failed to start, keep consuming", e)
-                }
+            consumeKeyJobs(keyJobs) { failure ->
+                FileLogger.e(TAG, "key job failed, keep consuming", failure)
             }
         }
         serviceScope.launch(Dispatchers.Main) {
@@ -363,6 +357,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 直接加载会在服务创建瞬间抛 NPE 闪退（真机已验证）。因此这里只留空表，
      * 在 [onCreate] 里用已 attach 的 context 加载。
      */
+    @Volatile
     internal var candidateOrderTable: Map<String, Map<String, Int>> = emptyMap()
     /**
      * 上屏词频表（编码 → 词 → 上屏次数）。
@@ -399,6 +394,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      *
      * 加载约束同上（onCreate 里用已 attach 的 context 加载）。
      */
+    @Volatile
     internal var wordBlacklist: Map<String, Map<String, Int>> = emptyMap()
 
     /**
@@ -411,6 +407,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     @Volatile
     private var wordTablesLoaded = false
+
+    /**
+     * 内存词表代次：每次「整体替换/合并写回」递增。
+     *
+     * 用于检测「慢操作期间内存表被并发改动」——reconcile 要读盘（几十毫秒），
+     * 期间用户可能又拖了一次候选、或词库重载刚发布新表。写回前比对代次即可发现，
+     * 比给整段加锁更轻（不阻塞上屏热路径）。
+     */
+    @Volatile
+    private var wordTablesGeneration = 0L
 
     /**
      * 词库表互斥锁：保护 [candidateOrderTable] / [wordFreqTable] / [autoWordTemp] /
@@ -761,6 +767,21 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     // ---- AI 句子补全（L3，默认关闭；开关为 aiCompletionEnabled）----
     private var aiSentenceCompleter: com.kingzcheung.xime.ai.ime.predict.AiSentenceCompleter? = null
     @Volatile private var lastAiCompletionAttemptAt = 0L
+    private val aiCompletionGate = AiCompletionGate()
+
+    private fun aiCompletionState(
+        settings: com.kingzcheung.xime.ai.data.AppSettings,
+        connection: Any? = currentInputConnection,
+    ) = AiCompletionGate.State(
+        sessionId = uiState.value.inputSessionId,
+        editorSignature = currentInputEditorInfo?.let { "${it.packageName}|${it.fieldId}|${it.inputType}" },
+        configuration = settings,
+        connection = connection,
+        enabled = settings.aiCompletionEnabled,
+        incognito = settings.manualIncognitoMode,
+        secret = editorSecret,
+        noLearn = editorNoLearn,
+    )
 
     private fun ensureAiSentenceCompleter(): com.kingzcheung.xime.ai.ime.predict.AiSentenceCompleter? {
         aiSentenceCompleter?.let { return it }
@@ -775,6 +796,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     /** 取消在途/待触发的 AI 句子补全（任意按键时调用）。 */
     internal fun cancelAiCompletion() {
+        aiCompletionGate.invalidate()
         runCatching { aiSentenceCompleter?.cancel() }
     }
 
@@ -784,7 +806,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     internal fun scheduleAiCompletionIfEnabled() {
         try {
-            if (editorSecret) return
+            cancelAiCompletion()
+            if (editorSecret || editorNoLearn) return
+            val info = currentInputEditorInfo ?: return
             if (!com.kingzcheung.xime.ai.XimeAiApp.ensureInit(applicationContext)) return
             val repo = com.kingzcheung.xime.ai.XimeAiApp.repository
             val st = repo.settings.value
@@ -798,10 +822,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             val before = ic.getTextBeforeCursor(200, 0)?.toString()?.trimEnd().orEmpty()
             FileLogger.d(TAG, "aiCompl schedule: beforeLen=${before.length} mode=${st.pipelineMode}")
             if (before.isEmpty()) return
-            val info = currentInputEditorInfo
-            val appName = info?.packageName.orEmpty()
-            val style = runCatching { repo.resolveActiveStyle(appName, info?.inputType ?: 0).first }
+            val appName = info.packageName.orEmpty()
+            val style = runCatching { repo.resolveActiveStyle(appName, info.inputType).first }
                 .getOrElse { return }
+            val ticket = aiCompletionGate.begin(aiCompletionState(st, ic))
             completer.scheduleCompletion(
                 contextBeforeCursor = before,
                 settings = st,
@@ -813,16 +837,19 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 if (suggestion.isBlank()) return@scheduleCompletion
                 mainHandler.post {
                     try {
-                        val c = candidateState.value
-                        if (c.isComposing || c.inputText.isNotEmpty()) return@post
-                        val now = currentInputConnection?.getTextBeforeCursor(200, 0)
-                            ?.toString()?.trimEnd().orEmpty()
-                        if (now == before) {
-                            updateCandidateState {
-                                it.copy(
-                                    associationCandidates = (listOf(suggestion) +
-                                        it.associationCandidates.filter { x -> x != suggestion }).take(6)
-                                )
+                        aiCompletionGate.runIfCurrent(ticket, aiCompletionState(repo.settings.value)) applyResult@ {
+                            val c = candidateState.value
+                            if (c.isComposing || c.inputText.isNotEmpty()) return@applyResult
+                            val now = ic.getTextBeforeCursor(200, 0)?.toString()?.trimEnd().orEmpty()
+                            if (now == before) {
+                                aiCompletionGate.runIfCurrent(ticket, aiCompletionState(repo.settings.value)) {
+                                    updateCandidateState {
+                                        it.copy(
+                                            associationCandidates = (listOf(suggestion) +
+                                                it.associationCandidates.filter { x -> x != suggestion }).take(6)
+                                        )
+                                    }
+                                }
                             }
                         }
                     } catch (e: Throwable) {
@@ -1067,8 +1094,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             if (!ok) {
                 FileLogger.e(TAG, "词库加载 3 次均失败，本次保持空表降级（下次服务重建时重新加载）")
             }
-            // 无论成败都记下当前版本：失败时也避免每次开会话都重试打日志
-            loadedAutoWordVersion = AutoWordStore.dataVersion()
         }
         FileLogger.i(
             TAG,
@@ -1257,14 +1282,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // UI 布局恢复：冷启动时第一次 onStartInput 先于引擎初始化完成，
                 // RimeEngine.isInitialized()=false 会跳过 handwriting UI 恢复，
                 // 此处必须补切，否则第一次弹出键盘停留在默认全键盘
-                val hwDir = com.kingzcheung.xime.model.ModelStorage.getModelDir(
-                    this@XimeInputMethodService, "ochwpro"
-                )
-                com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(
-                    this@XimeInputMethodService, "ochwpro"
-                )
-                val modelOk = java.io.File(hwDir, "ochwpro.onnx").exists() &&
-                    java.io.File(hwDir, "char_index.json").exists()
+                val modelOk = runCatching {
+                    val directory = com.kingzcheung.xime.model.ModelStorage.getModelDir(this, "ochwpro")
+                    com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(this, "ochwpro")
+                    com.kingzcheung.xime.model.ModelPaths.child(directory, "ochwpro.onnx").isFile &&
+                        com.kingzcheung.xime.model.ModelPaths.child(directory, "char_index.json").isFile
+                }.getOrDefault(false)
                 if (modelOk) {
                     val page = keyboardViewModel.page.value
                     val alreadyHandwriting = page is com.kingzcheung.xime.keyboard.KeyboardPage.Main &&
@@ -1376,11 +1399,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             when {
                 isHandwritingSchema(savedSchema) -> {
                     debugLog("onStartInput: saved schema is handwriting, checking model files")
-                    val hwDir = com.kingzcheung.xime.model.ModelStorage.getModelDir(this, "ochwpro")
-                    com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(this, "ochwpro")
-                    val modelFile = java.io.File(hwDir, "ochwpro.onnx")
-                    val charIndexFile = java.io.File(hwDir, "char_index.json")
-                    if (!modelFile.exists() || !charIndexFile.exists()) {
+                    val modelOk = runCatching {
+                        val directory = com.kingzcheung.xime.model.ModelStorage.getModelDir(this, "ochwpro")
+                        com.kingzcheung.xime.model.ModelStorage.migrateLegacyForModel(this, "ochwpro")
+                        com.kingzcheung.xime.model.ModelPaths.child(directory, "ochwpro.onnx").isFile &&
+                            com.kingzcheung.xime.model.ModelPaths.child(directory, "char_index.json").isFile
+                    }.getOrDefault(false)
+                    if (!modelOk) {
                         FileLogger.w(TAG, "Handwriting model not found, falling back to first available schema")
                         android.widget.Toast.makeText(
                             this, "请先下载手写模型", android.widget.Toast.LENGTH_LONG
@@ -1723,7 +1748,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     internal fun markShowingClipboardConsumed() {
         // 用户开始打字：此前「上屏后抑制重开」的使命结束，恢复正常展示逻辑
         suppressClipboardCandidateAutoShow = false
-        val ids = synchronized(showingClipboardIds) { showingClipboardIds.toList() }
+        // 每键都会走到这里，而绝大多数时候集合是空的：先判空再取快照，
+        // 省掉每键一次 toList() 分配（synchronizedSet 的 isEmpty 自身线程安全）。
+        if (showingClipboardIds.isEmpty()) return
+        val ids = synchronized(showingClipboardIds) {
+            if (showingClipboardIds.isEmpty()) emptyList() else showingClipboardIds.toList()
+        }
         if (ids.isEmpty()) return
         showingClipboardIds.clear()
         ids.forEach { clipboardManager.markConsumedById(it) }
@@ -1785,12 +1815,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     private fun startClipboardSyncIfEnabled() {
-        if (clipboardSyncBridge != null) return
+        if (!SettingsPreferences.isClipboardSyncEnabled(this)) {
+            stopClipboardSync()
+            Log.d(TAG, "Clipboard sync disabled by policy")
+            return
+        }
+        if (clipboardSyncBridgeInternal != null) return
         try {
-            if (!SettingsPreferences.isClipboardSyncEnabled(this)) {
-                Log.d(TAG, "Clipboard sync disabled in settings")
-                return
-            }
             val enabled = ExtensionManager.getEnabledClipboardSyncPlugins(this)
             if (enabled.isEmpty()) return
             val preferredId = SettingsPreferences.getClipboardSyncPluginId(this)
@@ -1815,7 +1846,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 每次拉取节流时动态读取，插件设置修改后即时生效
             val syncConfigStore = PluginManager.configStoreFactory
                 .create(applicationContext as android.app.Application, selected.first)
-            clipboardSyncBridge = ClipboardSyncBridge(
+            clipboardSyncBridgeInternal = ClipboardSyncBridge(
                 clipboardManager,
                 plugin,
                 pluginId = selected.first,
@@ -1825,7 +1856,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     syncConfigStore.get(ClipboardSyncBridge.CONFIG_KEY_PULL_INTERVAL_SECONDS)
                 }
             )
-            clipboardSyncBridge?.start()
+            clipboardSyncBridgeInternal?.start()
             uiState.value = uiState.value.copy(clipboardSyncEnabled = true)
             Log.d(TAG, "Clipboard sync started: ${selected.first}")
         } catch (e: Exception) {
@@ -1834,13 +1865,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     private fun stopClipboardSync() {
-        clipboardSyncBridge?.release()
-        clipboardSyncBridge = null
+        clipboardSyncBridgeInternal?.release()
+        clipboardSyncBridgeInternal = null
         uiState.value = uiState.value.copy(clipboardSyncEnabled = false)
     }
 
     /** 剪贴板同步设置或插件状态变化时调用，按条件动态启停。 */
     private fun updateClipboardSync() {
+        if (!SettingsPreferences.isClipboardSyncEnabled(this)) {
+            stopClipboardSync()
+            return
+        }
         if (!::clipboardManager.isInitialized) return
         if (clipboardSyncBridge == null) {
             startClipboardSyncIfEnabled()
@@ -2258,7 +2293,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 剪贴板兜底：无选区/无输入连接时取系统剪贴板
         runCatching {
             if (::clipboardManager.isInitialized) {
-                clipboardManager.getCurrentClipboardText()?.takeIf { it.isNotBlank() }?.let { return it }
+                // 这里的内容会作为 inputText 交给工具插件（ai-reply / qwen-translate 等
+                // 声明了 allowCustomHosts，等于直发第三方 LLM），敏感内容不得进入。
+                clipboardManager.getCurrentClipboardText(allowSensitive = false)
+                    ?.takeIf { it.isNotBlank() }?.let { return it }
             }
         }
         return ""
@@ -2357,7 +2395,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      */
     @Composable
     private fun KeyboardContent() {
-        val cand = candidateState.value
         val state = uiState.value
         val page by keyboardViewModel.page.collectAsState(com.kingzcheung.xime.keyboard.KeyboardPage.Main(com.kingzcheung.xime.keyboard.MainType.FULL))
         val isHandwritingMode = (page as? com.kingzcheung.xime.keyboard.KeyboardPage.Main)?.type == com.kingzcheung.xime.keyboard.MainType.HANDWRITING
@@ -2480,34 +2517,15 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 val selectedTextCol = com.kingzcheung.xime.ui.theme.KeyboardThemes.getCandidateSelectedTextColor(state.themeId, isDark)
                 val keyboardBgColor = cardBg
                 val rootTheme = com.kingzcheung.xime.ui.theme.KeyboardThemes.getThemeById(state.themeId)
-                if (state.isCompact && (cand.candidates.isNotEmpty() || cand.isShowingRecentClipboard || cand.inputText.isNotEmpty())) {
-                    HardwareKeyboardCandidateBar(
-                        inputText = cand.inputText,
-                        preeditText = cand.preeditText,
-                        // 紧凑/浮空候选栏只渲染文本：图片位替换为「图片」标签，
-                        // 长度与顺序不变（点选索引仍与 recentClipboardItemsState 对齐）
-                        candidates = cand.candidates.mapIndexed { i, text ->
-                            if (cand.isShowingRecentClipboard &&
-                                recentClipboardItemsState.value.getOrNull(i)?.isImage == true
-                            ) {
-                                "图片"
-                            } else {
-                                text
-                            }
-                        },
-                        hasNextPage = cand.hasNextPage,
-                        hasPrevPage = cand.hasPrevPage,
-                        cursorX = state.cursorX,
-                        cursorY = state.cursorY,
-                        cursorVisible = state.cursorVisible,
-                        highlightIndex = highlightIndex.intValue,
+                if (state.isCompact) {
+                    CompactCandidatePane(
+                        state = state,
                         cardBackgroundColor = cardBg,
                         candidateTextColor = candidateTextCol,
                         activeColor = accentCol,
                         selectedTextColor = selectedTextCol,
+                        highlightIndex = highlightIndex.intValue,
                     )
-                } else if (state.isCompact) {
-                    Box(modifier = Modifier.fillMaxSize())
                 } else {
                 // 非浮动：背景与键盘内容同区域，贴底覆盖键盘内容高度 + 底部导航栏留白，
                 // 键盘内容通过 offset 上移 activeBottomDp 留出导航栏空间（对齐参考实现 bottomPaddingSpace）。
@@ -2866,6 +2884,43 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
          }
     }
 
+    @Composable
+    private fun CompactCandidatePane(
+        state: InputUIState,
+        cardBackgroundColor: Color,
+        candidateTextColor: Color,
+        activeColor: Color,
+        selectedTextColor: Color,
+        highlightIndex: Int,
+    ) {
+        val candidates = candidateState.value
+        if (candidates.candidates.isEmpty() && !candidates.isShowingRecentClipboard && candidates.inputText.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize())
+            return
+        }
+        HardwareKeyboardCandidateBar(
+            inputText = candidates.inputText,
+            preeditText = candidates.preeditText,
+            // 紧凑/浮空候选栏只渲染文本：图片位替换为「图片」标签，
+            // 长度与顺序不变（点选索引仍与 recentClipboardItemsState 对齐）
+            candidates = candidates.candidates.mapIndexed { index, text ->
+                if (candidates.isShowingRecentClipboard &&
+                    recentClipboardItemsState.value.getOrNull(index)?.isImage == true
+                ) "图片" else text
+            },
+            hasNextPage = candidates.hasNextPage,
+            hasPrevPage = candidates.hasPrevPage,
+            cursorX = state.cursorX,
+            cursorY = state.cursorY,
+            cursorVisible = state.cursorVisible,
+            highlightIndex = highlightIndex,
+            cardBackgroundColor = cardBackgroundColor,
+            candidateTextColor = candidateTextColor,
+            activeColor = activeColor,
+            selectedTextColor = selectedTextColor,
+        )
+    }
+
     override fun onConfigureWindow(win: Window, isFullscreen: Boolean, isCandidatesOnly: Boolean) {
         win.setLayout(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
     }
@@ -3167,16 +3222,44 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private val SAME_EDITOR_RESTART_WINDOW_MS = 3000L
 
     /**
-     * 从磁盘加载四张词库表（候选排序 / 词频 / 造词、固定、黑名单）并在主线程原子发布。
-     *
-     * 返回是否成功。onCreate 加载失败时按指数退避重试 3 次（见调用点）；
-     * 全部失败则保持空表降级，下次服务重建时重新加载。
-     *
-     * 必须保持「读 + 收敛 + 写回 + prune」的顺序完整执行——这些操作共享内存态与
-     * 磁盘基线，拆开并发会互相覆盖。
+     * 词库持久化统一串行域：load / save / reconcile 共享，避免基线推进与发布穿插。
+     * 见 [WordTableIoScheduler] 的说明。
      */
+    private val wordTableIo by lazy { WordTableIoScheduler() }
+
+    /**
+     * 重载守卫的快照内容：只有**造词库数据版本号**。
+     *
+     * 为什么不快照五张表的内存内容：重载失败时不会发布任何东西（读盘 → 判等 → 发布
+     * 全在 [loadWordTablesOnce] 内完成），因此只需要判断「读取期间生词库是否被别处改动过」。
+     * 早期版本连表内容一起快照，但那些字段除 `version` 外从未被读过——白白复制
+     * 整份词频表/造词表（数十万条），每次开会话都做一次。
+     */
+    private val wordTableReloadGuard by lazy {
+        WordTableReloadGuard(wordTablesLock) { AutoWordStore.dataVersion() }
+    }
+
+    /** 磁盘读取期间内存或数据版本变化时拒绝发布，保留当前表供下次会话重试。 */
     private suspend fun loadWordTablesOnce(): Boolean = withContext(Dispatchers.IO) {
+        // H04 修复：读盘之前先把内存里**尚未保存**的增量落盘。
+        //
+        // 否则典型丢数据路径是：磁盘词频 1，内存已上屏到 2 但防抖未到期；重载开始时
+        // 拍的快照就是 2，读盘得到 1，而整个读取期间内存没再变化——
+        // [WordTableReloadGuard] 判等通过，于是用磁盘的 1 覆盖内存的 2。
+        // 先 flush 让磁盘追平内存，读回来的就是最新值，守卫的判等语义也随之成立。
+        //
+        // 放在 [wordTableIo] 域内：与 save/reconcile 互斥，不会出现"flush 到一半被
+        // reconcile 推进基线"的穿插。(ReentrantLock，同线程可重入。)
+        //
+        // ⚠️ flush 之后**必须重读版本号**：saveTemp/saveFixed 内部无条件 bumpDataVersion()，
+        // 若仍用 flush 之前拍的 version 做 loadedAutoWordVersion，下一次 maybeReloadWordTables
+        // 会认为「版本又变了」→ 再 flush → 版本再变 → **无限重载**。
+        // 因此 base 在 flush 之后才拍（见下），它拿到的已是 bump 后的版本。
+        if (wordTablesLoaded) {
+            wordTableIo.io { wordTableSaver.save() }
+        }
         val loadStartNs = System.nanoTime()
+        val base = wordTableReloadGuard.snapshot()
         try {
             // ── 第一段：并行读取四个词库（互不依赖，串行读等于白白排队）────────
             // 每个 Store.load 内部要 stat 私有+可见两份文件再读较新者，串行 4 次
@@ -3211,24 +3294,35 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             )
 
             // ── 第三段：发布到内存（用户从这一刻起就能正常打字/排序/造词）────────
-            withContext(Dispatchers.Main) {
-                candidateOrderTable = orderTable
-                wordFreqTable = freqTable
-                autoWordTemp = prunedTemp
-                autoWordFixed = cleanFixed
-                wordBlacklist = blacklistTable
-                // 置位放在所有表赋值**之后**：并发读者看到 loaded=true 时必须已经
-                // 能看到全部新表，否则「loaded=true + 旧/空表」的窗口里上屏记录
-                // 会被随后的整体替换静默覆盖（链路检查 2026-11-14）
-                wordTablesLoaded = true
-                FileLogger.i(
-                    TAG,
-                    "Word tables ready in ${(System.nanoTime() - loadStartNs) / 1_000_000}ms: " +
-                        "temp=${autoWordTemp.size} entries, " +
-                        "fixed=${autoWordFixed.size} entries, " +
-                        "tempTotal=${autoWordTemp.values.sumOf { it.size }}, " +
-                        "fixedTotal=${autoWordFixed.values.sumOf { it.size }}",
-                )
+            //
+            // 发布必须放进 [wordTableIo] 统一 IO 域：saveCandidateOrder / saveWordData /
+            // reconcile 都在那个域里改内存表。若发布在域外执行，一次并发的
+            // saveCandidateOrder 写回就能把刚发布的表（恢复/手改结果）覆盖回旧值并落盘——
+            // 与「删除被复活」是同一类缺陷。域内发布保证三者严格串行。
+            // ReentrantLock 同线程可重入，所以内部再取 wordTableIo 不会自锁。
+            val published = withContext(Dispatchers.Main) {
+                wordTableReloadGuard.publish(base) {
+                    candidateOrderTable = orderTable
+                    wordFreqTable = freqTable
+                    autoWordTemp = prunedTemp
+                    autoWordFixed = cleanFixed
+                    wordBlacklist = blacklistTable
+                    wordTablesLoaded = true
+                    loadedAutoWordVersion = base
+                    wordTablesGeneration++
+                    FileLogger.i(
+                        TAG,
+                        "Word tables ready in ${(System.nanoTime() - loadStartNs) / 1_000_000}ms: " +
+                            "temp=${autoWordTemp.size} entries, " +
+                            "fixed=${autoWordFixed.size} entries, " +
+                            "tempTotal=${autoWordTemp.values.sumOf { it.size }}, " +
+                            "fixedTotal=${autoWordFixed.values.sumOf { it.size }}",
+                    )
+                }
+            }
+            if (!published) {
+                FileLogger.i(TAG, "词库加载期间内存已更新，跳过旧快照（下次会话再试）")
+                return@withContext false
             }
 
             // ── 第四段：慢的落盘操作挪到发布之后（不阻塞词库可用）────────────────
@@ -3237,20 +3331,23 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             // 内存表，收敛/清理结果落盘晚几百毫秒完全无感。
             if (cleanFixed !== rawFixed) {
                 runCatching {
-                    // 与 saveWordData 互斥：两者都写 auto_word.dict.yaml 并推进
-                    // fixedBaselineText，并发交错会导致基线错位（链路检查 2026-11-14）
-                    wordTablesLock.lock()
-                    try {
-                        AutoWordStore.saveFixed(this@XimeInputMethodService, cleanFixed)
-                    } finally {
-                        wordTablesLock.unlock()
-                    }
+                    // 发布后可能已有新上屏，保存当前快照而非较早的 cleanFixed。
+                    saveWordData()
                     FileLogger.i(TAG, "AutoWordStore: 固定词库一词多音收敛，" +
                         "${rawFixed.values.sumOf { it.size }} 条 → ${cleanFixed.values.sumOf { it.size }} 条")
                 }.onFailure { FileLogger.w(TAG, "固定词库收敛落盘失败（不影响本次使用）", it) }
             }
             if (prunedTemp !== tempTable) {
                 scheduleWordFreqSave()
+            }
+            // ⚠️ 收尾落盘会 bumpDataVersion（见 AutoWordStore.saveTemp/saveFixed）。
+            // 若 loadedAutoWordVersion 仍停在 flush 前的 base.version，下一次
+            // maybeReloadWordTables 会判定「版本又变了」→ 再次 load → 再次 flush →
+            // **无限重载**（表现为每个会话都重读全部词库，卡顿且日志刷屏）。
+            // 因此整个重载流程结束后，把版本号对齐到**当前**磁盘已同步的状态。
+            // 放在 Main 上与其他表赋值同线程，且必须在本函数所有落盘动作之后。
+            withContext(Dispatchers.Main) {
+                loadedAutoWordVersion = AutoWordStore.dataVersion()
             }
             true
         } catch (t: Throwable) {
@@ -3270,7 +3367,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         serviceScope.launch {
             val ok = runCatching { loadWordTablesOnce() }.getOrElse { false }
             if (ok) {
-                loadedAutoWordVersion = AutoWordStore.dataVersion()
                 FileLogger.i(TAG, "生词/排序表已重载（version=$loadedAutoWordVersion）")
             } else {
                 FileLogger.w(TAG, "生词/排序表重载失败，沿用旧表（下次会话再试）")
@@ -3278,11 +3374,33 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         }
     }
 
+    private val editorKeyGeneration = EditorKeyGeneration(serviceScope.coroutineContext[Job])
+
+    internal fun editorBoundKeyJob(): Job = editorKeyGeneration.job()
+
+    internal fun captureEditorKeyGeneration(): Long = editorKeyGeneration.capture()
+
+    internal fun isEditorKeyGenerationCurrent(generation: Long): Boolean =
+        editorKeyGeneration.isCurrent(generation)
+
+    internal fun invalidateEditorKeyGeneration() {
+        deleteGeneration++
+        editorKeyGeneration.invalidate()
+        synchronized(deleteCoalesceLock) {
+            pendingDeleteCount = 0
+            deleteJobActive = false
+        }
+        voiceRecognitionHandler.clearUndoBookkeeping()
+    }
+
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        invalidateEditorKeyGeneration()
+        cancelAiCompletion()
         // 会话开始是唯一安全的「补载」时机：造词表若被别处改过，这里换上新表
         runCatching { maybeReloadWordTables() }
-        // 换了输入框：帮写的"原文基准"失效，避免拿上一个框的原文改写
-        runCatching { ensureAiVoiceController()?.resetHelpWriteBase() }
+        // 换了输入框：帮写的"原文基准"失效，且仍在路上的 AI 请求必须作废——
+        // 只清基准不够，请求回来时仍会整框替换（把新框内容整段覆盖）。
+        runCatching { ensureAiVoiceController()?.cancelPendingHelpWrite() }
         // 把当前宿主包名/输入类型同步给 AI 面板状态。
         // 之前 targetPackage 从未被赋值（一直是空串），导致军师读屏时
         // "目标包名"为空，窗口匹配退化成任意非本应用窗口，读到的是后台
@@ -3911,6 +4029,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
 
     override fun onFinishInput() {
+        invalidateEditorKeyGeneration()
+        cancelAiCompletion()
+        // 会话结束必须停掉语音录音。
+        //
+        // 用户正在录音时切到别的应用 / 换输入框，键盘收起但录音线程还在跑：
+        // 麦克风一直被占用，状态栏的麦克风图标不消失，用户会以为输入法在偷听。
+        // closeVoiceSubPanel() 只在「用户主动关面板」时触发，覆盖不到这个场景。
+        //
+        // cancelRecordingOrProcessing 内部对「当前没在录音」是安全的（直接返回），
+        // 所以不需要先查 phase。
+        runCatching { aiVoiceController?.releaseForSessionEnd() }
         // 离开输入框：清掉 AI 面板里的宿主包名，避免下个应用沿用旧目标
         runCatching {
             runCatching { aiBridge?.stateFlow }?.getOrNull()?.let { flow ->
@@ -3931,6 +4060,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     }
     
     override fun onFinishInputView(finishingInput: Boolean) {
+        cancelAiCompletion()
         super.onFinishInputView(finishingInput)
         // 手写模型轻量，按"用键盘时加载、键盘收起即卸载"管理：输入会话结束
         // （收起键盘/焦点离开）即释放，:inference 侧同步卸载模型；未初始化时
@@ -3948,6 +4078,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var windowHiddenCleanup: Runnable? = null
 
     /**
+     * 键盘显示后延迟重算剪贴板候选。
+     *
+     * 持字段而非匿名 lambda：匿名 lambda 无法 removeCallbacks，服务销毁后这 150ms
+     * 的任务仍会执行并访问已销毁的 Service / rimeEngine（切换输入法时高发）。
+     */
+    private val windowShownClipboardRefresh = Runnable {
+        refreshClipboardCandidates(ignoreSuppression = true)
+    }
+
+    /**
      * 短促隐藏的判定窗口：超过这个时长才认为是用户真的收起了键盘。
      *
      * 实测（QQ 撤回消息）：`onStartInputView` → `onWindowHidden` → 约 1.7s → 再
@@ -3957,6 +4097,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private val WINDOW_HIDDEN_CLEANUP_DELAY_MS = 3000L
 
     override fun onWindowHidden() {
+        cancelAiCompletion()
         super.onWindowHidden()
         FileLogger.i(TAG, "onWindowHidden: cleanup scheduled in ${WINDOW_HIDDEN_CLEANUP_DELAY_MS}ms")
         // 切换应用时往往不触发 onFinishInput（只走 onWindowHidden），引擎的 ascii_mode
@@ -4032,7 +4173,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 只靠 Flow 发射会漏掉这些情况：onStartInput 因 quickRestart 提前返回、
                 // 补采判 SKIP 不入库、复制时正在组字导致那次展示被跳过。
                 // 稍作延迟让补采的异步入库先完成，避免读到旧列表。
-                mainHandler.postDelayed({ refreshClipboardCandidates(ignoreSuppression = true) }, 150)
+                mainHandler.removeCallbacks(windowShownClipboardRefresh)
+                mainHandler.postDelayed(windowShownClipboardRefresh, 150)
             }
         }
     }
@@ -4052,7 +4194,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 输入法隐藏/结束输入：静默停止语音会话，丢弃未识别文本，避免迟到结果写入新输入框
         if (uiState.value.isVoiceMode || voiceRecordingStarted) {
             voiceRecognitionHandler.abandonSession()
-            voiceRecognitionHandler.stopRecognition()
             voiceRecognitionHandler.cancelPreStart()
             isTrackingVoiceButtons = false
             voiceRecordingStarted = false
@@ -4202,6 +4343,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var englishReplaceProbeResult: Boolean = false
 
     override fun onDestroy() {
+        cancelAiCompletion()
+        // 服务销毁时同样要停录音：切换输入法会让系统销毁本服务，
+        // 录音线程若不释放会变成孤儿线程，麦克风一直被占用。
+        runCatching { aiVoiceController?.releaseForSessionEnd() }
         super.onDestroy()
         sharedPrefsListener?.let {
             SettingsPreferences.getPrefsPublic(this).unregisterOnSharedPreferenceChangeListener(it)
@@ -4228,18 +4373,47 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 的 Service 并在其上操作 rimeEngine/uiState。
         windowHiddenCleanup?.let { mainHandler.removeCallbacks(it) }
         windowHiddenCleanup = null
+        // 键盘显示后的 150ms 剪贴板重算同理：不撤会访问已销毁的 Service/rimeEngine。
+        mainHandler.removeCallbacks(windowShownClipboardRefresh)
+        editorKeyGeneration.dispose()
+        // AI 控制器挂在应用级 scope 上，服务销毁不会自动取消：显式清掉任务与流式会话
+        runCatching { aiVoiceController?.dispose() }
+        aiVoiceController = null
         serviceScope.cancel()
         keyProcessingDispatcher.close()
         // 词频/词库防抖未到期的直接落盘，避免服务销毁丢掉最近几次上屏统计。
         // 只撤自己的那一条：mainHandler 还挂着别的 UI/防抖任务，全清会连带取消它们
         mainHandler.removeCallbacks(wordFreqSaveRunnable)
         wordFreqSavePending = false
-        saveWordData()
+        // 不能在这里同步调 saveWordData()：它会拿 wordTableIo 锁做整份词表落盘
+        // （词频 + 造词 + 固定词 + 用户手改合并，冷盘上可达数十~数百毫秒），
+        // onDestroy 跑在主线程，会直接表现为退出时卡顿甚至 ANR。
+        //
+        // 但也不能用 serviceScope：上面刚 cancel 过，launch 出去立刻被取消。
+        // 用独立的 NonCancellable + IO 跑最后一次落盘；进程若在写盘中途被杀，
+        // 原子写（AtomicFileWriter）保证文件要么是旧内容要么是新内容，不会半截。
+        //
+        // 只读快照 + 写盘，不再依赖已关闭的 serviceScope / rimeEngine；
+        // 落盘用的是 applicationContext 级别的 Store，Service 销毁后仍可安全执行。
+        kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        ).launch(kotlinx.coroutines.NonCancellable) {
+            runCatching { saveWordData() }
+                .onFailure {
+                    FileLogger.w(TAG, "onDestroy 落盘失败（进程可能随即退出，属可接受丢失）", it)
+                }
+            // 排序表/黑名单不在 saveWordData 覆盖范围内，退出时单独补一次
+            runCatching { saveRemainingWordTables() }
+                .onFailure {
+                    FileLogger.w(TAG, "onDestroy 补存排序/黑名单失败", it)
+                }
+        }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
     
     internal fun hideKeyboard() {
+        cancelAiCompletion()
         // 收键盘 = 这一轮输入结束，把待写词频落盘（长防抖期间用户以为已经结束了）
         runCatching { flushPendingWordData("hideKeyboard") }
         clearInputState()
@@ -4256,21 +4430,91 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (ordered.isEmpty()) return
         // 词库未装载完时内存表是空表占位，落盘会覆盖掉磁盘上的真实排序表
         if (!wordTablesLoaded) return
-        // 先吃进用户在配置目录里的手改，再叠加本次拖动结果。
-        // 全程持锁：与 IO 线程的 saveWordData 互斥，避免旧快照回写覆盖（见 wordTablesLock）。
+        // 内存更新保持同步（调用方紧接着 updateUI 要看到新顺序），
+        // 但**落盘必须挪出主线程**：CandidateOrderStore.save 要做 reconcile（读盘比对手改）
+        // + 序列化 + 两次原子写，拖动一次候选就卡一帧是用户能直接感知的。
+        //
+        // 锁的边界也跟着变：内存段的短临界区用 wordTablesLock；落盘整段放进
+        // wordTableIo 统一 IO 域（与 saveWordData/reconcile 互斥，避免旧快照回写覆盖）。
         wordTablesLock.lock()
         try {
-            candidateOrderTable = CandidateOrderStore.reconcile(this, candidateOrderTable)
             candidateOrderTable = CandidateOrderStore.withFullOrder(candidateOrderTable, code, ordered)
-            CandidateOrderStore.save(this, candidateOrderTable)
         } finally {
             wordTablesLock.unlock()
+        }
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                wordTableIo.io {
+                    // 内存表的读与写都必须在 wordTablesLock 内：上屏热路径会并发读它。
+                    // reconcile 要读盘（慢），所以锁只包住两次内存访问，不包 IO。
+                    wordTablesLock.lock()
+                    val base = try { candidateOrderTable } finally { wordTablesLock.unlock() }
+                    val baseGeneration = wordTablesGeneration
+                    val merged = CandidateOrderStore.reconcile(this@XimeInputMethodService, base)
+                    // 条件写：reconcile 读盘期间（可能几十毫秒）可能发生两种并发改动：
+                    //   1. 用户又拖了一次候选（主线程已写入新顺序）
+                    //   2. 词库重载刚发布了新表（恢复/手改结果）
+                    // 无条件写回会用过期 base 算出的 merged 覆盖它们 → 「拖了又弹回」
+                    // 或「刚恢复的词表被旧值盖掉并落盘」（与删除被复活同类）。
+                    // 双重校验：代次变了说明发生过 2；引用变了说明发生过 1。
+                    wordTablesLock.lock()
+                    val stale = try {
+                        if (wordTablesGeneration != baseGeneration || candidateOrderTable !== base) {
+                            true
+                        } else {
+                            candidateOrderTable = merged
+                            false
+                        }
+                    } finally {
+                        wordTablesLock.unlock()
+                    }
+                    if (stale) {
+                        // 期间内存表被并发改动（又拖了一次 / 重载发布了新表）。
+                        // 本次的拖动数据已经在主线程写进内存表了（withFullOrder 是同步的），
+                        // 所以不落盘不会丢数据——但也不能什么都不做：
+                        // 立刻补一次，用**最新**的内存表重算并落盘，否则要等下次拖动或退出。
+                        FileLogger.d(TAG, "候选排序 reconcile 期间内存表已变，改用最新表重算")
+                        // 注意：第一次 reconcile 已把 CandidateOrderStore 的 baselineText
+                        // 推进到磁盘当前内容。第二次 reconcile 会判定「无外部改动」直接返回，
+                        // 不会重复合并——这正是我们要的（避免同一份手改被合并两次）。
+                        // 代价：重试窗口（几十毫秒）内若用户恰好手改了文件，这次不会合并，
+                        // 但下次拖动/退出兜底会补上。窗口极窄，可接受。
+                        wordTablesLock.lock()
+                        val latest = try { candidateOrderTable } finally { wordTablesLock.unlock() }
+                        val retryGeneration = wordTablesGeneration
+                        val retried = CandidateOrderStore.reconcile(this@XimeInputMethodService, latest)
+                        wordTablesLock.lock()
+                        val retryStale = try {
+                            if (wordTablesGeneration != retryGeneration || candidateOrderTable !== latest) {
+                                true
+                            } else {
+                                candidateOrderTable = retried
+                                false
+                            }
+                        } finally {
+                            wordTablesLock.unlock()
+                        }
+                        if (!retryStale) {
+                            CandidateOrderStore.save(this@XimeInputMethodService, retried)
+                        } else {
+                            // 连续两次都被并发改动：放弃落盘。内存表是最新的，
+                            // 下次拖动或退出兜底（saveRemainingWordTables）会写出去。
+                            FileLogger.d(TAG, "候选排序连续被并发改动，留待下次落盘")
+                        }
+                        return@io
+                    }
+                    CandidateOrderStore.save(this@XimeInputMethodService, merged)
+                }
+            }.onFailure { FileLogger.w(TAG, "候选排序落盘失败（内存顺序已生效）", it) }
         }
         updateUI()
     }
 
     internal fun updateUI() {
-        val composition = rimeEngine.getComposition()
+        // 拿不到引擎锁（部署/长编译持锁中）时直接返回：旧实现拿到的是 tryLock 的
+        // 「空组合」默认值，却当成真实状态写回 UI —— 打字中候选栏忽然清空、
+        // 输入框 composing 被清，用户感知是「字没了」。
+        val composition = rimeEngine.getCompositionOrNull() ?: return
         // 候选词变换（hotPath 插件能力）：仅 key-processing 线程同步等插件（至多 15ms），
         // 主线程调用点（联想上屏/光标移动/剪贴板点选后的刷新）一律跳过——主线程永不等待插件；
         // 这些调用点组合态已清空（input 为空），正常不触发，Looper 判定仅为防御
@@ -4651,11 +4895,17 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     /**
      * 记录本次从候选栏选中的词，见 [lastSelectedCandidateWord]。
      *
-     * @param codeHint 本次上屏**实际消费的编码**，由按键路径提供（上一键的编码 + 本键字符）。
+     * @param codeHint 本次上屏**实际消费的编码**，由按键路径经
+     *   [com.kingzcheung.xime.service.resolveConsumedCode] 算好后传入。
      *   引擎自动上屏（小鹤「满码唯一自动上屏」`auto_select: ^\w{4}$`）时这个参数是必须的：
      *   第 4 个键触发上屏的瞬间，`candidateState` 还停在**上一个**键刷新出来的 3 码状态，
      *   直接读 UI 状态会把「好看」的 `hckj` 记成 `hck` —— 词频挂在了错的编码上，
      *   以后按 `hckj` 打反而拿不到自己累积的权重。
+     *
+     *   ⚠️ 顶字上屏（编码已满又按下一键）消费的是**上一键已成型**的那段编码，**不含本键**。
+     *   调用方若改回「上一键编码 + 本键」的朴素拼接，该编码的词频会记成不存在的 5 码，
+     *   候选顺序永远不更新（用户反馈「排序后没有更新状态」）。
+     *   不要绕过 [com.kingzcheung.xime.service.resolveConsumedCode] 自行拼这个参数。
      */
     internal fun markCandidateSelection(word: String, codeHint: String? = null) {
         if (word.isEmpty()) return
@@ -4755,6 +5005,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         val charCodes: Map<String, List<String>>,
         /** 当前方案主词典及其 import_tables 的词条；不含其它启用方案和派生词库。 */
         val rootWords: Set<String> = emptySet(),
+        /** 解析出的造词单字码表名；切换方案时可能变化，必须参与缓存命中判定。 */
+        val charDictName: String = "",
         /** 当前方案 translator.dictionary；切换方案时必须重建 rootWords。 */
         val rootSchema: String = "",
         /**
@@ -4831,9 +5083,16 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 快照命中：所有词典文件都没动过，且活动主方案未变时，直接复用上次结果。
         // rootWords 只属于活动方案；不能拿“所有启用方案的并集”做组合过滤，
         // 否则拼音/五笔词典有的词会误挡小鹤方案学词（例如「制式」在拼音词库里）。
+        val cfg = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+        // 先算出本次应使用的造词单字表名，缓存命中判定必须带上它：
+        // 用户切换方案时主词典可能相同，但按方案配置的单字表不同（char_dict_by_schema），
+        // 只看 rootSchema 会命中旧方案的字码，造词继续串方案。
+        val expectedCharDict = AutoWordCharDict
+            .resolveDictName(activeSchemaId, cfg, activeRootDict).orEmpty()
         val cached = dictSnapshot
         if (cached != null && cached.isNotEmpty() &&
             schemeDictCache?.rootSchema == activeRootDict &&
+            schemeDictCache?.charDictName == expectedCharDict &&
             cached.all { (path, mtime, size) ->
                 val f = java.io.File(path)
                 f.isFile && f.lastModified() == mtime && f.length() == size
@@ -4843,7 +5102,6 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             return
         }
 
-        val cfg = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
         val cfgNoFreqDicts = cfg.noFreqDicts.toHashSet()
         val cfgNoAutoWordDicts = cfg.noAutoWordDicts.toHashSet()
         // 各词典排除标记：xime.yaml 配置优先，词典表头标记其次。
@@ -4929,13 +5187,39 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             )
         }
 
-        val charCodes = SchemeCodeIndex.buildCharCodes(loadCharDictEntries(cfg.charDict, snapshot))
+        // 造词基底跟随**当前方案**：全局 char_dict 可能属于别的方案，
+        // 用它造出的码在当前方案里打不出来（用户反馈「自动造词识别到了次方案，
+        // 导致有些词组不了」）。解析优先级见 [AutoWordCharDict]。
+        val charDictName = AutoWordCharDict.resolveDictName(activeSchemaId, cfg, activeRootDict)
+        val charCodes = if (charDictName != null) {
+            SchemeCodeIndex.buildCharCodes(loadCharDictEntries(charDictName, snapshot))
+        } else {
+            emptyMap()
+        }
         val result = SchemeDictCache(
-            words, noFreq, noAutoWord, charCodes, rootWords, activeRootDict, rootWordCodes,
+            words = words,
+            noFreq = noFreq,
+            noAutoWord = noAutoWord,
+            charCodes = charCodes,
+            rootWords = rootWords,
+            charDictName = charDictName.orEmpty(),
+            rootSchema = activeRootDict,
+            rootWordCodes = rootWordCodes,
         )
         // 活动方案文件本身纳入快照：用户给方案新增 import_tables 时，被引用的词典
         // 文件都没变，只看词典会让缓存永远命中，新词典的词进不来。
         java.io.File(rimeDir, "$activeSchemaId.schema.yaml")
+            .takeIf { it.isFile }
+            ?.let { snapshot += Triple(it.absolutePath, it.lastModified(), it.length()) }
+        // 造词配置（xime.yaml）也纳入快照：用户改 `auto_word.char_dict_by_schema` /
+        // `char_dict` / `no_auto_word_dicts` 等配置时，词典文件一个都没变，
+        // 只比词典会让缓存永远命中 → 改了单字表也不生效，必须重启输入法。
+        // 可见配置与私有配置都纳入（用户可能在任一侧改）。
+        com.kingzcheung.xime.settings.UserConfigDir.absoluteDir
+            .let { java.io.File(it, "xime.yaml") }
+            .takeIf { it.isFile }
+            ?.let { snapshot += Triple(it.absolutePath, it.lastModified(), it.length()) }
+        java.io.File(rimeDir, "xime.yaml")
             .takeIf { it.isFile }
             ?.let { snapshot += Triple(it.absolutePath, it.lastModified(), it.length()) }
         dictSnapshot = snapshot.toList()
@@ -5118,8 +5402,14 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (calculatorEngine.isActive()) return
         // 声明了 nofreq 的词典词条（表头 `# nofreq: true` / `#@/nofreq`，如个人词库
         // XGuai_user.dict.yaml）：不参与上屏词频统计（word_freq.txt/yaml 不收录），
-        // 但仍走自动造词链（能正常学习/组合）。只在词频层面跳过。
-        if (text in noFreqWords) return
+        // 但仍走自动造词链（能正常学习/组合）。
+        //
+        // ⚠️ 这里**不能** return（用户反馈「雨衣造不出来」的根因）：
+        // 旧实现直接 return，把 recordComboWord 与 advanceComboHistory 一起跳过了。
+        // 「雨」正好在用户的 XGuai_user 里 → 打「雨」时组合窗口没被推进 → 再打「衣」
+        // 时窗口里没有「雨」→ 永远拼不出「雨衣」。
+        // 现在只跳过**词频写入**这一处，组合/造词/晋升照常。
+        val skipWordFreq = text in noFreqWords
         // 繁体上屏（简繁切换后）不进词库：主方案是简体音形，繁体词的编码映射
         // 无意义，记进词库只会产出打不出来的组合（实测收录过「怎麼樣」「覺得」）。
         // 组合链一并清空，避免繁体词混入后续拼接。
@@ -5150,6 +5440,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 关键：记录「这个词的真实编码」而不是「用户按了几个键」。
         // 打 hck 就选中好看时，按键码是 hck，但好看的词典码是 hckj —— 记 hck 会让
         // 词频挂到错编码上（用户 2026-11-19 反馈的同一类问题）。
+        //
+        // ⚠️ 上屏编码的唯一来源是 [com.kingzcheung.xime.service.resolveConsumedCode]
+        // （按键路径 → markCandidateSelection → 这里）。不要在这里另写一套「按几个键算几码」：
+        // 满码顶字时那一键属于**下一段**编码，算进去会让词频记到 5 码上、排序永不更新。
         val code = resolveCommitCode(text, typedCode)
         // 反查模式（` 引导符）上屏的字**不进词频、不造词**：
         // 反查是「按字找码」，上屏的字与 ` 后面的码没有任何输入法编码关系，
@@ -5199,9 +5493,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // 上屏后 candidateState 清空也能兜底）。不替换成词自身方案码——用户在什么编码下
         // 选中的词，词频就记在什么编码下，下次按同样编码打，候选排序能吃到这次统计。
         val freqCode = code.ifEmpty { effectiveCode }
-        val next = WordFreqStore.withCommit(wordFreqTable, freqCode, text)
-        if (next !== wordFreqTable) {
-            wordFreqTable = next
+        // nofreq 词典的词条只跳过这一步（词频表），下面的造词/组合链全部照常。
+        if (!skipWordFreq) {
+            val next = WordFreqStore.withCommit(wordFreqTable, freqCode, text)
+            if (next !== wordFreqTable) {
+                wordFreqTable = next
+            }
         }
         // 自动造词：临时词库记录，随后晋升/淘汰。
         // 词已在启用方案的词库里（方案词典 .dict.yaml 或用户词典 .userdb）时不收录。
@@ -5507,26 +5804,45 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         if (!wordTablesLoaded) return
         // 先吃进用户在配置目录里的手改（黑名单文件也可能刚被改过），再加本次删除的词。
         // 全程持锁：与 IO 线程的 saveWordData 互斥，避免旧快照回写覆盖（见 wordTablesLock）。
-        var toSave: Map<String, Map<String, Int>>? = null
+        var changed = false
         wordTablesLock.lock()
         try {
             wordBlacklist = WordBlacklistStore.reconcile(this, wordBlacklist)
             val next = WordBlacklistStore.withBlocked(wordBlacklist, word, code)
             if (next === wordBlacklist) return
             wordBlacklist = next
-            toSave = next
+            changed = true
         } finally {
             wordTablesLock.unlock()
         }
         // 落盘放到 IO：长按候选在主线程触发，持锁写外部存储会连带阻塞上屏计数
         // 与 saveWordData（典型 ANR 面）。内存表已在锁内更新，写盘失败不影响本次生效。
-        toSave?.let { snapshot ->
+        //
+        // 不在协程里捕获此刻的快照：连续删除会各自 launch，两个 IO 协程取得写盘权的
+        // 顺序不保证与创建顺序一致，旧快照后写会把刚删掉的词从磁盘上"复活"。
+        // 统一交给 ser 化写盘器，在写盘域内读取最新内存表。
+        if (changed) {
             serviceScope.launch(Dispatchers.IO) {
-                runCatching { WordBlacklistStore.save(this@XimeInputMethodService, snapshot) }
+                runCatching { saveWordBlacklist() }
                     .onFailure { FileLogger.e(TAG, "WordBlacklist save failed", it) }
             }
         }
         FileLogger.i(TAG, "WordBlacklist: added '$word' code='$code'")
+    }
+
+    /**
+     * 黑名单串行落盘：在统一 IO 域内**重新读取当前内存表**再写。
+     *
+     * 为什么不能把「当时那份表」随协程带出去：连续删除甲、乙会各自 launch 一个
+     * IO 协程，两个协程取得写盘权的顺序不保证与创建顺序一致——旧快照后写会把
+     * 磁盘回退成旧内容（内存仍屏蔽乙，重启后乙复活）。
+     */
+    private fun saveWordBlacklist() {
+        wordTableIo.io {
+            wordTablesLock.lock()
+            val latest = try { wordBlacklist } finally { wordTablesLock.unlock() }
+            WordBlacklistStore.save(this, latest)
+        }
     }
 
     /**
@@ -5597,6 +5913,77 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * save 内部会先合并用户在配置目录 `/storage/emulated/0/rime/xime/` 里的手改
      * （见 [UserDataMerge]），返回值必须采纳——不采纳的话下次保存又会冲掉。
      */
+    private data class WordTablesSnapshot(
+        val frequency: Map<String, Map<String, Int>>,
+        val temporary: Map<String, Map<String, AutoWordStore.Entry>>,
+        val fixed: Map<String, Map<String, Int>>,
+    )
+
+    private val wordTableSaver by lazy {
+        WordTableSnapshotSaver(
+            liveLock = wordTablesLock,
+            read = {
+                WordTablesSnapshot(
+                    wordFreqTable.mapValues { it.value.toMap() },
+                    autoWordTemp.mapValues { it.value.toMap() },
+                    autoWordFixed.mapValues { it.value.toMap() },
+                )
+            },
+            persist = { snapshot ->
+                WordTablesSnapshot(
+                    WordFreqStore.save(this, snapshot.frequency),
+                    AutoWordStore.saveTemp(this, snapshot.temporary),
+                    AutoWordStore.saveFixed(this, snapshot.fixed),
+                )
+            },
+            publish = { base, persisted ->
+                val changed = wordFreqTable != base.frequency ||
+                    autoWordTemp != base.temporary || autoWordFixed != base.fixed
+                wordFreqTable = UserDataMerge.mergeTable(base.frequency, wordFreqTable, persisted.frequency)
+                autoWordTemp = UserDataMerge.mergeTable(base.temporary, autoWordTemp, persisted.temporary)
+                autoWordFixed = UserDataMerge.mergeTable(base.fixed, autoWordFixed, persisted.fixed)
+                changed
+            },
+        )
+    }
+
+    /**
+     * 退出兜底：把 [saveWordData] 没覆盖的两张表（候选排序、黑名单）也落盘。
+     *
+     * `saveWordData` 只保存 freq/temp/fixed 三张（走 wordTableSaver），排序表与黑名单
+     * 平时靠各自的即时保存。若用户最后一次拖动排序后立刻杀进程，那次改动就丢了。
+     * 这里在退出时补一次全量落盘，幂等（内容没变时 Store 内部会跳过写盘）。
+     */
+    private fun saveRemainingWordTables() {
+        if (!wordTablesLoaded) return
+        // 无条件执行：内容没变时 Store 内部会跳过写盘，成本很低。
+        // 这也是「连续两次 reconcile 被打断」时唯一的兜底路径。
+        wordTableIo.io {
+            // 排序表：**必须走 reconcile**。用户可能在配置目录手改过
+            // candidate_order.dict.yaml，跳过合并会用手改前的内存表覆盖掉手改内容
+            // （与 saveWordData 里其他表的处理保持一致）。
+            wordTablesLock.lock()
+            val order = try { candidateOrderTable } finally { wordTablesLock.unlock() }
+            runCatching {
+                val merged = CandidateOrderStore.reconcile(this, order)
+                wordTablesLock.lock()
+                try { candidateOrderTable = merged } finally { wordTablesLock.unlock() }
+                CandidateOrderStore.save(this, merged)
+            }.onFailure { FileLogger.w(TAG, "退出保存候选排序失败", it) }
+
+            // 黑名单：在 IO 域内重新读取当前内存表再写（与 saveWordBlacklist 同语义）
+            wordTablesLock.lock()
+            val blacklist = try { wordBlacklist } finally { wordTablesLock.unlock() }
+            // save 返回「实际写入的表」（内部走三方合并，可能带入手改内容），
+            // 必须采纳：不采纳会让内存表与磁盘脱钩，下次 save 又冲掉手改。
+            runCatching {
+                val persisted = WordBlacklistStore.save(this, blacklist)
+                wordTablesLock.lock()
+                try { wordBlacklist = persisted } finally { wordTablesLock.unlock() }
+            }.onFailure { FileLogger.w(TAG, "退出保存黑名单失败", it) }
+        }
+    }
+
     private fun saveWordData() {
         // 词库还没从磁盘装载完（onCreate 中的 IO 任务未完成，见 [wordTablesLoaded]）：
         // 此刻内存里是空表占位，落盘会把空的词频/造词/排序**覆盖掉真实数据**。
@@ -5605,21 +5992,9 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             FileLogger.w(TAG, "saveWordData skipped: 词库尚未装载完成，避免空表覆盖磁盘")
             return
         }
-        // 与主线程的 recordWordFrequency / reconcileUserDataFiles 互斥：
-        // 「读内存表 → 合并手改 → 写盘 → 回写合并结果」必须原子，否则主线程刚记的
-        // 上屏计数会被本方法读到的旧快照回写覆盖（丢失更新，见 wordTablesLock 注释）。
-        wordTablesLock.lock()
-        try {
-            wordFreqTable = WordFreqStore.save(this, wordFreqTable)
-            autoWordTemp = AutoWordStore.saveTemp(this, autoWordTemp)
-            autoWordFixed = AutoWordStore.saveFixed(this, autoWordFixed)
-            // 注：saveFixed 内部（UserDataMerge.saveUserDictYaml）已经把
-            // auto_word.dict.yaml 同时写到镜像 + 私有 rime 目录，此前紧跟的
-            // ensureFixedRimeDict 是同一文件的**二次重写**，纯多余 IO（用户 2026-11-14
-            // 优化）。删掉后 auto_word.dict.yaml 仍是最新的，只是不再白写一遍。
-        } finally {
-            wordTablesLock.unlock()
-        }
+        // 磁盘IO由独立写锁串行；上屏锁只用于快照和三方合并。
+        // 再套一层统一 IO 域：保证 save 与 load/reconcile 不穿插推进基线。
+        wordTableIo.io { wordTableSaver.save() }
         // 自 v3.2.57 起：词频**不再触发任何部署/编译**。
         //
         // 词频对候选顺序的影响已改为 Kotlin 层实时重排（ImeSessionController 里按
@@ -5643,11 +6018,13 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * 合并后内存表即包含文件里的全部有效条目，下次保存自然落盘；基线记为当前文件
      * 内容，之后保存不会把用户的删除写回冲掉。
      *
-     * 必须主线程调用：与 [saveWordData] / [recordWordFrequency] 同线程操作内存表。
+     * 内存表由 [wordTablesLock] 保护，可在 IO 线程调用（M01：重载路径已从 Main 移出，
+     * 避免慢 IO 卡主线程）。调用方无需与 [recordWordFrequency] 同线程。
      */
-    internal fun reconcileUserDataFiles(): Boolean {
+    internal fun reconcileUserDataFiles(): Boolean = wordTableIo.io {
         // 返回「是否检测到外部手改」：各 Store.reconcile 在文件没被改过时原样返回
         // 传入的实例，因此引用比较即可判断，无需再算一遍 hash。
+        // 进入统一 IO 域：与 save/load 互斥，避免基线在 IO 中途被另一方推进。
         var changed = false
         wordTablesLock.lock()
         try {
@@ -5686,7 +6063,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         // save() 写盘时已经同步生成 dict.yaml，reconcile 这里再调一次会让每次
         // 重载都判定 changed=true，触发不必要的强制重编（每次 30s+）。
         // 外部手改检测由上面各 Store.reconcile 的 baselineText 比对完成。
-        return changed
+        changed
     }
 
     /**
@@ -5694,8 +6071,8 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
      * （`word_freq.dict.yaml` 等由 [WordFreqStore.save] 内部生成）。
      *
      * 为什么必须先做这一步：reconcile 只合并内存，磁盘上的 dict 还是旧的；紧接着的
-     * 增量部署按**文件时间戳**决定重编谁，读不到新内容就等于没编。必须主线程调用
-     * （与 [recordWordFrequency] 同线程，锁内串行）。
+     * 增量部署按**文件时间戳**决定重编谁，读不到新内容就等于没编。
+     * 走 [wordTableIo] 统一 IO 域，可在 IO 线程调用。
      */
     internal fun flushWordDataForReload() {
         saveWordData()

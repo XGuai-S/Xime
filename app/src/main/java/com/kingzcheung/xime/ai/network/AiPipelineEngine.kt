@@ -25,6 +25,7 @@ import com.kingzcheung.xime.ai.jev.ChatTopology
 import com.kingzcheung.xime.ai.jev.JevCopilotResult
 import com.kingzcheung.xime.ai.jev.JevDomainProfile
 import com.kingzcheung.xime.ai.jev.JevResponseParser
+import com.kingzcheung.xime.ai.privacy.LocalPiiRedactor
 import com.kingzcheung.xime.ai.privacy.RedactionSession
 import com.kingzcheung.xime.ai.network.asr.AsrSessionLimits
 import com.kingzcheung.xime.ai.network.asr.DashScopeStreamingAsrClient
@@ -225,6 +226,73 @@ class AiPipelineEngine(
      * Full voice pipeline execution: supports both Dual-Stage (Live Streaming WS / HTTP STT + LLM)
      * and Direct Multimodal (Gemini Native / OpenAI Audio Chat).
      */
+    /**
+     * 输入框文本的出境脱敏结果。
+     *
+     * `processVoiceAudio` 会把选中文本 / 光标上下文 / 编辑框全文送云端 LLM。
+     * 这些是用户当前正在编辑的原文，可能含密码、证件号、银行卡、API key——
+     * 与读屏上下文不同，它们从未经过 [LocalPiiRedactor]，是隐私外泄缺口。
+     *
+     * 三个文本**分别**脱敏、分别恢复：各自有独立的占位符编号空间，
+     * 若合并成一个 session 再恢复，编号会串（两个文本的 `[手机号_1]` 指向不同原值）。
+     */
+    private data class VoiceInputRedaction(
+        val selectedText: String,
+        val surrounding: String,
+        val editorDraft: String,
+        val selectedSession: RedactionSession,
+        val surroundingSession: RedactionSession,
+        val draftSession: RedactionSession,
+    ) {
+        /** 结果上屏前还原可逆占位符（手机号/邮箱/地址/取件码）；高危凭据永远保持占位符。 */
+        fun restore(text: String): String = text
+            .let { selectedSession.restoreSafePlaceholders(it) }
+            .let { surroundingSession.restoreSafePlaceholders(it) }
+            .let { draftSession.restoreSafePlaceholders(it) }
+    }
+
+    /**
+     * engine 无 Android Context，但 [LocalPiiRedactor] 的正则兜底（密钥/身份证/银行卡/
+     * 密码上下文/OTP）在无 Context 时仍工作——这些正是高危、不可逆的凭据类别。
+     */
+    /**
+     * 给脱敏会话的占位符加独立命名空间，避免与读屏上下文（CapturedChatContext）的占位符串号。
+     *
+     * 两者都用 `[手机号_1]` 这类编号；若 HELP_ME_WRITE 同时带读屏上下文和输入框编辑稿，
+     * 而两边都含手机号，编号会碰撞，恢复时 A 的原值被 B 的 session 顶掉。
+     * 输入框侧统一改成 `[输入_手机号_1]`，与读屏侧物理隔离。
+     */
+    private fun RedactionSession.withInputNamespace(): RedactionSession {
+        if (placeholderToOriginal.isEmpty()) return this
+        val renamed = LinkedHashMap<String, Pair<com.kingzcheung.xime.ai.privacy.PiiCategory, String>>()
+        var text = redactedText
+        for ((placeholder, value) in placeholderToOriginal) {
+            // [手机号_1] -> [输入_手机号_1]
+            val ns = placeholder.replaceFirst("[", "[输入_")
+            renamed[ns] = value
+            text = text.replace(placeholder, ns)
+        }
+        return copy(redactedText = text, placeholderToOriginal = renamed)
+    }
+
+    private fun redactVoiceInput(
+        selectedText: String,
+        surrounding: String,
+        editorDraft: String,
+    ): VoiceInputRedaction {
+        val s = LocalPiiRedactor.redactText(selectedText, context = null).withInputNamespace()
+        val c = LocalPiiRedactor.redactText(surrounding, context = null).withInputNamespace()
+        val d = LocalPiiRedactor.redactText(editorDraft, context = null).withInputNamespace()
+        return VoiceInputRedaction(
+            selectedText = s.redactedText,
+            surrounding = c.redactedText,
+            editorDraft = d.redactedText,
+            selectedSession = s,
+            surroundingSession = c,
+            draftSession = d,
+        )
+    }
+
     suspend fun processVoiceAudio(
         wavFile: File,
         settings: AppSettings,
@@ -243,13 +311,16 @@ class AiPipelineEngine(
         onStageChanged: (PipelineStage) -> Unit = {}
     ): Result<PipelineExecutionResult> = withContext(Dispatchers.IO) {
         val startMs = System.currentTimeMillis()
-        val effectiveIntent = if (intentMode == VoiceIntentMode.SPEAK_TO_EDIT && selectedText.isBlank()) {
+        // 输入框文本出境前脱敏：选中文本/光标上下文/编辑框全文本来直接进入 prompt 送云端，
+        // 是此前从未覆盖的隐私缺口。高危凭据（密码/证件/卡号/密钥）在此被替换成占位符。
+        val redaction = redactVoiceInput(selectedText, surroundingBeforeCursor, editorDraft)
+        val effectiveIntent = if (intentMode == VoiceIntentMode.SPEAK_TO_EDIT && redaction.selectedText.isBlank()) {
             VoiceIntentMode.DICTATE
         } else {
             intentMode
         }
         val requiresGenerativeLlm = effectiveIntent != VoiceIntentMode.DICTATE
-        val safeContext = if (settings.useSurroundingContext) surroundingBeforeCursor else ""
+        val safeContext = if (settings.useSurroundingContext) redaction.surrounding else ""
 
         try {
             when (settings.pipelineMode) {
@@ -420,7 +491,7 @@ class AiPipelineEngine(
                         }
                         val (sysPrompt, usrPrompt) = when (effectiveIntent) {
                             VoiceIntentMode.SPEAK_TO_EDIT -> PromptBuilder.buildSpeakToEditPrompts(
-                                selectedText = selectedText,
+                                selectedText = redaction.selectedText,
                                 voiceInstruction = rawTranscript,
                                 style = activeStyle,
                                 dictionary = settings.dictionary
@@ -436,7 +507,7 @@ class AiPipelineEngine(
                                 surroundingBeforeCursor = safeContext,
                                 chatContextMessages = chatContextMessages,
                                 hasChatScreenshot = activeImageB64.isNotBlank(),
-                                editorDraft = editorDraft
+                                editorDraft = redaction.editorDraft
                             )
                             VoiceIntentMode.JEV_COPILOT -> PromptBuilder.buildJevCopilotPrompts(
                                 domainProfile = JevDomainProfile.FORMAL_WORKFLOW,
@@ -483,7 +554,8 @@ class AiPipelineEngine(
                     Result.success(
                         PipelineExecutionResult(
                             rawTranscript = rawTranscript,
-                            finalOutput = polished.ifBlank { rawTranscript },
+                            // 还原可逆占位符；高危凭据占位符永不还原（见 VoiceInputRedaction.restore）
+                            finalOutput = redaction.restore(polished.ifBlank { rawTranscript }),
                             latencyMs = totalPostReleaseMs,
                             modeSummary = "$modePrefix + ${llmCfg.model.substringAfterLast('/')}",
                             sttLatencyMs = sttElapsedMs,
@@ -511,7 +583,7 @@ class AiPipelineEngine(
                     }
                     val prompt = PromptBuilder.buildMultimodalDirectPrompt(
                         intentMode = effectiveIntent,
-                        selectedText = selectedText,
+                        selectedText = redaction.selectedText,
                         translateTargetLanguage = translateTargetLanguage,
                         style = activeStyle,
                         targetAppName = targetAppName,
@@ -520,7 +592,7 @@ class AiPipelineEngine(
                         chatContextMessages = chatContextMessages,
                         hasChatScreenshot = activeImageB64.isNotBlank(),
                         attitudeInstruction = attitudeInstruction,
-                        editorDraft = editorDraft
+                        editorDraft = redaction.editorDraft
                     )
                     val output = when (mmCfg.protocol) {
                         MultimodalProtocol.GEMINI_NATIVE -> {
@@ -570,7 +642,8 @@ class AiPipelineEngine(
                     Result.success(
                         PipelineExecutionResult(
                             rawTranscript = rawSummary,
-                            finalOutput = output,
+                            // 同上：还原可逆占位符，高危凭据保持占位符
+                            finalOutput = redaction.restore(output),
                             latencyMs = elapsed,
                             modeSummary = "多模态 (${mmCfg.model})"
                         )

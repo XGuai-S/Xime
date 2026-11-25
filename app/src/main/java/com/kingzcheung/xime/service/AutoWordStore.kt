@@ -775,6 +775,18 @@ internal object AutoWordStore {
         dataVersion += 1
     }
 
+    /**
+     * 外部直接改写了生词文件后，强制让运行中的输入法在下个会话重载内存表。
+     *
+     * 备份恢复是「绕过 save 直接写盘」的路径：它不经过 [saveTemp]/[saveFixed]，
+     * 因此 dataVersion 不变 → 服务侧判定「没变化」不重载 → 用户恢复完立刻打字，
+     * 候选/造词仍是恢复前的旧数据，只能靠之后某次 save 的三方合并慢慢自愈。
+     * 恢复成功后调用本方法把版本推一格即可。
+     */
+    fun invalidateForExternalChange() {
+        bumpDataVersion()
+    }
+
     private fun tempPrivateFile(context: android.content.Context): File =
         File(context.filesDir, TEMP_FILE_NAME)
 
@@ -930,6 +942,8 @@ internal object AutoWordStore {
      *
      * @return true 表示内容有变化、需要重新部署才生效。
      */
+    // 与 saveFixed 写同两个文件，必须同锁（CandidateOrderStore.ensureRimeDict 同口径）
+    @Synchronized
     fun ensureFixedRimeDict(
         context: android.content.Context,
         table: Map<String, Map<String, Int>>,
@@ -955,10 +969,16 @@ internal object AutoWordStore {
         val changed = !dictFile.exists() || dictFile.readText() != text
         if (changed) {
             dictFile.parentFile?.mkdirs()
-            dictFile.writeText(text)
+            // 原子写：LMK 杀进程时 writeText 会留半截词典，自动造词全丢。
+            // 返回的 changed 只表示内容变化，写失败要单独记日志才可排查。
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(dictFile, text)) {
+                com.kingzcheung.xime.util.FileLogger.w("AutoWordStore", "造词库落盘失败: ${dictFile.absolutePath}")
+            }
             runCatching {
                 visible.parentFile?.mkdirs()
-                visible.writeText(text)
+                if (!com.kingzcheung.xime.util.AtomicFileWriter.write(visible, text)) {
+                    com.kingzcheung.xime.util.FileLogger.w("AutoWordStore", "造词库镜像落盘失败: ${visible.absolutePath}")
+                }
             }
         }
         changed

@@ -201,7 +201,9 @@ class XimeBubbleService :
             // 协程常在进入 IO 线程前就被取消 → stop/release/放弃音频焦点全不执行，
             // 麦克风与音频焦点被永久占用（录音指示灯常亮、其它应用录不到音）。
             runCatching {
-                kotlinx.coroutines.runBlocking { audioRecorder.cancelRecording() }
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(3_000L) { audioRecorder.cancelRecording() }
+                }
             }.onFailure {
                 com.kingzcheung.xime.util.FileLogger.w(
                     "XimeBubble",

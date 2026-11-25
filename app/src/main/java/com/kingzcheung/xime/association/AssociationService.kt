@@ -8,7 +8,9 @@ import kotlinx.coroutines.withContext
 object AssociationService {
     private const val TAG = "AssociationService"
     
+    @Volatile
     private var trieEngine: TrieAssociationEngine? = null
+    @Volatile
     private var isInitialized = false
     
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {

@@ -40,8 +40,16 @@ object RimeConfigHelper {
         if (!rimeDir.exists()) {
             rimeDir.mkdirs()
         }
-        
+
         copyAssetsToRimeDir(context, rimeDir)
+        // 方案目录布局：把平铺方案收进 rime/schemes/<方案>/，再镜像回顶层。
+        //
+        // 必须放在 copyAssetsToRimeDir **之后**：首次安装时 rime/ 是空目录，
+        // 资产还没拷进来就没有文件可归类——之前放在拷贝之前，
+        // 结果是 schemes/ 永远建不出来（用户看到的就是"没有自动整理归纳"）。
+        // 同时必须早于引擎初始化：librime 只扫顶层，镜像没做等于没有方案。
+        runCatching { SchemaManager.ensureSchemeLayout(context, rimeDir) }
+            .onFailure { FileLogger.w(TAG, "方案目录布局初始化失败", it) }
         // F1: assets 会用内置 default.yaml 覆盖，这里把启用方案重新写回 schema_list
         SchemaManager.applyEnabledSchemasToDefaultYaml(context)
         // 为所有启用方案打个人词库补丁
@@ -149,8 +157,12 @@ object RimeConfigHelper {
         if (!rimeDir.exists()) {
             rimeDir.mkdirs()
         }
-        
+
         copyAssetsToRimeDir(context, rimeDir)
+        // 同上：布局迁移 + 镜像，必须在资产拷贝之后（否则首次安装无文件可归类）、
+        // 且早于引擎初始化（librime 只扫顶层）
+        runCatching { SchemaManager.ensureSchemeLayout(context, rimeDir) }
+            .onFailure { FileLogger.w(TAG, "方案目录布局初始化失败", it) }
         // F1: 同步初始化路径也写回 default.yaml 的 schema_list
         SchemaManager.applyEnabledSchemasToDefaultYaml(context)
         runBlocking { PersonalDictManager.ensureSchemaPacks(context) }
@@ -474,13 +486,16 @@ object RimeConfigHelper {
                 copyAssetFile(context, ASSETS_DEFAULT_CUSTOM, target)
                 // 模板基线（20）与用户设置不一致时（如 slider 调过）以设置为准
                 val aligned = patchDefaultCustomContent(target.readText(), pageSize)
-                if (aligned != null) {
-                    target.writeText(aligned)
+                if (aligned != null && !com.kingzcheung.xime.util.AtomicFileWriter.write(target, aligned)) {
+                    FileLogger.w(TAG, "Failed to write ${target.name}")
                 }
                 return
             }
             val patched = patchDefaultCustomContent(target.readText(), pageSize) ?: return
-            target.writeText(patched)
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(target, patched)) {
+                FileLogger.w(TAG, "Failed to write ${target.name}")
+                return
+            }
             Log.i(TAG, "Aligned ${target.name} menu/page_size=$pageSize")
         } catch (e: IOException) {
             FileLogger.e(TAG, "Failed to sync $ASSETS_DEFAULT_CUSTOM", e)
@@ -580,6 +595,24 @@ object RimeConfigHelper {
      */
     private fun updateBuiltinAssets(context: Context, targetDir: File): Int {
         var updated = 0
+        // 只同步「已启用方案」的文件。
+        //
+        // 为什么必须判断：未启用方案的文件会被 SchemaManager 归档进 schemes/，
+        // 如果这里无条件按 assets 写回，就会「归档一次、写回一次」无限循环，
+        // 顶层永远清不干净，引擎还会因 hash 反复失配重复编译。
+        val enabled = runCatching { SchemaManager.getEnabledSchemas(context) }.getOrDefault(emptyList())
+        val enabledSet = enabled.toSet()
+        fun isEnabledAsset(fileName: String): Boolean {
+            if (!fileName.endsWith(".schema.yaml") && !fileName.endsWith(".dict.yaml") &&
+                !fileName.endsWith(".custom.yaml")
+            ) return true   // 非方案文件（default.yaml / *.lua / symbols.yaml 等）照常同步
+            val id = fileName.removeSuffix(".schema.yaml").removeSuffix(".dict.yaml")
+                .removeSuffix(".custom.yaml")
+            // 共享资源（symbols）不属任何方案，照常同步
+            if (id == "symbols") return true
+            // 只有「确实是某个内置方案」且「未启用」时才跳过
+            return enabledSet.isEmpty() || id in enabledSet || id !in builtinSchemaIds(context)
+        }
         fun sync(assetSub: String, targetSub: File) {
             val assetPath = if (assetSub.isEmpty()) ASSETS_RIME_DIR else "$ASSETS_RIME_DIR/$assetSub"
             for (fileName in context.assets.list(assetPath) ?: return) {
@@ -595,6 +628,7 @@ object RimeConfigHelper {
                     // T9 注入与个人词库 packs），覆盖会抹掉用户配置与第三方方案——
                     // 一律排除出默认覆盖范围
                     if (fileName.endsWith(".custom.yaml")) continue
+                    if (!isEnabledAsset(fileName)) continue
                     if (!childTarget.exists() || !assetContentEquals(context, "$ASSETS_RIME_DIR/$childAsset", childTarget)) {
                         copyAssetFile(context, "$ASSETS_RIME_DIR/$childAsset", childTarget)
                         updated++
@@ -604,6 +638,20 @@ object RimeConfigHelper {
         }
         sync("", targetDir)
         return updated
+    }
+
+    /** assets 里内置方案的 schema_id 集合（缓存一次，避免重复列举）。 */
+    private var cachedBuiltinIds: Set<String>? = null
+    private fun builtinSchemaIds(context: Context): Set<String> {
+        cachedBuiltinIds?.let { return it }
+        val ids = runCatching {
+            context.assets.list(ASSETS_RIME_DIR).orEmpty()
+                .filter { it.endsWith(".schema.yaml") }
+                .map { it.removeSuffix(".schema.yaml") }
+                .toSet()
+        }.getOrDefault(emptySet())
+        cachedBuiltinIds = ids
+        return ids
     }
 
     /** assets 文件与本地文件内容逐块比对（流式，避免大词典整读进内存）。 */
@@ -684,13 +732,29 @@ object RimeConfigHelper {
             }
 
             targetFile.parentFile?.mkdirs()
-            context.assets.open(assetPath).use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
+            context.assets.open(assetPath).use { input -> replaceFromStream(input, targetFile) }
         } catch (e: IOException) {
             FileLogger.e(TAG, "Failed to copy: $assetPath", e)
+        }
+    }
+
+    /**
+     * 流式写入同目录临时文件后整体替换：直接 truncate 写在部署期被 LMK 杀掉会留下
+     * 半截 default.yaml / schema，部署失败打不出字。词典可达数十 MB，不整读进内存。
+     */
+    internal fun replaceFromStream(input: java.io.InputStream, target: File) {
+        val temp = File(target.absoluteFile.parentFile, "${target.name}.tmp")
+        try {
+            FileOutputStream(temp).use { output ->
+                input.copyTo(output)
+                output.fd.sync()
+            }
+            java.nio.file.Files.move(
+                temp.toPath(), target.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+        } finally {
+            if (temp.exists()) temp.delete()
         }
     }
 
@@ -704,31 +768,42 @@ object RimeConfigHelper {
         
         if (!rimeDir.exists()) rimeDir.mkdirs()
         
-        // 迁移 user 数据（用户配置、build 产物、userdb）
-        if (oldUserDir.exists()) {
-            oldUserDir.listFiles()?.forEach { file ->
-                val target = File(rimeDir, file.name)
-                if (!target.exists()) {
-                    file.renameTo(target)
-                }
+        // 迁移 user 数据（用户配置、build 产物、userdb）与 shared 数据（方案文件）
+        val userOk = !oldUserDir.exists() || moveChildrenInto(oldUserDir, rimeDir)
+        val sharedOk = !oldSharedDir.exists() || moveChildrenInto(oldSharedDir, rimeDir)
+
+        // 有一项没搬走就保留旧目录：userdb 在里面，删了就永久丢词库；下次启动重试
+        if (sharedOk) oldSharedDir.deleteRecursively()
+        if (userOk) oldUserDir.deleteRecursively()
+        if (userOk && sharedOk) {
+            Log.i(TAG, "Migration complete")
+        } else {
+            FileLogger.w(TAG, "Migration incomplete, old dirs kept: user=$userOk shared=$sharedOk")
+        }
+    }
+
+    /**
+     * 把 [from] 的子项逐个移入 [to]；目标已存在的项视为已迁移。
+     * rename 失败时用复制兜底，复制成功才算该项完成。
+     *
+     * @return 全部子项都已在 [to] 中
+     */
+    internal fun moveChildrenInto(from: File, to: File): Boolean {
+        val children = from.listFiles() ?: return false
+        var allOk = true
+        for (child in children) {
+            val target = File(to, child.name)
+            if (target.exists()) continue
+            if (child.renameTo(target)) continue
+            val copied = runCatching { child.copyRecursively(target, overwrite = false) }
+                .getOrDefault(false)
+            if (!copied) {
+                runCatching { target.deleteRecursively() }
+                FileLogger.w(TAG, "Failed to migrate ${child.absolutePath}")
+                allOk = false
             }
         }
-        
-        // 迁移 shared 数据（方案文件）
-        if (oldSharedDir.exists()) {
-            oldSharedDir.listFiles()?.forEach { file ->
-                val target = File(rimeDir, file.name)
-                if (!target.exists()) {
-                    file.renameTo(target)
-                }
-            }
-        }
-        
-        // 删除旧目录
-        oldSharedDir.deleteRecursively()
-        oldUserDir.deleteRecursively()
-        
-        Log.i(TAG, "Migration complete")
+        return allOk
     }
 
     /** 迁移旧版 market 目录（rime/market/ → market/）。 */
@@ -745,15 +820,13 @@ object RimeConfigHelper {
                 FileLogger.w(TAG, "Failed to rename rime/market/ to market/")
             }
         } else {
-            // 新位置已存在，逐项合并
-            oldMarket.listFiles()?.forEach { sub ->
-                val target = File(newMarket, sub.name)
-                if (!target.exists()) {
-                    sub.renameTo(target)
-                }
+            // 新位置已存在，逐项合并；有未搬走的项就保留旧目录
+            if (moveChildrenInto(oldMarket, newMarket)) {
+                oldMarket.deleteRecursively()
+                Log.i(TAG, "Merged rime/market/ into market/")
+            } else {
+                FileLogger.w(TAG, "Merge rime/market/ incomplete, old dir kept")
             }
-            oldMarket.deleteRecursively()
-            Log.i(TAG, "Merged rime/market/ into market/")
         }
     }
 

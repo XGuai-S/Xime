@@ -502,23 +502,16 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
         // （selectCandidateAsync 走 pendingAction.engineIndex）。
         // 见 CandidateOrderStore.reorder。
         val autoWordConfig = com.kingzcheung.xime.settings.KeysConfigHelper.getAutoWordConfig()
+        val hasManualOrder = autoWordConfig.sortByManual && !service.candidateOrderTable[rawInputText].isNullOrEmpty()
         val reordered = if (shouldApplyCandidateOrder(display.isT9, isAsciiMode, candidateActions)) {
-            val byManual = if (autoWordConfig.sortByManual) {
+            if (hasManualOrder) {
                 CandidateOrderStore.reorder(
                     code = rawInputText,
                     candidates = display.candidates,
                     comments = display.comments,
                     table = service.candidateOrderTable,
                 )
-            } else {
-                null
-            }
-            // 候选顺序规则（用户 2026-11-13：要词频排序，但词库/手动排序优先）：
-            // 1) 手动排序表命中该编码 → 严格按手动表（用户拖动结果，最高优先级）；
-            // 2) 未命中且开启 sort_by_freq → 按 word_freq 上屏频数降序重排
-            //    （未记录过频数的词保持引擎顺序、排在已记录词之后）；
-            // 3) 两者都不适用 → 原样 null，保持引擎顺序（= 方案词典行序）。
-            byManual ?: if (autoWordConfig.sortByFreq) {
+            } else if (autoWordConfig.sortByFreq) {
                 CandidateOrderStore.reorder(
                     code = rawInputText,
                     candidates = display.candidates,
@@ -560,20 +553,15 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
             } else {
                 // 与引擎候选那段同一口径：手动表未命中（该编码没被拖动过）时回退词频表，
                 // 否则「开手动排序 + 无手动记录」的编码会把造词永远钉在末尾。
-                val byManual = if (autoWordConfig.sortByManual) {
+                val permutation = if (hasManualOrder) {
                     computeOrderPermutation(merged.candidates, service.candidateOrderTable, rawInputText)
-                } else null
-                val permutation = byManual ?: if (autoWordConfig.sortByFreq) {
+                } else if (autoWordConfig.sortByFreq) {
                     computeOrderPermutation(merged.candidates, service.wordFreqTable, rawInputText)
                 } else null
                 if (permutation == null) {
                     merged
                 } else {
-                    val newTempIndices = HashSet<Int>()
-                    merged.autoWordTempIndices.forEach { oldIdx ->
-                        val newIdx = permutation.indexOf(oldIdx)
-                        if (newIdx >= 0) newTempIndices += newIdx
-                    }
+                    val newTempIndices = remapAutoWordTempIndices(permutation, merged.autoWordTempIndices)
                     CandidateOrderStore.Reordered(
                         candidates = permutation.map { merged.candidates[it] },
                         comments = permutation.map { merged.comments.getOrElse(it) { "" } },
@@ -891,19 +879,44 @@ internal class ImeSessionController(private val service: XimeInputMethodService)
  * autoWordTempIndices 四个平行数组统一重排，用「词文本反查下标」在重复候选时
  * 会错位（用户 2026-11-14 链路检查）。
  */
-private fun computeOrderPermutation(
+internal fun computeOrderPermutation(
     candidates: List<String>,
     table: Map<String, Map<String, Int>>,
     code: String,
 ): List<Int>? {
-    if (candidates.isEmpty() || code.isEmpty()) return null
+    if (candidates.size < 2 || code.isEmpty()) return null
     val freq = table[code] ?: return null
     if (freq.isEmpty()) return null
-    val permutation = candidates.withIndex()
-        .sortedWith(
-            compareByDescending<IndexedValue<String>> { freq[it.value] ?: Int.MIN_VALUE }
-                .thenBy { it.index }
-        )
-        .map { it.index }
-    return if (permutation == candidates.indices.toList()) null else permutation
+    var previousWeight = Int.MAX_VALUE
+    var needsReorder = false
+    for (candidate in candidates) {
+        val weight = freq[candidate] ?: Int.MIN_VALUE
+        if (weight > previousWeight) {
+            needsReorder = true
+            break
+        }
+        previousWeight = weight
+    }
+    if (!needsReorder) return null
+
+    // Only allocate for an actual reorder; comparisons reuse one weight lookup per position.
+    val weights = IntArray(candidates.size) { freq[candidates[it]] ?: Int.MIN_VALUE }
+    val permutation = candidates.indices.sortedWith(Comparator { left, right ->
+        val byWeight = weights[right].compareTo(weights[left])
+        if (byWeight != 0) byWeight else left.compareTo(right)
+    })
+    for (index in permutation.indices) {
+        if (permutation[index] != index) return permutation
+    }
+    return null
+}
+
+/** [permutation] contains unique original indices, as produced by [computeOrderPermutation]. */
+internal fun remapAutoWordTempIndices(permutation: List<Int>, oldIndices: Set<Int>): Set<Int> {
+    if (oldIndices.isEmpty()) return emptySet()
+    val remapped = HashSet<Int>()
+    permutation.forEachIndexed { newIndex, oldIndex ->
+        if (oldIndex in oldIndices) remapped += newIndex
+    }
+    return remapped
 }

@@ -107,6 +107,16 @@ class JsScriptRuntime(
         /** 候选词变换响应候选总数上限（超限截断，防插件撑爆候选栏）。 */
         const val TRANSFORM_MAX_CANDIDATES = 20
 
+        /**
+         * 插件可声明的网络超时上限（毫秒）。
+         *
+         * 与宿主 SSE 默认读超时（`SseHostApiImpl` 的 `readTimeout(120s)`）对齐：
+         * 插件传 600000（10 分钟）会让该插件唯一的 JS 线程被阻塞 10 分钟，同插件的
+         * transformCandidates（每键 15ms 超时）、SSE onData、面板调用全部排队超时。
+         * 超限按本值截断并记日志。
+         */
+        const val MAX_HTTP_TIMEOUT_MS = 120_000
+
         /** zlib.gunzip 解压输出上限（防压缩炸弹撑爆内存）。 */
         private const val MAX_GUNZIP_OUTPUT_BYTES = 16 * 1024 * 1024
 
@@ -348,7 +358,7 @@ class JsScriptRuntime(
             injectedCapabilities.add("bin")
             define("bin") {
                 function("int32be") { args -> int32be(num(args, 0).toInt()) }
-                function("uint32be") { args -> int32be(num(args, 0).toInt()) }
+                function("uint32be") { args -> uint32be(num(args, 0)) }
             }
 
             injectedCapabilities.add("zlib")
@@ -610,7 +620,7 @@ class JsScriptRuntime(
                 }
                 var prefix = '${JsPluginContract.BRIDGE_PREFIX}';
                 var tables = [
-                  [globalThis.host.http, ['request', 'upload', 'download', 'stream', 'closeStream'], '网络操作失败'],
+                  [globalThis.host.http, ['request', 'upload', 'download', 'releaseBlob', 'stream', 'closeStream'], '网络操作失败'],
                   [globalThis.host.ws, ['connect', 'sendText', 'sendBinary', 'close'], 'WebSocket 操作失败'],
                   [globalThis.host.zlib, ['gzip', 'gunzip'], '压缩操作失败'],
                   [globalThis.host.resource, ['list'], '目录读取失败']
@@ -767,6 +777,24 @@ class JsScriptRuntime(
         ).toUByteArray()
     }
 
+    /**
+     * 无符号 32 位大端编码。
+     *
+     * 不能沿用 int32be：JS number 是 Double，超过 Int.MAX_VALUE 时 toInt() 会饱和成
+     * 2147483647，0xB2D05E00 会被编码成 7F FF FF FF。这里先取模到 [0, 2^32) 再按 Long
+     * 拆字节，负数按补码语义落到同一区间（与 JS 的 >>> 0 一致）。
+     */
+    private fun uint32be(value: Double): UByteArray {
+        val masked = if (value.isNaN() || value.isInfinite()) 0L
+        else value.toLong() and 0xFFFFFFFFL
+        return byteArrayOf(
+            ((masked ushr 24) and 0xFF).toByte(),
+            ((masked ushr 16) and 0xFF).toByte(),
+            ((masked ushr 8) and 0xFF).toByte(),
+            (masked and 0xFF).toByte(),
+        ).toUByteArray()
+    }
+
     private fun gzip(data: ByteArray?): UByteArray? {
         if (data == null) return null
         return try {
@@ -803,6 +831,21 @@ class JsScriptRuntime(
     }
 
     // ---- host 子表构建 ----
+
+    /**
+     * 插件声明的网络超时截断到宿主上限 [MAX_HTTP_TIMEOUT_MS]。
+     *
+     * @return null/非正数保持 null（用宿主默认超时）；超限截断并记一条日志
+     */
+    internal fun clampTimeout(requested: Int?): Int? {
+        if (requested == null || requested <= 0) return null
+        if (requested <= MAX_HTTP_TIMEOUT_MS) return requested
+        Log.w(
+            TAG,
+            "[$pluginId] 插件请求超时 ${requested}ms 超过上限，截断为 ${MAX_HTTP_TIMEOUT_MS}ms"
+        )
+        return MAX_HTTP_TIMEOUT_MS
+    }
 
     private fun ObjectBindingScope.buildHttpTable() {
         // async 桥：返回判别式结果（{ok:true,value} | {ok:false,error}），bootstrap 的
@@ -847,7 +890,7 @@ class JsScriptRuntime(
             val url = str(args, 1)
             val headers = headersFrom(args.getOrNull(2))
             val body = bytes(args, 3)
-            val timeoutMillis = (args.getOrNull(4) as? Number)?.toInt()?.takeIf { it > 0 }
+            val timeoutMillis = clampTimeout((args.getOrNull(4) as? Number)?.toInt())
             val api = httpHostApi
             val response = api?.let {
                 withContext(Dispatchers.IO) { it.request(method, url, headers, body, timeoutMillis) }
@@ -861,7 +904,7 @@ class JsScriptRuntime(
             val url = str(args, 1)
             val headers = headersFrom(args.getOrNull(2))
             val blobId = str(args, 3)
-            val timeoutMillis = (args.getOrNull(4) as? Number)?.toInt()?.takeIf { it > 0 }
+            val timeoutMillis = clampTimeout((args.getOrNull(4) as? Number)?.toInt())
             val api = httpHostApi
             val response = api?.let {
                 withContext(Dispatchers.IO) { it.upload(method, url, headers, blobId, timeoutMillis) }
@@ -874,7 +917,7 @@ class JsScriptRuntime(
             val method = str(args, 0)
             val url = str(args, 1)
             val headers = headersFrom(args.getOrNull(2))
-            val timeoutMillis = (args.getOrNull(3) as? Number)?.toInt()?.takeIf { it > 0 }
+            val timeoutMillis = clampTimeout((args.getOrNull(3) as? Number)?.toInt())
             val api = httpHostApi
             val response = api?.let {
                 withContext(Dispatchers.IO) { it.download(method, url, headers, timeoutMillis) }
@@ -882,22 +925,50 @@ class JsScriptRuntime(
             respond(api, response)
         }
 
+        // 释放下载句柄：blob 槽位是**全插件共享**的有限资源（宿主实现限 32 个），
+        // 没有释放入口时一个反复下载的插件就能把槽位占满，其它插件的
+        // download / backup.pull 全部失败。幂等（未知 id 直接成功）。
+        asyncFunction<Any?>(bridgeName("releaseBlob")) { args ->
+            val blobId = str(args, 0)
+            val api = httpHostApi
+            if (api != null && blobId.isNotEmpty()) {
+                withContext(Dispatchers.IO) { runCatching { api.releaseBlob(blobId) } }
+            }
+            asyncResult(true, JsPluginContract.ERR_IO, null)
+        }
+
         if (sseHostApi != null) {
             // SSE 流式：async 返回会话 id；事件经 plugin 导出对象回调槽（带 sessionId 参数）
             asyncFunction<Any?>(bridgeName("stream")) { args ->
                 val url = str(args, 0)
                 val headers = headersFrom(args.getOrNull(1))
-                val timeoutMillis = (args.getOrNull(2) as? Number)?.toInt()?.takeIf { it > 0 }
+                val timeoutMillis = clampTimeout((args.getOrNull(2) as? Number)?.toInt())
                 val method = str(args, 3).ifEmpty { "GET" }.uppercase()
                 val body = bytes(args, 4)
-                // 会话 id 由宿主 connect 返回后才可知：listener 内通过可变持有器回填
-                val sessionHolder = arrayOf(-1)
-                val sessionId = sseHostApi.connect(url, headers, streamedListener(sessionHolder), timeoutMillis, method, body)
-                sessionHolder[0] = sessionId
+                // 会话 id 由宿主在建连**之前**经 listener.onSessionAllocated 交付：
+                // 连接可能立即失败/立即结束，那时 onError/onDone 必须先知道自己的 id，
+                // 才能把 id 从 activeSseSessions 里摘掉（否则该 id 永远留在集合里）。
+                val sessionHolder = java.util.concurrent.atomic.AtomicInteger(-1)
+                // 终态是否已到达：连接立即失败/立即结束时，onError/onDone 会在 connect
+                // 返回之前跑完。此时**不能**在返回后再补登记（会把刚摘掉的 id 加回去，
+                // 死 id 永久滞留 —— 正是本缺陷的核心症状）。
+                val terminated = java.util.concurrent.atomic.AtomicBoolean(false)
+                val sessionId = sseHostApi.connect(
+                    url, headers, streamedListener(sessionHolder, terminated), timeoutMillis, method, body
+                )
                 if (sessionId >= 0) {
-                    activeSseSessions.add(sessionId)
+                    // 兼容未调用 onSessionAllocated 的宿主实现：返回后补登记（只补一次）
+                    if (sessionHolder.compareAndSet(-1, sessionId) && !terminated.get()) {
+                        activeSseSessions.add(sessionId)
+                    }
                     asyncResult(true, JsPluginContract.ERR_NETWORK, null, value = sessionId)
                 } else {
+                    // 建连失败：宿主可能已经回调过 onSessionAllocated（id 已进
+                    // activeSseSessions），但会话表那边已被回滚、不会再发 onDone/onError。
+                    // 不在这里摘掉的话，这个 id 会永久留在活动集合里（槽位泄漏），
+                    // 直到 runtime 关闭才被一并清理。
+                    val allocated = sessionHolder.getAndSet(-1)
+                    if (allocated >= 0) activeSseSessions.remove(allocated)
                     asyncResult(
                         false, JsPluginContract.ERR_NETWORK,
                         sseHostApi.lastError() ?: "流式连接失败"
@@ -906,20 +977,41 @@ class JsScriptRuntime(
             }
             asyncFunction<Any?>(bridgeName("closeStream")) { args ->
                 val id = (args.getOrNull(0) as? Number)?.toInt() ?: -1
-                activeSseSessions.remove(id)
-                sseHostApi.close(id)
+                if (activeSseSessions.remove(id)) sseHostApi.close(id)
                 asyncResult(true, JsPluginContract.ERR_NETWORK, null)
             }
         }
     }
 
-    /** SSE 会话监听：会话 id 经 holder 回填（connect 返回后才可知），事件带 (sessionId, text)。 */
-    private fun streamedListener(sessionHolder: Array<Int>): SseHostListener {
+    /**
+     * SSE 会话监听：会话 id 由宿主在建连前回填（`onSessionAllocated`），
+     * 故「连接立即失败」时 onError 也能拿到正确 id 并清理活动集合。
+     */
+    private fun streamedListener(
+        sessionHolder: java.util.concurrent.atomic.AtomicInteger,
+        terminated: java.util.concurrent.atomic.AtomicBoolean
+    ): SseHostListener {
         return object : SseHostListener {
-            private val sid: Int get() = sessionHolder[0]
+            private val sid: Int get() = sessionHolder.get()
+            override fun onSessionAllocated(sessionId: Int) {
+                // 建连前登记：立即终态时 onDone/onError 才摘得掉自己
+                sessionHolder.set(sessionId)
+                if (!terminated.get()) activeSseSessions.add(sessionId)
+            }
             override fun onData(text: String) = dispatchCallback(CB_ON_SSE_DATA, listOf(sid, text))
-            override fun onDone(fullText: String) = dispatchCallback(CB_ON_SSE_DONE, listOf(sid, fullText))
-            override fun onError(message: String) = dispatchCallback(CB_ON_SSE_ERROR, listOf(sid, message))
+            override fun onDone(fullText: String) {
+                val id = sid
+                terminated.set(true)
+                // 幂等：可能已被 closeStream / close() 清过
+                if (id >= 0) activeSseSessions.remove(id)
+                dispatchCallback(CB_ON_SSE_DONE, listOf(id, fullText))
+            }
+            override fun onError(message: String) {
+                val id = sid
+                terminated.set(true)
+                if (id >= 0) activeSseSessions.remove(id)
+                dispatchCallback(CB_ON_SSE_ERROR, listOf(id, message))
+            }
         }
     }
 
@@ -1047,18 +1139,23 @@ class JsScriptRuntime(
     ): GuardResult<T> {
         if (poisoned || closed) return GuardResult.TimedOut
         // 标记任务是否真的开始执行：executor 是单线程 FIFO，任务可能还在排队。
-        val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val taskLock = Any()
+        var running = false
+        var cancelled = false
         val future = try {
             executor.submit(Callable {
                 // 二次判定：任务真正开始执行时运行时可能已关闭。[close] 的屏障只保证
                 // "已开始的调用"先于引擎关闭结束，不保证"提交"与"关闭"之间没有窗口。
-                if (closed) throw RuntimeClosedSignal()
-                started.set(true)
+                synchronized(taskLock) {
+                    if (closed || poisoned || cancelled) throw RuntimeClosedSignal()
+                    running = true
+                }
                 pendingBinaryArgs = binaries
                 try {
                     block()
                 } finally {
                     pendingBinaryArgs = emptyList()
+                    synchronized(taskLock) { running = false }
                 }
             })
         } catch (e: java.util.concurrent.RejectedExecutionException) {
@@ -1068,22 +1165,24 @@ class JsScriptRuntime(
         return try {
             GuardResult.Ok(future.get(timeoutMs, TimeUnit.MILLISECONDS))
         } catch (e: TimeoutException) {
-            future.cancel(true)
-            // 只有「确实在跑」的求值才能被中断。QuickJS 的 interruptEvaluation 是**引擎级**
-            // 中断，它不知道打断的是哪一次求值：如果本次任务还排在单线程队列里（started=false），
-            // 这一下打断的是**别人**正在执行的调用 —— 那一条会抛 QuickJsInterruptedException，
-            // 被它自己的 runGuarded 判成「我超时了」→ poisonOnTimeout=true 时直接把它标记中毒，
-            // 用户看到的是「一个健康插件突然被停用、提示疑似死循环」。
-            if (started.get() && !future.isDone) interruptAndPoison(poisonOnTimeout)
+            synchronized(taskLock) {
+                cancelled = true
+                if (running) {
+                    interruptAndPoison(false)
+                    future.cancel(true)
+                    if (poisonOnTimeout) poison()
+                } else {
+                    future.cancel(false)
+                }
+            }
             GuardResult.TimedOut
         } catch (e: Exception) {
-            future.cancel(true)
-            // 关闭引发的失败（关闭信号 / 引擎已关闭 / shutdownNow 取消排队任务）：
-            // 一律按"无结果"处理，既不记脚本错误也不中毒。
+            synchronized(taskLock) {
+                cancelled = true
+                future.cancel(running)
+            }
             if (closed || isClosedLike(e)) return GuardResult.TimedOut
-            // QuickJsInterruptedException 或中断引发的 CancellationException 视为超时
-            if (isInterruptLike(e))
-                interruptAndPoison(poisonOnTimeout)
+            if (poisonOnTimeout && isInterruptLike(e)) poison()
             throw e
         }
     }
@@ -1196,13 +1295,28 @@ class JsScriptRuntime(
         if (!loaded || poisoned) return
         val (argsJs, binaries) = argsExpr(args)
         val expr = slotExpr(method, argsJs)
+        // **不能在这里同步等待**：SSE/WS 回调由 OkHttp 的读线程直接调用，
+        // 旧实现走 runGuarded(...future.get(5s)) 会让流读取线程阻塞最多 5 秒——
+        // WS 心跳/pong 发不出去会被判死，事件在底层缓冲里堆积。
+        //
+        // 这里直接在 [executor] 上提交任务，**不**再用 runGuarded 包一层：
+        // runGuarded 内部也是 executor.submit，再套一层单线程 executor 会自等死锁。
+        // executor 是单线程 FIFO，事件顺序与到达顺序一致。
         try {
-            runGuarded(callbackTimeoutMs, poisonOnTimeout = false, binaries = binaries) {
-                runBlocking { engine.evaluate<Any?>(expr, filename = entryScript) }
+            executor.execute {
+                if (closed || poisoned) return@execute
+                pendingBinaryArgs = binaries
+                try {
+                    runBlocking { engine.evaluate<Any?>(expr, filename = entryScript) }
+                } catch (e: Exception) {
+                    api.log("$method 回调失败: ${e.message}")
+                    logScriptError("$method 回调", e)
+                } finally {
+                    pendingBinaryArgs = emptyList()
+                }
             }
-        } catch (e: Exception) {
-            api.log("$method 回调失败: ${e.message}")
-            logScriptError("$method 回调", e)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // 运行时已关闭：静默丢弃，不是脚本错误
         }
     }
 
@@ -1360,15 +1474,15 @@ class JsScriptRuntime(
         }
     }
 
-    fun callOnLoad() = invokeLifecycle("onLoad")
+    fun callOnLoad(): Boolean = invokeLifecycle("onLoad")
 
-    fun callOnUnload() = invokeLifecycle("onUnload")
+    fun callOnUnload() { invokeLifecycle("onUnload") }
 
     /** 生命周期调用（async 感知：插件可声明 async onLoad/onUnload，宿主等到 settle）。 */
-    private fun invokeLifecycle(name: String) {
-        if (!loaded || poisoned || closed) return
-        try {
-            runGuarded(callTimeoutMs, poisonOnTimeout = true) {
+    private fun invokeLifecycle(name: String): Boolean {
+        if (!loaded || poisoned || closed) return false
+        return try {
+            val outcome = runGuarded(callTimeoutMs, poisonOnTimeout = true) {
                 runBlocking {
                     engine.evaluate<Any?>(
                         asyncStashExpr(slotExpr(name, "")),
@@ -1377,9 +1491,20 @@ class JsScriptRuntime(
                     engine.evaluate<Any?>(asyncReadExpr(), filename = entryScript)
                 }
             }
+            val value = when (outcome) {
+                is GuardResult.Ok -> outcome.value
+                GuardResult.TimedOut -> return false
+            }
+            val stash = jsToKotlin(value) as? Map<*, *> ?: return false
+            val succeeded = (stash["status"] as? Number)?.toInt() == 1
+            if (!succeeded) {
+                Log.e(TAG, "$name did not complete successfully for $pluginId")
+            }
+            succeeded
         } catch (e: Exception) {
             Log.e(TAG, "$name failed for $pluginId", e)
             logScriptError(name, e)
+            false
         }
     }
 
@@ -1435,7 +1560,11 @@ class JsScriptRuntime(
      * @param args 参数（null/Boolean/Int/Long/Double/String/Map/List/ByteArray/Uint8Array）
      * @return 返回值（已转纯 Kotlin 结构）；方法不存在 / rejected / 报错 / 超时返回 null
      */
-    fun callAsync(name: String, vararg args: Any?): Any? {
+    fun callAsync(name: String, vararg args: Any?): Any? = callAsyncResult(name, *args)?.value
+
+    internal data class AsyncSuccess(val value: Any?)
+
+    internal fun callAsyncResult(name: String, vararg args: Any?): AsyncSuccess? {
         if (!loaded || closed) return null
         return try {
             val (argsJs, binaries) = argsExpr(args.toList())
@@ -1452,7 +1581,7 @@ class JsScriptRuntime(
             }
             val stash = jsToKotlin(value) as? Map<*, *> ?: return null
             when ((stash["status"] as? Number)?.toInt()) {
-                1 -> jsToKotlin(stash["result"])
+                1 -> AsyncSuccess(jsToKotlin(stash["result"]))
                 2 -> {
                     val message = stash["error"]?.toString() ?: "未知错误"
                     Log.e(TAG, "CallAsync '$name' rejected for $pluginId: $message")
@@ -1523,6 +1652,10 @@ class JsScriptRuntime(
             subscribedEvents = emptySet()
             activeSseSessions.forEach { sseHostApi?.close(it) }
             activeSseSessions.clear()
+            // 回收本插件的全部 blob 句柄：句柄槽位由所有插件共享（宿主实现限 32 个），
+            // 卸载后不回收就等于一个已消失的插件长期占着别人的名额。
+            runCatching { httpHostApi?.releaseAllBlobs() }
+                .onFailure { Log.w(TAG, "回收 blob 句柄失败：${it.message}") }
             // WebSocket 也必须关：WsHostApi 是**每插件一份**（WsHostApiImpl 自带一个
             // OkHttpClient + 心跳）。只关 SSE 的话，插件卸载/热重载后 WS 仍连着，
             // 剪贴板同步、ASR 这类长驻插件会持续联网、心跳，客户端与线程池也永不释放。

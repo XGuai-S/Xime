@@ -14,6 +14,27 @@ import org.junit.Test
  */
 class CandidateOrderStoreTest {
 
+    @Test
+    fun `sorted weights including extremes require only one lookup per candidate`() {
+        var reads = 0
+        val backing = mapOf("甲" to Int.MAX_VALUE, "乙" to -1, "丙" to Int.MIN_VALUE)
+        val weights = object : Map<String, Int> by backing {
+            override fun get(key: String): Int? { reads++; return backing[key] }
+        }
+        assertNull(CandidateOrderStore.reorder("a", listOf("甲", "乙", "丙", "丁"), emptyList(), mapOf("a" to weights)))
+        assertEquals(4, reads)
+    }
+
+    @Test
+    fun `unsorted negative weights preserve equal weight order and engine mapping`() {
+        val result = CandidateOrderStore.reorder("a", listOf("甲", "乙", "丙", "丁"), listOf("A", "B", "C"),
+            mapOf("a" to mapOf("甲" to -10, "乙" to -1, "丙" to -1)))
+        assertEquals(listOf("乙", "丙", "甲", "丁"), result?.candidates)
+        assertEquals(listOf("B", "C", "A", ""), result?.comments)
+        assertEquals(listOf(1, 2, 0, 3).map { CandidateAction.engine(it) }, result?.actions)
+    }
+
+
     // ── parse / serialize ──
 
     @Test

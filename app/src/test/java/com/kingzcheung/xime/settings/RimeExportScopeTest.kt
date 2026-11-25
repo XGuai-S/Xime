@@ -97,6 +97,26 @@ class RimeExportScopeTest {
         assertFalse("sync 下的散文件不进包", included("sync/somefile.txt"))
     }
 
+    @Test
+    fun `archived scheme entries are wired into the archive writer`() {
+        val source = com.kingzcheung.xime.RepoFiles.mainKotlinSources
+            .single { it.name == "RimeExportManager.kt" }
+            .readText()
+            .replace("\r\n", "\n")
+        val build = source.substringAfter("fun buildArchiveToFile(")
+            .substringBefore("internal fun packClipboardSection(")
+
+        assertTrue(
+            "完整备份必须把 schemes/ 中的唯一归档文件写入 zip",
+            build.contains("archivedSchemeEntries(rimeDir, installationId)"),
+        )
+    }
+
+    @Test
+    fun `schemes directory is handled by deduplicating archive enumeration`() {
+        assertFalse("通用顶层枚举仍应排除 schemes/ 镜像", included("schemes/disabled/foo.schema.yaml"))
+    }
+
     /**
      * 回归（用户实测 zip 8.4MB）：librime 的 `sync_user_data` 会把用户目录下所有顶层
      * `.yaml`/`.txt`（含方案词典）镜像进 `sync/<user_id>/`。这些镜像**不是**自造词快照，

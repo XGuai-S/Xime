@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kingzcheung.xime.keyboard.KeyboardPage
@@ -365,6 +366,9 @@ fun KeyboardView(
                 state.isCalculatorMode, handwritingCandidates, handwritingComments, showHandwritingCandidates,
                 railExpanded, cs.preeditCaretPos, state.recentClipboardItems,
                 cs.capitalAmountExpression, cs.capitalAmountAmount, cs.autoWordTempIndices,
+                // 参与下方计算但此前漏在 key 外：宿主能力探测结果翻转（切到受限宿主/终端）时
+                // remember 不重算，仍展示英文候选，点选会回删错误文本。
+                cs.englishReplaceSupported,
             ) {
                 if (showHandwritingCandidates) {
                     CandidateBarState.AssociationOnly(
@@ -403,6 +407,9 @@ fun KeyboardView(
             }
 
             if (state.showQuickSendForm) {
+                // 在 Composable 作用域取 context：onClose 是普通 lambda，
+                // 里面不能调 LocalContext.current（@Composable 只能在 Composable 上下文调用）
+                val quickSendContext = LocalContext.current
                 QuickSendFormArea(
                     backgroundColor = Color.Transparent,
                     textColor = keyTextColor,
@@ -416,10 +423,19 @@ fun KeyboardView(
                         android.util.Log.d("QuickSendForm", "onClose: textLen=${text.length}, editingId=${state.quickSendEditingItemId}, showForm=${state.showQuickSendForm}")
                         if (text.isNotBlank()) {
                             val editingId = state.quickSendEditingItemId
-                            if (editingId != null) {
+                            val accepted = if (editingId != null) {
                                 viewModel.updateQuickSendItem(editingId, text, code)
                             } else {
                                 viewModel.addQuickSendText(text, code)
+                            }
+                            // 敏感内容会被拒绝：必须告诉用户，否则输入框清空了列表却没变化，
+                            // 看起来像 App 坏了。
+                            if (!accepted) {
+                                android.widget.Toast.makeText(
+                                    quickSendContext,
+                                    "含密码/卡号等敏感内容的文本不能设为快捷发送",
+                                    android.widget.Toast.LENGTH_SHORT,
+                                ).show()
                             }
                         }
                         callbacks.onHideQuickSendForm?.invoke()
@@ -1628,10 +1644,10 @@ fun KeyboardView(
                         keyTextColor = keyTextColor,
                         keyBgColor = keyBgColor,
                         viewModel = viewModel,
-                        onSelectItem = { text ->
-                            // 精确到 id：该文本可能同时存在多行（历史重复），
-                            // 只标被点的这一行才不会「上屏后仍在候选栏显示」
-                            val id = state.clipboardItems.firstOrNull { it.text == text }?.id
+                        onSelectItem = { text, id ->
+                            if (state.clipboardItems.any { it.id == id && it.isOtp }) {
+                                callbacks.onClipboardSearchFocusChange?.invoke(false)
+                            }
                             callbacks.onClipboardSelect?.invoke(text, id)
                             viewModel.closeOverlay()
                         },

@@ -59,6 +59,8 @@ object ClipboardDragSender {
      * @return 是否成功启动；失败（URI 获取失败/系统拒绝）时调用方回退长按菜单
      */
     fun startDragAndDrop(view: View, item: ClipboardItem, imageFile: File?): Boolean {
+        // 验证码通过面板点选直接上屏，不作为跨应用 ClipData 发送。
+        if (item.isOtp) return false
         return try {
             val density = view.resources.displayMetrics.density
             val (clip, shadow) = if (item.isImage) {

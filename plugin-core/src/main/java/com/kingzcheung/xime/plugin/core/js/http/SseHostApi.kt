@@ -55,6 +55,18 @@ interface SseHostApi {
 
 /** 通用 SSE 流事件回调（宿主侧后台线程调用，每个会话一个 listener）。 */
 interface SseHostListener {
+    /**
+     * 会话 id 已分配、**尚未发起连接**时回调一次。
+     *
+     * 为什么需要：连接可能立即失败/立即结束（DNS 立刻报错、401 立即返回、网关立即断开），
+     * 终态回调会在 [SseHostApi.connect] 返回**之前**就跑完。若 runtime 此时还没登记该 id，
+     * 终态里的「从活动集合移除」就空转 —— id 永远留在集合里（runtime.close 会对已结束
+     * 会话重复 close，集合随会话数无限增长）。
+     *
+     * 默认空实现：老的 [SseHostApi] 实现不必改（未调用它时 runtime 在 connect 返回后补登记）。
+     */
+    fun onSessionAllocated(sessionId: Int) {}
+
     /** 收到一条 SSE 事件（`data:` 行的解析结果，多行 data 已拼接）。 */
     fun onData(text: String)
 

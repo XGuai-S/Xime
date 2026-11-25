@@ -111,7 +111,6 @@ fun PluginsSettingsContent(
     onNavigateToPluginSettings: (String) -> Unit = {},
     onNavigateToPluginMarketDetail: (String) -> Unit = {},
     onNavigateToSpeechToText: () -> Unit = {},
-    onNavigateToClipboardSync: () -> Unit = {},
     onNavigateToBackup: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -250,16 +249,11 @@ fun PluginsSettingsContent(
                         }
                     }
                 } else {
-                    // 单选类插件的"当前使用中"必须与**引擎同一套规则**（ActivePluginSelection）：
-                    // 引擎在偏好为空/指向已卸载插件时会回退到"首个已启用插件"，
-                    // 页面若只比较持久化偏好，就会出现"同步在跑、这里却显示未使用"。
+                    // 语音识别与备份单选类插件的“当前使用中”必须与引擎共用同一判定规则。
+                    // 剪贴板同步插件保留安装与本地配置数据，但不再作为实时服务激活。
                     val activeAsrPluginId = ActivePluginSelection.resolve(
                         SettingsPreferences.getSttOnlinePluginId(context),
                         ExtensionManager.getEnabledAsrPlugins(context).map { it.first }
-                    )
-                    val activeClipboardSyncPluginId = ActivePluginSelection.resolve(
-                        SettingsPreferences.getClipboardSyncPluginId(context),
-                        ExtensionManager.getEnabledClipboardSyncPlugins(context).map { it.first }
                     )
                     val activeBackupPluginId = ActivePluginSelection.resolve(
                         SettingsPreferences.getBackupPluginId(context),
@@ -276,15 +270,14 @@ fun PluginsSettingsContent(
                             isActive = when (extension.category) {
                                 PluginCategory.ASR ->
                                     extension.id == activeAsrPluginId
-                                PluginCategory.CLIPBOARD_SYNC ->
-                                    extension.id == activeClipboardSyncPluginId
+                                PluginCategory.CLIPBOARD_SYNC -> false
                                 PluginCategory.BACKUP ->
                                     extension.id == activeBackupPluginId
                                 else -> false
                             },
                             onActivate = when (extension.category) {
                                 PluginCategory.ASR -> onNavigateToSpeechToText
-                                PluginCategory.CLIPBOARD_SYNC -> onNavigateToClipboardSync
+                                PluginCategory.CLIPBOARD_SYNC -> null
                                 PluginCategory.BACKUP -> onNavigateToBackup
                                 else -> null
                             }
@@ -658,7 +651,7 @@ private fun ExtensionItem(
                     }
 
                     // 设置按钮
-                    if (hasSettings) {
+                    if (hasSettings && extension.category != PluginCategory.CLIPBOARD_SYNC) {
                         OutlinedButton(
                             onClick = onClick,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)

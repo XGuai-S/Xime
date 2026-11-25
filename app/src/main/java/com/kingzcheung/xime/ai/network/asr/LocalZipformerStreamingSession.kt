@@ -53,10 +53,25 @@ class LocalZipformerStreamingSession(
             if (!mm.isModelReady()) return false
             val dir = mm.getSelectedModelDir()?.absolutePath ?: return false
             if (!client.ensureBound()) return false
-            if (!client.startAsr(dir, callback)) return false
+            // cancel 可能发生在绑定等待期间（最长 5s）：那时它的 unbind 是空操作，
+            // 这里不自行收尾，:asr 绑定就永远没人解。
+            if (finished) {
+                runCatching { client.unbind() }
+                return false
+            }
+            if (!client.startAsr(dir, callback)) {
+                runCatching { client.unbind() }
+                return false
+            }
+            if (finished) {
+                runCatching { client.cancelAsr() }
+                runCatching { client.unbind() }
+                return false
+            }
             started = true
             true
         } catch (_: Throwable) {
+            runCatching { client.unbind() }
             false
         }
     }
@@ -66,9 +81,11 @@ class LocalZipformerStreamingSession(
      * sendPcmFrame 在 ready 之前会被丢弃，因此不会崩；调用方应先
      * warmup 再开始录音，以尽量减少开头的丢帧。
      */
+    @Volatile private var prepareJob: kotlinx.coroutines.Job? = null
+
     fun prepareInBackground() {
-        if (started) return
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        if (started || finished || prepareJob?.isActive == true) return
+        prepareJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             prepare()
         }
     }
@@ -79,7 +96,13 @@ class LocalZipformerStreamingSession(
     }
 
     override suspend fun finishAndAwaitFinal(timeoutMs: Long): Result<String> {
-        if (!started) return Result.failure(IOException("本地识别未启动"))
+        if (!started) {
+            // 准备仍在途：置 finished 让 prepare 自行收尾，并解掉可能已建立的绑定
+            finished = true
+            prepareJob?.cancel()
+            runCatching { client.unbind() }
+            return Result.failure(IOException("本地识别未启动"))
+        }
         return try {
             val text = client.stopAsr()
             finished = true
@@ -95,6 +118,7 @@ class LocalZipformerStreamingSession(
 
     override fun cancel() {
         finished = true
+        prepareJob?.cancel()
         runCatching { client.cancelAsr() }
         runCatching { client.unbind() }
     }

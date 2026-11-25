@@ -6,6 +6,7 @@ import com.kingzcheung.xime.plugin.ExtensionManager
 import com.kingzcheung.xime.plugin.core.js.ws.NetworkPolicy
 import com.kingzcheung.xime.plugin.core.js.ws.WsHostApi
 import com.kingzcheung.xime.plugin.core.js.ws.WsHostListener
+import com.kingzcheung.xime.plugin.http.BoundedErrorBody
 import com.kingzcheung.xime.settings.SettingsPreferences
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -83,8 +84,12 @@ class WsHostApiImpl(
         lastErrorMsg = null
 
         synchronized(this) {
+            // 复用已建立的连接时**必须更新 listener**：插件 runtime 重建/重连后
+            // 新 listener 若没装上，事件会继续投递给旧 listener（或 close 后置空、
+            // 事件被静默丢弃），插件的状态机永远等不到 onOpen。
             if (webSocket != null) {
-                Log.w(TAG, "Already connected, reusing")
+                Log.w(TAG, "Already connected, reusing (listener refreshed)")
+                this.listener = listener
                 return true
             }
             val requestBuilder = Request.Builder().url(url)
@@ -144,11 +149,13 @@ class WsHostApiImpl(
 
     override fun lastError(): String? = lastErrorMsg
 
-    private fun extractServerError(body: String): String? {
-        if (body.isBlank()) return null
+    /** 从（已限长的）错误正文里只取服务端 `error` 字段：正文其余部分不进日志。 */
+    private fun extractServerError(body: String?): String? {
+        if (body.isNullOrBlank()) return null
         return try {
-            org.json.JSONObject(body).optString("error").takeIf { it.isNotBlank() }
+            BoundedErrorBody.summarize(org.json.JSONObject(body).optString("error").takeIf { it.isNotBlank() })
         } catch (e: Exception) {
+            // 非 JSON（网关 HTML 错误页等）：只报状态码，不把正文写进日志
             null
         }
     }
@@ -169,9 +176,10 @@ class WsHostApiImpl(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             val serverMsg = response?.let { r ->
-                val body = try { r.body.string() } catch (e: Exception) { "" }
-                val reason = extractServerError(body) ?: "HTTP ${r.code}"
-                "HTTP ${r.code}: $reason"
+                // 有界读取（2KB）：旧实现 body.string() 把整个错误页读进堆，
+                // 且 extractServerError 的 JSON 解析在超大正文上同样占堆。
+                val body = BoundedErrorBody.readErrorBody(r.body)
+                extractServerError(body)?.let { "HTTP ${r.code}: $it" } ?: "HTTP ${r.code}"
             } ?: ""
             Log.e(TAG, "WS failure: ${t.message} | $serverMsg")
             com.kingzcheung.xime.plugin.core.security.PluginErrorLog.logError(

@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -65,7 +66,14 @@ object SyncManager {
         } else null
         if (currentId == stableId) return stableId
         yamlFile.parentFile?.mkdirs()
-        yamlFile.writeText("installation_id: \"$stableId\"\n")
+        // write 失败返回 false 不抛异常。原来忽略返回值会让调用方以为 id 已稳定，
+        // 实际 librime 会用自己的 id 重建 installation.yaml → sync/<id>/ 目录轮换、
+        // 与 SP 里的 id 脱钩，旧快照变成孤儿；用户看到「同步成功」但换机后少词条。
+        if (!com.kingzcheung.xime.util.AtomicFileWriter.write(yamlFile, "installation_id: \"$stableId\"\n")) {
+            com.kingzcheung.xime.util.FileLogger.e(
+                TAG, "写 installation.yaml 失败: ${yamlFile.absolutePath}"
+            )
+        }
         return stableId
     }
 
@@ -85,7 +93,16 @@ object SyncManager {
      * 且 `sync_user_data()` 仍返回成功。这类场景必须用 [mergeSnapshots] 逐个直接合并。
      */
     fun syncNow(context: Context): Result<Unit> {
+        // installation.yaml 写失败必须中止：继续同步会让 librime 用自生成 id 建
+        // sync/<新id>/ 目录，与本机 SP 里的 id 脱钩，旧快照全部变孤儿。
+        val installationYaml = File(File(context.filesDir, "rime"), "installation.yaml")
+        val stableId = SettingsPreferences.getRimeInstallationId(context)
         ensureInstallationYaml(context)
+        if (!installationYaml.isFile ||
+            !installationYaml.readText().contains("installation_id: \"$stableId\"")
+        ) {
+            return Result.failure(IOException("installation.yaml 写入失败，已中止同步"))
+        }
         if (!RimeEngine.isInitialized()) {
             return Result.failure(IllegalStateException("输入法引擎尚未初始化，请先在任意输入框唤起键盘一次"))
         }

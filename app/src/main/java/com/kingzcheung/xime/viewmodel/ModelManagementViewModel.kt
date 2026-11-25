@@ -7,6 +7,7 @@ import com.kingzcheung.xime.model.ModelCategory
 import com.kingzcheung.xime.model.ModelDownloadState
 import com.kingzcheung.xime.model.ModelInfo
 import com.kingzcheung.xime.model.ModelManager
+import com.kingzcheung.xime.model.ModelOperationGate
 import com.kingzcheung.xime.model.ModelVersion
 import com.kingzcheung.xime.settings.MarketUpdateChecker
 import com.kingzcheung.xime.settings.MarketVersionStore
@@ -55,6 +56,10 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
     private val context = application.applicationContext
     private val TAG = "ModelManagementViewModel"
 
+    /** 仅用于 UI 显示（避免重复点击、编译期占位）；**不是**互斥来源。
+     *  真正的互斥在 ModelOperationGate（按模型目录的进程级串行域）。 */
+    private val activeDownloads = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     private val _uiState = MutableStateFlow(ModelManagementUiState())
     val uiState: StateFlow<ModelManagementUiState> = _uiState.asStateFlow()
 
@@ -85,7 +90,15 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
                 installedVersion = if (downloaded) versions[model.id] else null,
             )
         }
-        _uiState.update { it.copy(models = items) }
+        _uiState.update { state ->
+            val previous = state.models.associateBy { it.model.id }
+            state.copy(models = items.map { item ->
+                val old = previous[item.model.id]
+                if (old != null && item.model.id in activeDownloads) {
+                    item.copy(downloadState = old.downloadState)
+                } else item
+            })
+        }
     }
 
     private suspend fun refreshFromRemote() {
@@ -130,34 +143,36 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun downloadModel(modelId: String, version: ModelVersion? = null) {
-        val index = _uiState.value.models.indexOfFirst { it.model.id == modelId }
-        if (index < 0) return
+        val snapshot = _uiState.value
+        val model = snapshot.models.firstOrNull { it.model.id == modelId }?.model ?: return
+        val selectedVersion = version ?: snapshot.selectedVersions[modelId]?.let { selected ->
+            model.versions.firstOrNull { it.version == selected }
+        } ?: model.resolvedVersion()
+        // 其他入口（存储清理页、另一 VM 实例）正在动这个模型时直接忽略点击
+        if (ModelOperationGate.isDownloading(context, modelId)) return
+        if (!activeDownloads.add(modelId)) return
 
-        viewModelScope.launch {
-            updateModelState(index) {
+        val job = viewModelScope.launch {
+            updateModelState(modelId) {
                 it.copy(downloadState = ModelDownloadState.Downloading(0f, 0, -1))
             }
 
             var downloadError: String? = null
-            val selectedVersion = version
-                ?: _uiState.value.selectedVersions[modelId]?.let { versionStr ->
-                    ModelManager.getModel(modelId)?.versions?.firstOrNull { it.version == versionStr }
-                }
-            ModelManager.downloadModel(context, _uiState.value.models[index].model, { state ->
+            ModelManager.downloadModel(context, model, { state ->
                 when (state) {
                     is ModelDownloadState.Downloading -> {
-                        updateModelState(index) { it.copy(downloadState = state) }
+                        updateModelState(modelId) { it.copy(downloadState = state) }
                     }
                     is ModelDownloadState.Error -> {
                         downloadError = state.message
-                        updateModelState(index) { it.copy(downloadState = state) }
+                        updateModelState(modelId) { it.copy(downloadState = state) }
                     }
                     else -> {}
                 }
             }, selectedVersion)
 
             if (downloadError != null) {
-                updateModelState(index) { it.copy(downloadState = ModelDownloadState.Idle) }
+                updateModelState(modelId) { it.copy(downloadState = ModelDownloadState.Idle) }
             } else {
                 val downloaded = withContext(Dispatchers.IO) {
                     ModelManager.isModelDownloaded(context, modelId)
@@ -169,14 +184,14 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
                 } else 0L
                 // 记录本地下载版本（用于更新检测）；下载成功但版本未知时留空
                 val actualVersion = if (downloaded) {
-                    (selectedVersion?.version ?: _uiState.value.models[index].model.resolvedVersion()?.version)
+                    selectedVersion?.version
                         ?.also {
                             withContext(Dispatchers.IO) {
                                 MarketVersionStore.setModelVersion(context, modelId, it)
                             }
                         }
                 } else null
-                updateModelState(index) {
+                updateModelState(modelId) {
                     it.copy(
                         isDownloaded = downloaded,
                         diskSize = size,
@@ -191,10 +206,17 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
                 }
             }
         }
+        job.invokeOnCompletion { activeDownloads.remove(modelId) }
     }
 
     fun deleteModel(modelId: String) {
-        viewModelScope.launch {
+        // 删除与管理层的活动下载互斥：有下载时让用户等它完成，避免「删到一半又下载」
+        if (ModelOperationGate.isDownloading(context, modelId)) {
+            _uiState.update { it.copy(toastMessage = "模型正在下载，请稍后再删除") }
+            return
+        }
+        if (!activeDownloads.add(modelId)) return
+        val job = viewModelScope.launch {
             val success = withContext(Dispatchers.IO) {
                 ModelManager.deleteModel(context, modelId)
             }
@@ -204,7 +226,7 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
                 }
                 val index = _uiState.value.models.indexOfFirst { it.model.id == modelId }
                 if (index >= 0) {
-                    updateModelState(index) {
+                    updateModelState(modelId) {
                         it.copy(isDownloaded = false, diskSize = 0, installedVersion = null)
                     }
                 }
@@ -213,20 +235,16 @@ class ModelManagementViewModel(application: Application) : AndroidViewModel(appl
                 MarketUpdateChecker.refreshNow(context)
             }
         }
+        job.invokeOnCompletion { activeDownloads.remove(modelId) }
     }
 
     fun clearToast() {
         _uiState.update { it.copy(toastMessage = null) }
     }
 
-    private fun updateModelState(index: Int, transform: (ModelItemState) -> ModelItemState) {
+    private fun updateModelState(modelId: String, transform: (ModelItemState) -> ModelItemState) {
         _uiState.update { state ->
-            val updated = state.models.toMutableList()
-            // 下载期间模型列表可能被 refresh 整体替换（长度变化），
-            // 陈旧下标越界时直接放弃本次更新
-            if (index !in updated.indices) return@update state
-            updated[index] = transform(updated[index])
-            state.copy(models = updated)
+            state.copy(models = updateModelItemsById(state.models, modelId, transform))
         }
     }
 }

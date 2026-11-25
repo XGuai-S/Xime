@@ -1,4 +1,4 @@
-﻿package com.kingzcheung.xime.settings
+package com.kingzcheung.xime.settings
 
 import android.content.Context
 import android.util.Log
@@ -358,7 +358,10 @@ object XimeIndexSource {
         }
         // 统一写入：可见目录 Documents/Xime/ 读取优先级最高，成功时以它为准并清掉私有副本
         // （单一真源）；可见目录不可用时退回私有目录，避免布局配置丢失。
-        UserConfigDir.writeCustomConfig(context, text)
+        if (!UserConfigDir.writeCustomConfig(context, text)) {
+            Log.w(TAG, "raw layout config write failed")
+            return null
+        }
         return listOf("xime.custom.yaml")
     }
 
@@ -451,9 +454,25 @@ object XimeIndexSource {
     private fun extractLayoutZip(context: Context, zipFile: File): List<String>? {
         val rimeDir = File(context.filesDir, "rime")
         if (!rimeDir.exists()) rimeDir.mkdirs()
-        val rimeCanonical = rimeDir.canonicalFile
+        val staging = ArchiveStaging.create(rimeDir)
+        return try {
+            extractLayoutZipStaged(context, zipFile, rimeDir, staging)
+        } finally {
+            staging.cleanup()
+        }
+    }
+
+    /** 先解到暂存区，确认带有配置后才整体替换进 rime 目录；没有配置的包不动 rime 目录。 */
+    private fun extractLayoutZipStaged(
+        context: Context,
+        zipFile: File,
+        rimeDir: File,
+        staging: ArchiveStaging,
+    ): List<String>? {
+        val rimeCanonical = staging.stagingDir.canonicalFile
         val written = mutableListOf<String>()
         var hasCustom = false
+        val budget = ArchiveBudget()
         java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
@@ -466,10 +485,11 @@ object XimeIndexSource {
                         rel == UserConfigDir.CUSTOM_CONFIG_FILE
                     val allowed = isConfig || rel.startsWith("themes/") || rel.startsWith("fonts/")
                     if (allowed) {
-                        val target = File(rimeDir, rel).canonicalFile
+                        val target = File(staging.stagingDir, rel).canonicalFile
                         if (target.path.startsWith(rimeCanonical.path + File.separator)) {
                             target.parentFile?.mkdirs()
-                            target.outputStream().use { out -> zis.copyTo(out) }
+                            budget.onEntry()
+                            target.outputStream().use { out -> budget.copy(zis, out) }
                             written.add(rel)
                             if (isConfig) hasCustom = true
                         } else {
@@ -479,6 +499,14 @@ object XimeIndexSource {
                 }
                 zis.closeEntry()
                 entry = zis.nextEntry
+            }
+        }
+        if (hasCustom) {
+            try {
+                staging.commit()
+            } catch (e: Exception) {
+                Log.w(TAG, "zip layout commit failed, rolled back", e)
+                return null
             }
         }
         // 解压出来的配置要落到「真源」位置：可见目录可用时以它为准并清掉私有副本，
@@ -494,7 +522,11 @@ object XimeIndexSource {
                     runCatching { File(rimeDir, name).readText().trimStart('\uFEFF') }.getOrNull()
                 }
                 .firstOrNull()
-            text?.let { UserConfigDir.writeCustomConfig(context, it) }
+            // 配置没写进真源就不能报成功：用户会看到「已安装」而布局没生效
+            if (text == null || !UserConfigDir.writeCustomConfig(context, text)) {
+                Log.w(TAG, "zip layout config write failed")
+                return null
+            }
         }
         return if (hasCustom) written else null
     }

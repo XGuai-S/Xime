@@ -14,7 +14,6 @@ object SettingsPreferences {
     private const val KEY_BUILTIN_SCHEMAS_MERGED = "builtin_schemas_merged"
     private const val KEY_PENDING_DICT_MERGE = "pending_dict_merge"
     private const val KEY_DEPLOYMENT_HASH = "deployment_hash"
-    private const val KEY_RIME_ASSETS_VERSION = "rime_assets_version"
     /** 用户已就哪一份内置基线（内容指纹）对「是否覆盖 xime.yaml」做过决定；空表示从未处理。 */
     private const val KEY_CONFIG_BASELINE = "config_baseline"
     private const val KEY_SETUP_COMPLETED = "setup_completed"
@@ -43,8 +42,6 @@ object SettingsPreferences {
     /** 按键按压气泡开关（键帽上方弹出的按键预览）。默认开，与历史行为一致。 */
     const val KEY_PRESS_BUBBLE_ENABLED = "press_bubble_enabled"
     private const val KEY_SOUND_VOLUME = "sound_volume"
-    private const val KEY_VIBRATION_ENABLED = "vibration_enabled"
-    private const val KEY_VIBRATION_INTENSITY = "vibration_intensity"
     private const val KEY_KEYBOARD_THEME = "keyboard_theme"
     
     const val KEY_SMART_PREDICTION_ENABLED = "smart_prediction_enabled"
@@ -57,7 +54,6 @@ object SettingsPreferences {
     const val KEY_STT_ONLINE_PLUGIN_ID = "stt_online_plugin_id"
     const val KEY_STT_USE_LOCAL = "stt_use_local"
     const val KEY_STT_KEEP_ENGINE_ALIVE = "stt_keep_engine_alive"
-    const val KEY_STT_DEBUG_RECORD = "stt_debug_record"
     
     /** 默认主题 ID，可从 xime.yaml 的 style.color_scheme 初始化。 */
     @JvmStatic
@@ -107,8 +103,6 @@ object SettingsPreferences {
         getPrefs(context).edit().putBoolean(KEY_HARDWARE_KEYBOARD_DETECTION_ENABLED, enabled).apply()
     }
     
-    private const val KEY_LAYOUT_PREFIX = "layout_pref_"
-    
     private const val KEY_KEYBOARD_HEIGHT_DP = "keyboard_height_dp"
     private const val KEY_KEYBOARD_HEIGHT_DP_LANDSCAPE = "keyboard_height_dp_landscape"
     // 悬浮形态的独立高度键：悬浮卡片（尤其横屏，约屏宽 38%）的可见高度与
@@ -136,7 +130,6 @@ object SettingsPreferences {
     private const val KEY_SCHEMA_IMPORT_WARNING_DISMISSED = "schema_import_warning_dismissed"
 
     private const val KEY_INSTALLED_MARKET_IDS = "installed_market_ids"
-    private const val KEY_COMPACT_MODE = "compact_mode"
     private const val KEY_SHOW_CANDIDATE_COMMENTS = "show_candidate_comments"
     private const val KEY_CANDIDATE_FIRST_IN_INPUT_BOX = "candidate_first_in_input_box"
 
@@ -147,15 +140,13 @@ object SettingsPreferences {
     private const val KEY_CANDIDATE_TEXT_SIZE = "candidate_text_size"
     const val INPUT_TEXT_INPUT_BOX = "input_box"
     const val INPUT_TEXT_CANDIDATE_BAR = "candidate_bar"
-    const val DEFAULT_PAGE_SIZE = 20 // 手机候选栏每页候选词数；schema 里的 page_size 来自 PC 版（5），太短，默认用 20
+    const val DEFAULT_PAGE_SIZE = 20
+    const val MIN_PAGE_SIZE = 5
+    const val MAX_PAGE_SIZE = 50
 
-    fun isCompactModeEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_COMPACT_MODE, true)
-    }
-
-    fun setCompactModeEnabled(context: Context, enabled: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_COMPACT_MODE, enabled).apply()
-    }
+    internal fun pageSizeSliderValue(storedValue: Int): Float =
+        (if (storedValue == 0) DEFAULT_PAGE_SIZE else storedValue)
+            .coerceIn(MIN_PAGE_SIZE, MAX_PAGE_SIZE).toFloat()
 
     fun showCandidateComments(context: Context): Boolean {
         return getPrefs(context).getBoolean(KEY_SHOW_CANDIDATE_COMMENTS, true)
@@ -319,15 +310,6 @@ object SettingsPreferences {
 
     fun setDeploymentHash(context: Context, hash: String) {
         getPrefs(context).edit().putString(KEY_DEPLOYMENT_HASH, hash).apply()
-    }
-
-    /** 上次完成 rime assets 同步的 versionCode（0 表示从未同步）。 */
-    fun getRimeAssetsVersion(context: Context): Int {
-        return getPrefs(context).getInt(KEY_RIME_ASSETS_VERSION, 0)
-    }
-
-    fun setRimeAssetsVersion(context: Context, version: Int) {
-        getPrefs(context).edit().putInt(KEY_RIME_ASSETS_VERSION, version).apply()
     }
 
     /**
@@ -501,21 +483,6 @@ object SettingsPreferences {
         getPrefs(context).edit().putInt(KEY_SOUND_VOLUME, volume).apply()
     }
     
-    fun isVibrationEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_VIBRATION_ENABLED, true)
-    }
-    
-    fun setVibrationEnabled(context: Context, enabled: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_VIBRATION_ENABLED, enabled).apply()
-    }
-    
-    fun getVibrationIntensity(context: Context): Int {
-        return getPrefs(context).getInt(KEY_VIBRATION_INTENSITY, 30)
-    }
-    
-    fun setVibrationIntensity(context: Context, intensity: Int) {
-        getPrefs(context).edit().putInt(KEY_VIBRATION_INTENSITY, intensity).apply()
-    }
 
 
     private const val KEY_HAPTIC_MODE = "haptic_mode"
@@ -685,15 +652,6 @@ object SettingsPreferences {
         getPrefs(context).edit().putBoolean(KEY_STT_KEEP_ENGINE_ALIVE, enabled).apply()
     }
 
-    /** 是否把语音识别期间的录音写入文件（调试用）。 */
-    fun isSttDebugRecord(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_STT_DEBUG_RECORD, false)
-    }
-
-    fun setSttDebugRecord(context: Context, enabled: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_STT_DEBUG_RECORD, enabled).apply()
-    }
-
     // ---- 插件网络授权（per plugin per host） ----
 
     /** 插件已获用户授权的域名集合。 */
@@ -739,6 +697,21 @@ object SettingsPreferences {
     /** 清除插件的全部待授权记录。 */
     fun clearPluginPendingHosts(context: Context, pluginId: String) {
         getPrefs(context).edit().putString("plugin_net_pending_$pluginId", "").apply()
+    }
+
+    /**
+     * 卸载插件时清空它的全部持久化痕迹：网络授权、待授权、插件配置。
+     *
+     * 不清的话「卸载」并没有真正撤销授权——重新安装同 id 的包（哪怕是来源不明的 xipk）
+     * 会直接继承原插件的已授权域名与配置，用户以为已经清干净了。
+     */
+    fun clearPluginPersistence(context: Context, pluginId: String) {
+        getPrefs(context).edit()
+            .remove("plugin_net_auth_$pluginId")
+            .remove("plugin_net_pending_$pluginId")
+            .apply()
+        // 插件配置是独立 SharedPreferences 文件（见 PluginConfigStoreImpl）
+        runCatching { context.deleteSharedPreferences("plugin_cfg_$pluginId") }
     }
     
     /** 横屏时是否使用分体键盘，默认关闭，由用户按需开启。 */
@@ -812,16 +785,6 @@ object SettingsPreferences {
             editor.putString(key, message).putLong(atKey, System.currentTimeMillis())
         }
         editor.apply()
-    }
-    
-    /** 获取方案偏好的键盘布局，默认全键盘 */
-    fun getLayoutPreference(context: Context, schemaId: String): String {
-        return getPrefs(context).getString("$KEY_LAYOUT_PREFIX$schemaId", "full") ?: "full"
-    }
-    
-    /** 保存方案偏好的键盘布局 */
-    fun setLayoutPreference(context: Context, schemaId: String, layout: String) {
-        getPrefs(context).edit().putString("$KEY_LAYOUT_PREFIX$schemaId", layout).apply()
     }
     
     /**
@@ -1077,9 +1040,18 @@ object SettingsPreferences {
 
     const val KEY_CLIPBOARD_SYNC_ENABLED = "clipboard_sync_enabled"
     const val KEY_CLIPBOARD_SYNC_PLUGIN_ID = "clipboard_sync_plugin_id"
+    const val KEY_CLIPBOARD_BACKUP_ENABLED = "backup_clipboard_enabled"
+
+    fun isClipboardBackupEnabled(context: Context): Boolean =
+        getPrefs(context).getBoolean(KEY_CLIPBOARD_BACKUP_ENABLED, ClipboardCloudPolicy.DEFAULT_BACKUP_ENABLED)
+
+    fun setClipboardBackupEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_CLIPBOARD_BACKUP_ENABLED, enabled).apply()
+    }
 
     fun isClipboardSyncEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_CLIPBOARD_SYNC_ENABLED, false)
+        val savedEnabled = getPrefs(context).getBoolean(KEY_CLIPBOARD_SYNC_ENABLED, false)
+        return ClipboardCloudPolicy.isLegacyRealtimeSyncEnabled(savedEnabled)
     }
 
     fun setClipboardSyncEnabled(context: Context, enabled: Boolean) {

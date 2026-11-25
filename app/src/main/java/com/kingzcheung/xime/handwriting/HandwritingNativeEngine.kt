@@ -57,11 +57,14 @@ object HandwritingNativeEngine {
     }
 
     fun initialize(context: Context, modelPath: String): Boolean {
+        // 库已随进程加载时先走这条快路径。**必须采纳 native 返回值**：
+        // 模型损坏/不兼容时 native 会返回 false，旧实现无条件置 nativeReady=true，
+        // 于是一个"假成功"的引擎会一直返回空预测（手写面板看着在跑却永远不出字）。
         try {
-            nativeInitialize(modelPath)
-            nativeReady = true
-            return true
+            nativeReady = nativeInitialize(modelPath)
+            return nativeReady
         } catch (e: UnsatisfiedLinkError) {
+            nativeReady = false
         }
         if (!loadNativeLibrary(context)) {
             Log.e(TAG, "Native libraries not loaded")

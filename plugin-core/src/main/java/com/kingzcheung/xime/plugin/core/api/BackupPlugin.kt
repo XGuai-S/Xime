@@ -45,6 +45,19 @@ data class BackupDownload(
 )
 
 /**
+ * 远端单个文件的元信息（文件级增量备份用）。
+ *
+ * @param path   远端相对路径（如 `rime/user.yaml`、`clipboard/images/ab12.png`），与宿主本地清单同构
+ * @param sha256 内容哈希（小写十六进制）；插件不支持返回哈希时为空串，宿主会退化为「大小相同即视为不变」的保守判断
+ * @param size   字节数
+ */
+data class RemoteFileEntry(
+    val path: String,
+    val sha256: String = "",
+    val size: Long = -1L
+)
+
+/**
  * 备份插件能力接口（宿主侧，由 JS 适配器实现，协议逻辑在 JS）。
  *
  * 分工与 [ClipboardSyncPlugin] 一致：备份包的**生成与恢复**（zip 打包、路径校验、
@@ -92,4 +105,51 @@ interface BackupPlugin : IPluginEntryClass, IPluginConfigurable {
 
     /** 校验配置可用性（连接测试），返回错误消息（null 表示成功）。 */
     suspend fun testConnection(): String?
+
+    // ------------------------------------------------------------------
+    // 文件级增量备份（v3.1 新增）
+    //
+    // 默认实现返回「不支持」，宿主会自动回退到整包 [pushBackup] 路径——
+    // 老插件（只实现了上面五个方法）不需要改代码也能继续工作。
+    //
+    // 为什么值得做：整包模式下每次备份都要重传几十 MB 的 zip，哪怕只改了几个词；
+    // 文件级模式按内容哈希只传变化的文件，且直接传**原始文件**，
+    // 恢复时逐文件写回，不需要先导出再合并 userdb 文本快照。
+    // ------------------------------------------------------------------
+
+    /**
+     * 是否支持文件级增量备份。
+     *
+     * 宿主据此选择走增量还是整包。返回 false 时后面四个方法不会被调用。
+     */
+    fun supportsFileLevel(): Boolean = false
+
+    /**
+     * 列出远端已存文件。
+     *
+     * @return 文件列表；远端目录不存在时返回**空列表**（不是 null）。
+     *   null 表示"查询失败"，宿主会放弃本次增量并回退整包，不会误判成"远端全空"而重传所有文件。
+     */
+    suspend fun listRemoteFiles(): List<RemoteFileEntry>? = null
+
+    /**
+     * 上传单个文件（覆盖同名）。
+     *
+     * @param path   远端相对路径，插件可自行附加目录前缀
+     * @param file   宿主已落盘的临时文件（**所有权归调用方**，实现方只登记句柄、不删除）
+     * @param sha256 文件内容哈希，宿主已算好；插件可存进远端元数据供下次比对，不要求
+     */
+    suspend fun pushFile(path: String, file: java.io.File, sha256: String): BackupResult =
+        BackupResult(ok = false, message = "插件不支持文件级备份")
+
+    /**
+     * 下载单个文件到宿主缓存。
+     *
+     * @param path 远端相对路径
+     * @return 落盘产物（含 blob 句柄）；失败返回 null
+     */
+    suspend fun pullFile(path: String): BackupDownload? = null
+
+    /** 删除远端单个文件；文件不存在也视为成功。 */
+    suspend fun deleteRemoteFile(path: String): Boolean = false
 }

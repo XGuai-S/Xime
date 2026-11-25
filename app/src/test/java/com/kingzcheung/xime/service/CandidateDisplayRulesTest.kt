@@ -122,6 +122,159 @@ class CandidateDisplayRulesTest {
         assertEquals("ji", resolveT9RawPreedit(preeditText = "ji5", inputText = "ji5", lastPreedit = "ji"))
     }
 
+    // ---------- 顶屏词与候选栏首词对齐 ----------
+
+    /**
+     * 回归：反馈「自动顶屏没有顶候选栏首码，顶的是次选」。
+     *
+     * 满码顶屏由 librime 直接 commit 它自己的首选；候选栏展示的是重排后的顺序。
+     * 两者不一致时必须改以用户看到的首词上屏。
+     */
+    @Test
+    fun `顶屏提交的是候选栏第二条时改以首词上屏`() {
+        assertEquals(
+            "你",
+            resolveAutoCommitTop(
+                committed = "尼",
+                displayedCandidates = listOf("你", "尼", "泥"),
+                isAsciiMode = false,
+                preKeyCodeLength = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun `顶屏提交的词就是候选栏首词时原样返回`() {
+        assertEquals(
+            "你",
+            resolveAutoCommitTop(
+                committed = "你",
+                displayedCandidates = listOf("你", "尼"),
+                isAsciiMode = false,
+                preKeyCodeLength = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun `编码未满时不得用上一屏首词替换 那是更长编码新算出的词`() {
+        // 前缀命中：打 3 码时候选里有 A，第 4 码引擎算出别的词并提交。
+        // 若拿上一屏首词覆盖，会把用户没打完的词顶出去。
+        assertEquals(
+            "新算出的词",
+            resolveAutoCommitTop(
+                committed = "新算出的词",
+                displayedCandidates = listOf("上一屏首词", "新算出的词"),
+                isAsciiMode = false,
+                preKeyCodeLength = 3,
+            ),
+        )
+    }
+
+    @Test
+    fun `提交的词不在按键前那一屏里时不得改写`() {
+        assertEquals(
+            "别的词",
+            resolveAutoCommitTop(
+                committed = "别的词",
+                displayedCandidates = listOf("你", "尼"),
+                isAsciiMode = false,
+                preKeyCodeLength = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun `英文模式不改写提交词`() {
+        assertEquals(
+            "b",
+            resolveAutoCommitTop(
+                committed = "b",
+                displayedCandidates = listOf("a", "b"),
+                isAsciiMode = true,
+                preKeyCodeLength = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun `空提交与空候选都原样返回 不越界不改写`() {
+        assertEquals("", resolveAutoCommitTop("", listOf("你"), isAsciiMode = false, preKeyCodeLength = 4))
+        assertEquals("你", resolveAutoCommitTop("你", emptyList(), isAsciiMode = false, preKeyCodeLength = 4))
+    }
+
+    @Test
+    fun `候选栏首词为空串时不改写`() {
+        assertEquals(
+            "尼",
+            resolveAutoCommitTop(
+                committed = "尼",
+                displayedCandidates = listOf("", "尼"),
+                isAsciiMode = false,
+                preKeyCodeLength = 4,
+            ),
+        )
+    }
+
+    // ---------- 上屏实际消费的编码 ----------
+
+    /**
+     * 回归：反馈「排序后没有更新状态」。
+     *
+     * 满码后的这一键是顶字上屏，消费的是**上一键已成型**的那段编码；把本键拼进去
+     * 会记成 5 码，4 码的词频永远涨不上去，排序也就不动。
+     */
+    @Test
+    fun `满码后按键 消费的是上一键已成型的编码 不含本键`() {
+        assertEquals("hckj", resolveConsumedCode(preKeyInput = "hckj", key = "a"))
+    }
+
+    @Test
+    fun `编码未满时按键 消费的是编码加本键`() {
+        assertEquals("hck", resolveConsumedCode(preKeyInput = "hc", key = "k"))
+        assertEquals("hckj", resolveConsumedCode(preKeyInput = "hck", key = "j"))
+    }
+
+    @Test
+    fun `编码为空时 消费的就是本键`() {
+        assertEquals("h", resolveConsumedCode(preKeyInput = "", key = "h"))
+    }
+
+    @Test
+    fun `编码为空且本键非单字符时返回 null 由调用方回退 UI 快照`() {
+        assertEquals(null, resolveConsumedCode(preKeyInput = "", key = ""))
+    }
+
+    @Test
+    fun `非单字符键不改写已有编码`() {
+        assertEquals("hckj", resolveConsumedCode(preKeyInput = "hckj", key = "shift"))
+        assertEquals("hck", resolveConsumedCode(preKeyInput = "hck", key = ""))
+    }
+
+    @Test
+    fun `本键大写时按小写记录编码`() {
+        assertEquals("hck", resolveConsumedCode(preKeyInput = "hc", key = "K"))
+    }
+
+    @Test
+    fun `满码边界与 PUSH_OUT_MIN_CODE_LENGTH 一致`() {
+        // 恰好达到满码长度：走「已满」分支，不含本键。
+        val full = "hckj".take(PUSH_OUT_MIN_CODE_LENGTH)
+        assertEquals(PUSH_OUT_MIN_CODE_LENGTH, full.length)
+        assertEquals(full, resolveConsumedCode(preKeyInput = full, key = "x"))
+
+        // 少一码：走拼接分支，本键算进本段编码。
+        val oneShort = "hckj".take(PUSH_OUT_MIN_CODE_LENGTH - 1)
+        assertEquals(oneShort.length, PUSH_OUT_MIN_CODE_LENGTH - 1)
+        assertEquals(oneShort + "x", resolveConsumedCode(preKeyInput = oneShort, key = "x"))
+
+        // 两者结果必须不同：同一条编码不能既算「上一段」又算「本段」，否则顶屏记账会错。
+        assertFalse(
+            resolveConsumedCode(preKeyInput = full, key = "x") ==
+                resolveConsumedCode(preKeyInput = oneShort, key = "x"),
+        )
+    }
+
     // ---------- 候选排序应用条件 ----------
 
     @Test

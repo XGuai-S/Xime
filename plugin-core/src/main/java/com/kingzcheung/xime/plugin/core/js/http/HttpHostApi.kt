@@ -29,7 +29,8 @@ interface HttpHostApi {
      * @param headers 请求头（如 Authorization、Content-Type、If-None-Match）
      * @param body    请求体（文本转 UTF-8 字节，二进制原始字节；GET 可为 null）
      * @param timeoutMillis 覆盖默认超时（毫秒）。AI 长生成等场景可声明更长
-     *                      超时；null 使用宿主默认（connect 10s / read 30s / write 30s）
+     *                      超时，但**受宿主上限截断**（见 JsScriptRuntime.MAX_HTTP_TIMEOUT_MS，
+     *                      当前 120s）；null 使用宿主默认（connect 10s / read 30s / write 30s）
      * @return 响应；URL 被拒绝或请求失败时返回 null（用 [lastError] 读取原因）
      */
     fun request(
@@ -80,6 +81,25 @@ interface HttpHostApi {
 
     /** 最近一次拒绝/失败原因（request 返回 null 时 JS 侧 XimeError.message 数据源）。 */
     fun lastError(): String?
+
+    /**
+     * 释放一个宿主 blob 句柄（幂等：未知 id 直接成功）。
+     *
+     * 插件侧入口是 `await host.http.releaseBlob(blobId)`。**必须**提供这个入口：
+     * blob 句柄是跨插件共享的有限槽位（[BlobStore] 实现通常限 32 个句柄），
+     * 而 [download] 的 2xx 响应体天然落盘为句柄——只下载不释放的插件会把槽位占满，
+     * 之后**所有**插件的 download / backup.pull 都会失败（`blob 句柄已达上限`）。
+     *
+     * @return true = 已处理（含 id 不存在）
+     */
+    fun releaseBlob(blobId: String): Boolean = false
+
+    /**
+     * 回收当前插件名下的全部 blob 句柄（插件卸载 / 运行时关闭时由宿主调用）。
+     *
+     * @return 被回收的句柄数
+     */
+    fun releaseAllBlobs(): Int = 0
 
     /**
      * 最近一次失败的结构化错误码（`E_*`，JS 侧 XimeError.code 数据源）。

@@ -12,6 +12,8 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.kingzcheung.xime.clipboard.ClipboardItem
 import com.kingzcheung.xime.clipboard.MediaBridge
+import com.kingzcheung.xime.clipboard.OtpClipboardPolicy
+import com.kingzcheung.xime.service.otp.OtpCollector
 import java.io.File
 import java.io.FileInputStream
 import kotlinx.coroutines.Dispatchers
@@ -26,32 +28,29 @@ import kotlinx.coroutines.withContext
  */
 internal class ImeTextCommit(private val service: XimeInputMethodService) {
     internal fun performUndo() {
-        val currentTextBeforeCursor = service.currentInputConnection?.getTextBeforeCursor(1000, 0)?.toString() ?: ""
-        val currentLength = currentTextBeforeCursor.length
-        
-        // 双向钳制：差值可能因 textLengthBeforeVoiceInput 未同步而异常大，
-        // 也可能为负（用户手工删过），两者都不该导致「删过头」或空循环。
-        val charsToDelete = (currentLength - service.voiceRecognitionHandler.textLengthBeforeVoiceInput)
-            .coerceIn(0, currentLength)
-
-        if (charsToDelete > 0) {
-            // 一次 deleteSurroundingText 替代逐字符发 DEL 键。
-            //
-            // 旧实现每字符发 DOWN+UP 两个跨进程调用：语音输入 200 字后点撤销 =
-            // 400 次 Binder 往返 + 宿主 200 次重排，主线程冻结数百 ms 到数秒，
-            // 宿主 undo 栈也被塞满。同文件的 deleteClipboardChars 已经是正确写法。
-            val deleted = service.currentInputConnection?.deleteSurroundingText(charsToDelete, 0)
-            if (deleted == false) {
-                // 宿主不支持批量删除时退回逐字符（保底可用，但只在少数宿主发生）
-                for (i in 0 until charsToDelete) {
-                    service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
-                    service.currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
-                }
-            }
+        val voice = service.voiceRecognitionHandler
+        val connection = service.currentInputConnection
+        val expected = voice.textWrittenByVoiceInput
+        val queryLength = (voice.voiceInputPrefixAnchor.length.toLong() + expected.length.toLong())
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val currentTail = if (queryLength == 0) null else runCatching {
+            connection?.getTextBeforeCursor(queryLength, 0)?.toString()
+        }.getOrNull()
+        val charsToDelete = voiceUndoLength(
+            expectedText = expected,
+            prefixAnchor = voice.voiceInputPrefixAnchor,
+            currentTextBeforeCursor = currentTail,
+            sameConnection = connection != null && connection === voice.voiceInputConnection &&
+                runCatching { connection.getSelectedText(0).isNullOrEmpty() }.getOrDefault(false),
+        )
+        if (charsToDelete > 0 && connection != null && connection.finishComposingText()) {
+            val unchanged = runCatching {
+                connection.getSelectedText(0).isNullOrEmpty() &&
+                    connection.getTextBeforeCursor(queryLength, 0)?.toString() == currentTail
+            }.getOrDefault(false)
+            if (unchanged) connection.deleteSurroundingText(charsToDelete, 0)
         }
-        
-        service.voiceRecognitionHandler.textBeforeVoiceInput = ""
-        service.voiceRecognitionHandler.textLengthBeforeVoiceInput = 0
+        voice.clearUndoBookkeeping()
     }
     
     internal fun performSearch() {
@@ -159,6 +158,29 @@ internal class ImeTextCommit(private val service: XimeInputMethodService) {
      * @param id 被点选条目的 id（有则按 id 精确标记已消费；null 走按文本兜底匹配）
      */
     internal fun selectClipboardItem(text: String, id: Long? = null) {
+        val selected = if (id != null) {
+            service.clipboardManager.clipboardItems.value.firstOrNull { it.id == id && it.text == text }
+                ?: return
+        } else null
+        if (selected?.isOtp == true) {
+            if (!OtpClipboardPolicy.isFresh(selected.timestamp, System.currentTimeMillis())) return
+            if (service.uiState.value.quickSendFormFocused || service.uiState.value.toolPanelInputFocused ||
+                service.uiState.value.clipboardSearchFocused
+            ) return
+            val connection = service.currentInputConnection ?: return
+            if (service.candidateState.value.isComposing) {
+                service.keyRouter.postRimeJob {
+                    service.rimeEngine.clearComposition()
+                    withContext(Dispatchers.Main) { service.updateUI() }
+                }
+            }
+            if (connection.commitText(text, 1)) {
+                service.closeClipboardCandidateBar()
+                service.clipboardManager.markConsumedExact(selected.id)
+                OtpCollector.consume(text)
+            }
+            return
+        }
         if (service.candidateState.value.isComposing) {
             service.keyRouter.postRimeJob {
                 service.rimeEngine.clearComposition()

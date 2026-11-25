@@ -57,12 +57,12 @@ object PersonalDictManager {
         val file = getCustomPhraseFile(context, schemaId)
         if (!file.exists()) {
             file.parentFile?.mkdirs()
-            file.writeText("""# Rime table
+            writeFileAtomically(file, """# Rime table
 # coding: utf-8
 #@/db_name	custom_phrase
 #@/db_type	tabledb
 #
-""", Charsets.UTF_8)
+""")
         }
     }
 
@@ -105,27 +105,12 @@ object PersonalDictManager {
      * rename 保证任一方读到的都是完整文件。
      */
     internal fun writeFileAtomically(file: File, text: String) {
-        runCatching {
-            file.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            java.io.FileOutputStream(tmp).use { out ->
-                out.write(text.toByteArray(Charsets.UTF_8))
-                out.flush()
-                out.fd.sync()
-            }
-            if (!tmp.renameTo(file)) {
-                tmp.copyTo(file, overwrite = true)
-                tmp.delete()
-            }
-            return
-        }.onFailure {
+        if (!com.kingzcheung.xime.util.AtomicFileWriter.write(file, text)) {
             com.kingzcheung.xime.util.FileLogger.w(
                 "PersonalDict",
-                "原子写失败，退回覆盖写: ${file.absolutePath} ${it.message}",
-                it,
+                "原子写失败: ${file.absolutePath}",
             )
         }
-        runCatching { file.writeText(text, Charsets.UTF_8) }
     }
 
     /** 清理 custom_phrase 文件（仅当文件为空时删除，避免丢失用户数据）。 */
@@ -170,12 +155,12 @@ object PersonalDictManager {
         val phraseFile = File(rimeDir, "$dictName.txt")
         if (!phraseFile.exists()) {
             phraseFile.parentFile?.mkdirs()
-            phraseFile.writeText("""# Rime table
+            writeFileAtomically(phraseFile, """# Rime table
 # coding: utf-8
 #@/db_name	custom_phrase
 #@/db_type	tabledb
 #
-""", Charsets.UTF_8)
+""")
         }
         // 有实际条目时才注入翻译器，避免 Rime 因空 .table.bin 报错
         if (phraseFile.readText(Charsets.UTF_8).lineSequence().count { it.isNotBlank() && !it.startsWith('#') } > 0) {
@@ -204,7 +189,7 @@ object PersonalDictManager {
             .replace(Regex("\n{3,}"), "\n\n")
             .trimEnd('\n', '\r', ' ') + "\n"
         if (cleaned != text) {
-            customFile.writeText(cleaned, Charsets.UTF_8)
+            writeFileAtomically(customFile, cleaned)
         }
     }
 
@@ -230,7 +215,7 @@ object PersonalDictManager {
     /** 在 YAML 的 `patch:` 块下增量插入内容，不覆盖已有配置。 */
     private fun insertUnderPatch(file: java.io.File, content: String) {
         if (!file.exists()) {
-            file.writeText("patch:\n$content", Charsets.UTF_8)
+            writeFileAtomically(file, "patch:\n$content")
             return
         }
         val text = file.readText(Charsets.UTF_8)
@@ -238,9 +223,9 @@ object PersonalDictManager {
         val patchLine = Regex("^patch:", RegexOption.MULTILINE).find(cleaned)
         if (patchLine != null) {
             val at = patchLine.range.last + 1
-            file.writeText(cleaned.substring(0, at) + "\n$content" + cleaned.substring(at) + "\n", Charsets.UTF_8)
+            writeFileAtomically(file, cleaned.substring(0, at) + "\n$content" + cleaned.substring(at) + "\n")
         } else {
-            file.writeText("$cleaned\n\npatch:\n$content", Charsets.UTF_8)
+            writeFileAtomically(file, "$cleaned\n\npatch:\n$content")
         }
     }
 

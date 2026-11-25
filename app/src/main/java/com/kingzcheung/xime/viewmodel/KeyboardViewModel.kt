@@ -662,13 +662,13 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
         clipboardManager.addToQuickSend(id)
     }
 
-    fun addQuickSendText(text: String, code: String = "") {
+    /** @return false = 被拒绝（空白或含高风险凭据），调用方需提示用户 */
+    fun addQuickSendText(text: String, code: String = ""): Boolean =
         clipboardManager.addQuickSendItem(text, code)
-    }
 
-    fun updateQuickSendItem(id: Long, text: String, code: String = "") {
+    /** @return false = 被拒绝（空白或含高风险凭据），调用方需提示用户 */
+    fun updateQuickSendItem(id: Long, text: String, code: String = ""): Boolean =
         clipboardManager.updateQuickSendItem(id, text, code)
-    }
 
     fun removeQuickSendItem(id: Long) {
         clipboardManager.removeFromQuickSend(id)

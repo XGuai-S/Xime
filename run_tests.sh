@@ -1,14 +1,16 @@
 #!/bin/bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 echo "================================"
 echo "Xime 测试运行脚本"
 echo "================================"
 echo ""
 
-case "$1" in
+case "${1:-}" in
     "unit")
         echo "运行单元测试..."
-        ./gradlew :app:testDebugUnitTest
+        ./gradlew :app:testDebugUnitTest :plugin-core:testDebugUnitTest
         ;;
     "instrumented")
         echo "运行仪器测试（需要连接设备或模拟器）..."
@@ -16,7 +18,7 @@ case "$1" in
         ;;
     "all")
         echo "运行所有测试..."
-        ./gradlew :app:testDebugUnitTest
+        ./gradlew :app:testDebugUnitTest :plugin-core:testDebugUnitTest
         ./gradlew :app:connectedDebugAndroidTest
         ;;
     "coverage")

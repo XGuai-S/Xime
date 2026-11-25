@@ -1281,6 +1281,37 @@ class VoiceController(
         }
     }
 
+    /**
+     * 会话结束/服务销毁时的静默清理：停录音、清状态，但**不**给按键反馈。
+     *
+     * 与 [cancelRecordingOrProcessing] 的区别只有「不震动/不发声」——
+     * 用户切走应用时不该突然震一下，那是主动取消才有的反馈。
+     */
+    fun releaseForSessionEnd() {
+        micPressDownTimeMs = 0L
+        handsFreeSilenceJob?.cancel()
+        handsFreeSilenceJob = null
+        abortActiveStreamingSession()
+        activeComposer?.cancelSession(rollbackWrittenText = true)
+        activeComposer = null
+        activePipelineJob?.cancel()
+        activePipelineJob = null
+        val audioRecorder = runCatching { recorder }.getOrNull()
+        if (audioRecorder != null) {
+            host.scope.launch { runCatching { audioRecorder.cancelRecording() } }
+        }
+        host.stateFlow.update {
+            it.copy(
+                voicePhase = VoicePhase.Idle,
+                isArcTranslateActive = false,
+                arcStartedFromHandsFree = false,
+                isArcCancelHovered = false,
+                streamingPartialPreview = "",
+                liveWriteStatus = LiveWriteUiStatus.INACTIVE
+            )
+        }
+    }
+
     fun cancelRecordingOrProcessing() {
         host.performKeyFeedback(strong = false)
         micPressDownTimeMs = 0L
@@ -2177,8 +2208,34 @@ class VoiceController(
         scheduleToastReset()
     }
 
-    fun replaceFullEditorTextSafely(finalOutput: String, originalText: String = "") {
-        val ic = host.currentInputConnection()
+    /**
+     * 编辑器会话票：AI 请求发起瞬间固定输入连接。
+     *
+     * AI 请求走应用级 scope（分钟级网络调用），期间用户可能切到别的输入框。
+     * 若回填时直接取 `currentInputConnection()`，整框替换会落进新框——
+     * 把用户正在写的内容整个删掉重写。因此把入队时的连接记下来，回填前复核。
+     */
+    class EditorTicket internal constructor(val connection: android.view.inputmethod.InputConnection?)
+
+    /** 捕获当前编辑器票。 */
+    internal fun captureEditorTicket(): EditorTicket = EditorTicket(host.currentInputConnection())
+
+    /** 票是否仍属于当前编辑器（连接对象未被替换）。 */
+    internal fun isEditorTicketCurrent(ticket: EditorTicket): Boolean =
+        ticket.connection != null && host.currentInputConnection() === ticket.connection
+
+    fun replaceFullEditorTextSafely(
+        finalOutput: String,
+        originalText: String = "",
+        editorTicket: EditorTicket? = null,
+    ) {
+        // 迟到结果保护：请求发起时的输入框已不是当前输入框时，丢弃整框替换。
+        // 不传票（面板内的即时调用）沿用原行为，由调用点自行保证同会话。
+        if (editorTicket != null && !isEditorTicketCurrent(editorTicket)) {
+            FileLogger.w(TAG, "replaceFullEditorText dropped: editor switched during request")
+            return
+        }
+        val ic = editorTicket?.connection ?: host.currentInputConnection()
         val currentFull = originalText.ifEmpty { host.readFullEditorTextSafely() }
         if (ic != null) {
             ic.beginBatchEdit()
@@ -2219,6 +2276,57 @@ class VoiceController(
         lastHelpWriteOutput = null
     }
 
+    /**
+     * 换输入框：取消仍在路上的 AI 帮写请求。
+     *
+     * 只清原文基准不够——请求已在网络往返，回来时仍会走整框替换。
+     * 与之配套的 [replaceFullEditorTextSafely] 会复核编辑器票，这里再主动作废，
+     * 避免旧请求的回填把新输入框的内容整段覆盖。
+     */
+    fun cancelPendingHelpWrite() {
+        activePipelineJob?.cancel()
+        activePipelineJob = null
+        resetHelpWriteBase()
+    }
+
+    /**
+     * 服务销毁：取消本控制器挂在应用级 scope 上的全部任务与流式会话。
+     *
+     * ⚠️ 必须一并停掉录音：`recorder` 是 `by lazy` 的单例，服务销毁时若正在录音，
+     * 只取消协程 Job 不会释放 AudioRecord，麦克风与音频焦点会一直被占用
+     * （用户表现为「语音说完后其他应用录不到音 / 麦克风被占」）。
+     * `cancelRecording()` 内部会 stop + release AudioRecord 并放弃 audio focus。
+     */
+    fun dispose() {
+        runCatching { toastDismissJob?.cancel() }
+        runCatching { handsFreeSilenceJob?.cancel() }
+        runCatching { streamingPreviewJob?.cancel() }
+        runCatching { chatScreenshotJob?.cancel() }
+        runCatching { jevInferenceJob?.cancel() }
+        runCatching { askAiJob?.cancel() }
+        runCatching { abortActiveStreamingSession() }
+        runCatching { activeComposer?.cancelSession(rollbackWrittenText = false) }
+        activeComposer = null
+        activePipelineJob?.cancel()
+        activePipelineJob = null
+        toastDismissJob = null
+        handsFreeSilenceJob = null
+        streamingPreviewJob = null
+        chatScreenshotJob = null
+        jevInferenceJob = null
+        askAiJob = null
+        // 释放麦克风：必须放在最后，且用 runBlocking 等它真正停掉——
+        // 本方法是服务销毁路径的同步收尾，没有后续时机再来补。
+        runCatching {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                    recorder.cancelRecording()
+                }
+            }
+        }
+        resetHelpWriteBase()
+    }
+
     fun runHelpWriteDraftTransform(preset: HelpWritePromptPreset) {
         val currPhase = host.stateFlow.value.voicePhase
         FileLogger.d(TAG, "draftTransform click: preset=${preset.id} phase=${currPhase::class.simpleName}")
@@ -2235,6 +2343,8 @@ class VoiceController(
         toastDismissJob?.cancel()
         activePipelineJob?.cancel()
 
+        // 请求发起瞬间固定编辑器：网络往返期间切框后，成稿不能再整框写进新输入框。
+        val helpWriteTicket = captureEditorTicket()
         activePipelineJob = host.scope.launch {
             val settings = host.repository.settings.value
             val snapshot = host.stateFlow.value
@@ -2283,7 +2393,11 @@ class VoiceController(
                 onSuccess = { exec ->
                     val finalOutput = exec.finalOutput
                     lastHelpWriteOutput = finalOutput
-                    replaceFullEditorTextSafely(finalOutput = finalOutput, originalText = currentDraft)
+                    replaceFullEditorTextSafely(
+                        finalOutput = finalOutput,
+                        originalText = currentDraft,
+                        editorTicket = helpWriteTicket,
+                    )
                     host.stateFlow.update {
                         it.copy(
                             voicePhase = VoicePhase.SuccessToast(

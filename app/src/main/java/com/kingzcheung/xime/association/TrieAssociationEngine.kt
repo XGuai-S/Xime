@@ -24,7 +24,9 @@ data class TrieNodeData(
  */
 class TrieAssociationEngine {
     private var nodes: Array<TrieNodeData>? = null
+    @Volatile
     private var isInitialized = false
+    @Volatile
     private var cachedContext: Context? = null
 
     @Volatile
@@ -36,6 +38,7 @@ class TrieAssociationEngine {
         private const val TEXT_FILE = "english.txt"
         private var instance: TrieAssociationEngine? = null
 
+        @Synchronized
         fun getInstance(): TrieAssociationEngine {
             return instance ?: TrieAssociationEngine().also { instance = it }
         }
@@ -46,7 +49,8 @@ class TrieAssociationEngine {
      * 服务启动仍会调用本方法，但不再立即展开 Trie 占用内存。
      */
     suspend fun initialize(context: Context): Boolean = withContext(Dispatchers.IO) {
-        cachedContext = context
+        // 单例长期持有：只存应用上下文，避免钉住已销毁的输入法服务
+        cachedContext = context.applicationContext
         isInitialized = true
         Log.i(TAG, "Trie engine marked lazily-initializable (load deferred to first recall)")
         true

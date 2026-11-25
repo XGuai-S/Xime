@@ -137,6 +137,18 @@ internal object WordFreqStore {
         if (candidates.isEmpty() || code.isEmpty()) return null
         val frequency = table[code] ?: return null
         if (frequency.isEmpty()) return null
+        // 已按权重排列时不创建排序副本，等权保持原候选顺序。
+        var previousWeight = Int.MAX_VALUE
+        var needsReorder = false
+        for (candidate in candidates) {
+            val weight = frequency[candidate] ?: Int.MIN_VALUE
+            if (weight > previousWeight) {
+                needsReorder = true
+                break
+            }
+            previousWeight = weight
+        }
+        if (!needsReorder) return null
 
         val order = candidates.withIndex().sortedWith(
             compareByDescending<IndexedValue<String>> { frequency[it.value] ?: Int.MIN_VALUE }
@@ -298,10 +310,17 @@ internal object WordFreqStore {
         val changed = !dictFile.exists() || dictFile.readText() != text
         if (changed) {
             dictFile.parentFile?.mkdirs()
-            dictFile.writeText(text)
+            // 原子写：输入法随时可能被 LMK 杀，writeText 会留下半截词典导致词频清零。
+            // 返回值是「内容是否变化」，不代表写盘成功；失败时补一条日志，
+            // 否则调用方以为已落盘、下次重启才发现词频回退却查不到原因。
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(dictFile, text)) {
+                com.kingzcheung.xime.util.FileLogger.w("WordFreqStore", "词频落盘失败: ${dictFile.absolutePath}")
+            }
             runCatching {
                 visible.parentFile?.mkdirs()
-                visible.writeText(text)
+                if (!com.kingzcheung.xime.util.AtomicFileWriter.write(visible, text)) {
+                    com.kingzcheung.xime.util.FileLogger.w("WordFreqStore", "词频镜像落盘失败: ${visible.absolutePath}")
+                }
             }
         }
         // 旧位置残留无论如何都清掉（迁移遗留，不影响内容判定）

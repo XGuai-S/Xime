@@ -185,11 +185,19 @@ class PluginsSettingsViewModel(application: Application) : AndroidViewModel(appl
         }
         
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val removed = withContext(Dispatchers.IO) {
                 PluginManager.unloadPlugin(pluginId)
-                PluginManager.installerManager.uninstallPlugin(pluginId)
+                val ok = PluginManager.installerManager.uninstallPlugin(pluginId)
+                // 只有真的卸载成功才清持久化痕迹：清早了而目录没删掉，
+                // 插件还在列表里但配置/授权没了，用户看到的是「功能突然坏了」。
+                if (ok) SettingsPreferences.clearPluginPersistence(context, pluginId)
+                ok
             }
-            
+            if (!removed) {
+                // 卸载失败：目录与注册项未动，不能从 UI 列表里摘掉
+                return@launch
+            }
+
             _uiState.update { state ->
                 state.copy(extensions = state.extensions.filter { it.id != pluginId })
             }

@@ -133,8 +133,8 @@ class AsrModelManager(private val context: Context) {
      * 因此用递归查找；与加载时的文件判定保持一致。
      */
     fun isModelInstalled(modelId: String): Boolean {
+        val dir = runCatching { ModelStorage.getModelDir(context, modelId) }.getOrNull() ?: return false
         ModelStorage.migrateLegacyForModel(context, modelId)
-        val dir = ModelStorage.getModelDir(context, modelId)
         if (!dir.isDirectory) return false
         val info = getModelInfo(modelId)
         return listOf(info.encoderFile, info.decoderFile, info.joinerFile, TOKENS_FILE)
@@ -146,7 +146,7 @@ class AsrModelManager(private val context: Context) {
         val info = getSelectedModelInfo() ?: return null
         // 兼容旧版：自动迁移 asr_models/<id>/ 下的模型文件
         ModelStorage.migrateLegacyForModel(context, info.id)
-        return ModelStorage.getModelDir(context, info.id)
+        return runCatching { ModelStorage.getModelDir(context, info.id) }.getOrNull()
     }
 
     /** 用户显式选择的模型 id；从未选择过时为 null（不默认指定模型）。 */
@@ -173,15 +173,7 @@ class AsrModelManager(private val context: Context) {
         sharedPrefs.edit().putString(KEY_SELECTED_MODEL, modelId).apply()
     }
 
-    fun findFile(dir: File, fileName: String): File? {
-        val direct = File(dir, fileName)
-        if (direct.exists()) return direct
-        dir.listFiles()?.forEach { child ->
-            if (child.isDirectory) {
-                val found = findFile(child, fileName)
-                if (found != null) return found
-            }
-        }
-        return null
-    }
+    fun findFile(dir: File, fileName: String): File? = runCatching {
+        com.kingzcheung.xime.model.ModelPaths.findFile(dir, fileName)
+    }.getOrNull()
 }

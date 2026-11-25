@@ -8,6 +8,29 @@ import org.junit.Test
 
 class WordFreqStoreTest {
 
+    @Test
+    fun `sorted candidates use one weight lookup per candidate`() {
+        var reads = 0
+        val weights = object : Map<String, Int> by mapOf("甲" to 3, "乙" to 3, "丙" to 1) {
+            override fun get(key: String): Int? {
+                reads++
+                return mapOf("甲" to 3, "乙" to 3, "丙" to 1)[key]
+            }
+        }
+        assertNull(WordFreqStore.reorder("a", listOf("甲", "乙", "丙", "丁"), emptyList(), mapOf("a" to weights)))
+        assertEquals(4, reads)
+    }
+
+    @Test
+    fun `fast path preserves stable mapping on unsorted weights`() {
+        val result = WordFreqStore.reorder("a", listOf("甲", "乙", "丙"), listOf("A", "B", "C"),
+            mapOf("a" to mapOf("甲" to 1, "乙" to 2, "丙" to 2)))
+        assertEquals(listOf("乙", "丙", "甲"), result?.candidates)
+        assertEquals(listOf("B", "C", "A"), result?.comments)
+        assertEquals(listOf(CandidateAction.engine(1), CandidateAction.engine(2), CandidateAction.engine(0)), result?.actions)
+    }
+
+
     // ── isCountableWord ──
 
     @Test

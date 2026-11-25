@@ -173,6 +173,23 @@ class VoiceRecognitionHandlerFinishTest {
     }
 
     @Test
+    fun `丢弃语音会话后多个迟到结果和状态都持续被抑制`() {
+        onPartial("已有文本")
+        handler.abandonSession()
+
+        onPartial("迟到部分一")
+        onResult("迟到最终一")
+        onState(RecognitionState.LISTENING)
+        onPartial("迟到部分二")
+        onResult("迟到最终二")
+
+        verify(mockManager).cancelRecognition()
+        verify(mockInputConnection, times(1)).setComposingText(eq("已有文本"), eq(1))
+        verify(mockInputConnection, never()).commitText(any(), anyInt())
+        assertEquals(0, voiceCompleteCount)
+    }
+
+    @Test
     fun `会话被丢弃后收尾不提交文本且超时兜底失效`() {
         onPartial.invoke("你好")
         handler.abandonSession()
@@ -390,6 +407,28 @@ class VoiceRecognitionHandlerFinishTest {
 
         verify(mockInputConnection, never()).commitText(any(), anyInt())
         assertEquals("", fakeBoxText)
+    }
+
+    @Test
+    fun `语音多句撤销账本保留实际提交文本`() {
+        wireFakeInputBox()
+        handler.startRecognition()
+        onResult("第一句。")
+        onResult("第二句。")
+        assertEquals("第一句。第二句。", handler.textWrittenByVoiceInput)
+        assertTrue(handler.voiceInputConnection === mockInputConnection)
+        assertEquals("", handler.voiceInputPrefixAnchor)
+        handler.clearUndoBookkeeping()
+        assertEquals("", handler.textWrittenByVoiceInput)
+        onResult("下一句。")
+        assertEquals("下一句。", handler.textWrittenByVoiceInput)
+    }
+
+    @Test
+    fun `最终文本提交失败不生成可撤销文本`() {
+        whenever(mockInputConnection.commitText(any(), anyInt())).thenReturn(false)
+        onResult("未写入。")
+        assertEquals("", handler.textWrittenByVoiceInput)
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.kingzcheung.xime.service
 
 import android.content.Context
 import com.kingzcheung.xime.settings.UserConfigDir
+import com.kingzcheung.xime.util.FileLogger
 import java.io.File
 
 /**
@@ -44,6 +45,8 @@ import java.io.File
  * 保留；行格式改坏的行按解析失败丢弃（与启动时加载是同一套容错）。
  */
 internal object UserDataMerge {
+
+    private const val TAG = "UserDataMerge"
 
     /** 外部是否改过文件。[baselineText] 为 null 表示本进程还没读过也没写过，无从判断。 */
     fun externalChanged(baselineText: String?, currentText: String?): Boolean =
@@ -273,12 +276,18 @@ internal object UserDataMerge {
         var mirrorOk = false
         runCatching {
             mirrorDir.mkdirs()
-            mirrorDict.writeText(text)
-            mirrorOk = true
+            mirrorOk = com.kingzcheung.xime.util.AtomicFileWriter.write(mirrorDict, text)
         }
         runCatching {
             privateRimeDir.mkdirs()
-            privateDict.writeText(text)
+            // 私有目录是 librime 实际编译的那份源。这里原来（含 writeText 时期）也是
+            // 静默吞失败，语义未变；但镜像侧判了 mirrorOk 并有后果说明，私有侧完全不记
+            // 会让人误以为这条路径有保障，所以补一条日志。
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(privateDict, text)) {
+                com.kingzcheung.xime.util.FileLogger.w(
+                    "UserDataMerge", "私有目录落盘失败: ${privateDict.absolutePath}"
+                )
+            }
         }
         if (mirrorOk) {
             runCatching { legacyTxt.delete() }
@@ -328,8 +337,23 @@ internal object UserDataMerge {
             onBaseline(text)
             merged
         } else {
-            // 可见目录写不进：退回私有目录。可见文件没被动过，基线维持原样
-            runCatching { privateFile.writeText(text) }
+            // 可见目录写不进：退回私有目录。可见文件没被动过，基线维持原样。
+            //
+            // AtomicFileWriter.write 失败返回 false 而**不抛异常**，
+            // 用 runCatching 包着会连异常路径一起吞掉，失败时无从发现
+            // （这个坑在本项目已踩过多次）。这里显式采纳返回值并留日志。
+            val ok = runCatching {
+                com.kingzcheung.xime.util.AtomicFileWriter.write(privateFile, text)
+            }.getOrElse {
+                FileLogger.w(TAG, "写私有词表异常：${privateFile.name}", it)
+                false
+            }
+            if (!ok) {
+                FileLogger.w(
+                    TAG,
+                    "词表写盘彻底失败（可见目录与私有目录都写不进）：${privateFile.name}",
+                )
+            }
             merged
         }
     }
@@ -362,7 +386,7 @@ internal object UserDataMerge {
             onBaseline(text)
             merged
         } else {
-            runCatching { privateFile.writeText(text) }
+            runCatching { com.kingzcheung.xime.util.AtomicFileWriter.write(privateFile, text) }
             merged
         }
     }

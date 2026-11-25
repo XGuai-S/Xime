@@ -1,27 +1,13 @@
 package com.kingzcheung.xime.ui.keyboard
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 
-/**
- * 键盘按键的 crisp（硬）阴影 —— 统一实现在此，供各键盘布局与按键组件复用。
- *
- * 收敛前：「圆角矩形阴影 Modifier」在 6 个文件里被内联复制了 12 份，逻辑逐字一致，
- * 只有颜色来源变量名不同（`backgroundColor` / `keyBackgroundColor`）。任何阴影算法调整
- * 都要改 12 处，漏改一处就会出现「某个键盘的阴影和别的不一样」这类难查的视觉不一致。
- */
-
+/** 由按键背景色推导阴影色：有彩色倾向就压暗同色，浅色底用黑、深色底用白。 */
 private val shadowColorCache = HashMap<Color, Color>()
 
-/** 由按键背景色推导阴影色：有彩色倾向就压暗同色，浅色底用黑、深色底用白。 */
 internal fun crispShadowColor(backgroundColor: Color): Color {
     return shadowColorCache.getOrPut(backgroundColor) {
         val r = backgroundColor.red
@@ -40,27 +26,29 @@ internal fun crispShadowColor(backgroundColor: Color): Color {
 }
 
 /**
- * 按键底部的圆角矩形硬阴影 Modifier。
+ * 键盘按键的立体感阴影 —— 兼容入口。
  *
- * 与原先 12 处内联实现语义完全一致：同样的 remember 键集合
- * （shadowEnabled / shadowElevation / shadowShapeRadius / density / backgroundColor），
- * 同样的绘制参数与分支。
+ * 3.3.10 曾把这里改成「什么都不画」：旧实现每个按键每帧提交一条带模糊的圆角 path，
+ * 实测 30 个键时中文键盘整帧 p90 16.24 → 9.70ms、掉帧 8% → 1%，瓶颈在每帧 path 绘制。
+ *
+ * 现在立体感改由 [rememberKeyShadowModifier]（阴影+键面）与 [rememberKeyBevelModifier]
+ * （高光+压暗）提供，两者都是一次性烘焙的位图，每帧只做一次 `drawImage`。
+ *
+ * 本兼容入口只返回**阴影层**：调用方把 `.then(shadowModifier)` 放在 `.background()` 之前，
+ * 阴影即可正常外扩显示。高光层需要单独接入（见 KeyButton 的用法）。
  */
 @Composable
-@Suppress("UNUSED_PARAMETER")
 internal fun rememberCrispShadowModifier(
     backgroundColor: Color,
     shadowEnabled: Boolean,
     shadowElevation: Dp,
     shadowShapeRadius: Dp,
 ): Modifier {
-    // 3.3.10 起按键阴影不再绘制（用户 2026-11-09 决定：「假阴影删掉」）。
-    //
-    // 实测这是绘制长尾的主因：30 个键每帧各提交一条圆角 path，
-    // 关掉后中文键盘整帧 p90 16.24 → 9.70ms、p95 21.18 → 11.48ms、
-    // 掉帧（超一个 vsync）8% → 1%，而布局/测量耗时不变（0.05ms）。
-    //
-    // 函数签名与 keyboard.shadow.* 配置项保留：调用点有 5 处，留着以后
-    // 换位图化实现（9-patch 缓存）时可直接接回去，不用改调用方。
-    return Modifier
+    return rememberKeyShadowModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
 }

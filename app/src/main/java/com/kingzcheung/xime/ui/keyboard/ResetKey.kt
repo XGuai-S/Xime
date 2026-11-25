@@ -57,15 +57,29 @@ internal fun ResetKey(
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnPress by rememberUpdatedState(onPress)
     val shape = RoundedCornerShape(shadowShapeRadius)
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 2.dp, vertical = 4.dp)
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(shape)
             .background(if (isPressed) backgroundColor.copy(alpha = 0.7f) else backgroundColor)
+            .then(bevelLayer)
             .pointerInput(Unit) {
                 detectTapGestures(onPress = {
                     isPressed = true

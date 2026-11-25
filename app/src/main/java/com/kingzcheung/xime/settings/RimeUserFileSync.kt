@@ -69,7 +69,13 @@ object RimeUserFileSync {
     // ── 同步范围规则（纯函数，可单测）──
 
     /** 不参与同步的目录：编译产物、运行状态、日志、版本库。 */
-    internal val EXCLUDED_DIRS = setOf("build", "sync", "logs", ".git")
+    /**
+     * 不参与同步的目录。
+     *
+     * `schemes/`：方案源文件的权威副本，内容与顶层镜像**完全相同**。
+     * 让它参与同步会导致同一份方案内容在可见目录里出现两次、且互相覆盖。
+     */
+    internal val EXCLUDED_DIRS = setOf("build", "sync", "logs", ".git", SchemaLayout.SCHEMES_DIR)
 
     /**
      * 不参与同步的文件名。
@@ -208,7 +214,18 @@ object RimeUserFileSync {
      * 它里面有 xime.yaml、词频/词库等 .txt，不排除会被当成 rime 文件同步进私有目录。
      * 私有 rime 目录没有该子目录，不受影响。
      */
-    internal val EXCLUDED_VISIBLE_DIRS: Set<String> = setOf(UserConfigDir.absoluteDir.name)
+    /**
+     * 可见目录里不参与同步的子目录。
+     *
+     * `xime/`：统一配置的真源，由 UserConfigDir 单独管理。
+     * `schemes/`：方案归档目录，由 SchemaLayout 维护——它的内容是私有目录的镜像，
+     *   若参与三向同步，会把「归档前的旧结构」当成用户改动推回私有目录，
+     *   导致布局整理反复被撤销（线上实测：/sdcard/rime/schemes 一直停在旧结构）。
+     */
+    internal val EXCLUDED_VISIBLE_DIRS: Set<String> = setOf(
+        UserConfigDir.absoluteDir.name,
+        SchemaLayout.SCHEMES_DIR,
+    )
 
     private fun baselineFile(context: Context): File = File(context.filesDir, BASELINE_FILE)
 
@@ -258,6 +275,8 @@ object RimeUserFileSync {
      */
     private val syncLock = Any()
 
+    internal fun <T> withRestoreSyncLock(block: () -> T): T = synchronized(syncLock) { block() }
+
     fun sync(context: Context): SyncReport = synchronized(syncLock) {
         syncLocked(context)
     }
@@ -286,9 +305,29 @@ object RimeUserFileSync {
         collectSyncable(rimeDir, relativePaths)
         collectSyncable(mirror, relativePaths, excludedNames = EXCLUDED_VISIBLE_DIRS)
 
+        // 已归档进 schemes/ 的文件，其顶层副本是**故意不放在可见目录**的。
+        //
+        // 可见目录是给用户看的镜像，方案文件只需在 schemes/<方案>/ 里出现一次。
+        // 但三向同步的规则是「私有有、可见没有 → PUSH_TO_VISIBLE」，
+        // 所以每次 sync 都会把顶层副本重新推回可见目录，与 dedupeVisibleTopLevel
+        // 形成死循环（实测：可见目录顶层始终残留 auto_word/word_freq 等文件）。
+        val archivedNames = File(mirror, SchemaLayout.SCHEMES_DIR)
+            .takeIf { it.isDirectory }
+            ?.walkTopDown()?.filter { it.isFile }?.map { it.name }?.toSet()
+            .orEmpty()
+
         for (rel in relativePaths) {
             val priv = File(rimeDir, rel)
             val vis = File(mirror, rel)
+            // 顶层文件且已归档进方案文件夹 → 不推回可见目录。
+            //
+            // 只在「可见侧确实没有」时跳过：如果用户在可见目录主动创建了同名文件
+            // （比如想手改某个词典），那是用户意图，应该正常参与同步。
+            if (!rel.contains('/') && vis.parentFile == mirror &&
+                priv.name in archivedNames && !vis.exists()
+            ) {
+                continue
+            }
             val privHash = hashOrNull(priv)
             val visHash = hashOrNull(vis)
             // hashOrNull 把「读失败」也返回 null，而 decideAction 把 null 当作「文件不存在」：
@@ -368,6 +407,12 @@ object RimeUserFileSync {
         conflicts.forEach {
             FileLogger.w(TAG, "同步冲突：$it 两侧都被修改，已保留可见版本并另存 .app-backup")
         }
+        // 同步收尾：清掉可见目录顶层与方案文件夹重复的文件。
+        //
+        // 必须放在同步**之后**：三向同步会按基线把私有目录的文件推到可见目录顶层，
+        // 若先清理再同步，文件又被写回来了（实测可见目录顶层一直留着 15 个 dict）。
+        runCatching { dedupeVisibleTopLevel(rimeDir, mirror) }
+            .onFailure { FileLogger.w(TAG, "可见目录去重失败：${it.message}") }
         return SyncReport(
             ok = true,
             pushedToVisible = pushedToVisible,
@@ -377,54 +422,38 @@ object RimeUserFileSync {
         )
     }
 
-    /**
-     * 恢复备份后调用：**单向**把私有 rime 目录（刚恢复的权威内容）整体镜像到可见目录，
-     * 并以私有内容重写同步基线。
-     *
-     * 为什么不能用普通 [sync]：恢复是覆盖式落盘，私有与可见两侧内容不同、基线也过期，
-     * 三向比对会走「冲突保留可见」分支——把可见里的**旧版本**写回私有，刚恢复的内容
-     * 会被盖掉，表现为「恢复完再点重新部署没用」。
-     * 本方法跳过比对：一律私有 → 可见，基线 = 私有内容。之后用户再 reloadConfig /
-     * oiz 触发普通 [sync]，两侧与基线一致，是空操作，不再冲突。
-     *
-     * @return 本次覆盖到可见目录的文件数
-     */
-    fun forceSyncPrivateToVisible(context: Context): Int {
-        if (!UserConfigDir.isSupported) return 0
-        if (!UserConfigDir.hasWritePermission(context)) return 0
+    /** 恢复后仅发布已提交的路径；保留可见独有文件和未参与恢复的基线。 */
+    fun forceSyncPrivateToVisible(context: Context, restoredPaths: Set<String>): Int = synchronized(syncLock) {
+        if (restoredPaths.isEmpty() || !UserConfigDir.isSupported) return@synchronized 0
+        check(UserConfigDir.hasWritePermission(context)) { "恢复镜像缺少写入权限" }
         val rimeDir = SchemaManager.getRimeDir(context)
-        if (!rimeDir.isDirectory) return 0
-        val mirror = mirrorDir(context)
-        var copied = 0
-        val nextBaseline = LinkedHashMap<String, String>()
-        runCatching {
-            rimeDir.walkTopDown()
-                .onEnter { it == rimeDir || (it.name !in EXCLUDED_DIRS && !it.name.startsWith(".")) }
-                .filter { it.isFile }
-                .forEach { file ->
-                    val rel = file.relativeTo(rimeDir).path.replace('\\', '/')
-                    if (!isSyncable(rel)) return@forEach
-                    val target = File(mirror, rel)
-                    if (copyFile(file, target)) copied++
-                    hashOrNull(file)?.let { nextBaseline[rel] = it }
+        check(rimeDir.isDirectory) { "恢复镜像源目录不可用" }
+        val baseline = baselineFile(context)
+        // A failed read must not erase the existing baseline with an empty map.
+        val previous = if (baseline.exists()) {
+            runCatching { parseBaseline(baseline.readText()) }.getOrElse {
+                FileLogger.w(TAG, "恢复镜像基线不可读，保留原件", it)
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                throw java.io.IOException("恢复镜像基线不可读")
+            }
+        } else emptyMap()
+        val result = RestoreMirror.copy(rimeDir, mirrorDir(context), restoredPaths, previous)
+        if (result.baseline != previous) {
+            val temporary = File.createTempFile("rime-baseline-", ".tmp", context.filesDir)
+            try {
+                java.io.FileOutputStream(temporary).use { output ->
+                    output.write(renderBaseline(result.baseline).toByteArray(Charsets.UTF_8))
+                    output.flush()
+                    output.fd.sync()
                 }
-        }.onFailure { FileLogger.w(TAG, "强制私有→可见镜像失败：${it.message}", it) }
-        // 可见目录独有的旧文件清掉，避免恢复后残留过期镜像副本
-        runCatching {
-            mirror.walkTopDown()
-                .onEnter { it == mirror || (it.name !in EXCLUDED_DIRS && it.name !in EXCLUDED_VISIBLE_DIRS && !it.name.startsWith(".")) }
-                .filter { it.isFile }
-                .forEach { file ->
-                    val rel = file.relativeTo(mirror).path.replace('\\', '/')
-                    if (isSyncable(rel) && rel !in nextBaseline) file.delete()
-                }
-        }.onFailure { FileLogger.w(TAG, "清理过期可见镜像失败：${it.message}", it) }
-        pruneEmptyDirs(mirror)
-        writeBaseline(context, nextBaseline)
-        if (copied > 0) {
-            FileLogger.i(TAG, "恢复同步：强制镜像私有→可见 $copied 个文件，基线已重置")
+                java.nio.file.Files.move(temporary.toPath(), baseline.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                temporary.delete()
+            }
         }
-        return copied
+        check(result.failedPaths.isEmpty()) { "部分恢复文件未同步到可见目录" }
+        result.copied
     }
 
     /**
@@ -448,6 +477,10 @@ object RimeUserFileSync {
         if (segments.any { it in RUNTIME_EXCLUDED_DIRS }) return false
         if (segments.any { it.contains('\uFFFD') }) return false
         if (segments.last().startsWith(".")) return false
+        // `*.userdb/` 不镜像：它是 librime 的 leveldb 用户词典库（内含 LOCK/LOG/MANIFEST
+        // 等一堆二进制文件），对用户没有可读价值，只会让可见目录显得杂乱。
+        // 用户明确要求「userdb 不要显示」，且可见目录本身不参与引擎加载。
+        if (segments.any { it.endsWith(".userdb") }) return false
         return true
     }
 
@@ -487,6 +520,59 @@ object RimeUserFileSync {
         }.onFailure { FileLogger.w(TAG, "完整镜像失败：${it.message}", it) }
         if (copied > 0) FileLogger.i(TAG, "完整镜像：补入 $copied 个运行状态/编译产物文件")
         return copied
+    }
+
+    /**
+     * 删除可见目录**顶层**中已归档进方案文件夹的重复文件。
+     *
+     * 背景：可见目录 `/sdcard/rime/` 是给用户看的镜像，引擎不读它（引擎读私有目录）。
+     * 方案文件既然已经在 `schemes/<方案>/` 里，顶层再留一份就是纯重复，
+     * 用户看到的就是「顶层和方案文件夹下都有一样的文件」。
+     *
+     * 只删「确实是某方案独占、且已归档进方案文件夹」的文件：
+     * - 共享资源（`symbols.yaml` 等被 2+ 方案引用）虽然也硬链接进了方案文件夹，
+     *   但属于共享层，删掉可见顶层副本会让用户找不到、且同步时反复"删了又恢复" → 必须保留
+     * - 全局配置 `default.yaml` / `*.custom.yaml` → 保留
+     * - 引擎产物 `*.bin` / `*.userdb` → 保留
+     *
+     * 判据不能只看"名字是否出现在方案文件夹里"——[SchemaLayout.resolveSchemeDependencies]
+     * 会把共享资源也链接进每个方案文件夹，按名字匹配会误删 `symbols.yaml`。
+     * 改用 [SchemaLayout.resolveOwnership] 的归属判定：只有被判定为"某方案独占"的才删；
+     * 共享资源与全局配置都不在归属表里，自然保留。
+     *
+     * @return 删除的文件数
+     */
+    internal fun dedupeVisibleTopLevel(rimeDir: File, mirror: File): Int {
+        val visSchemes = File(mirror, SchemaLayout.SCHEMES_DIR)
+        if (!visSchemes.isDirectory) return 0
+        // 方案文件夹里出现的文件名集合（仅用于快速排除无关文件）
+        val archivedNames = visSchemes.walkTopDown()
+            .filter { it.isFile }
+            .map { it.name }
+            .toSet()
+        if (archivedNames.isEmpty()) return 0
+        // 归属判定：文件 -> 方案文件夹名；只包含"独占"文件。
+        // 基于私有 rimeDir（含 schemes/ 子目录），与方案是否启用无关。
+        val ownerByName = SchemaLayout.resolveOwnership(rimeDir)
+            .keys.associate { it.name to it.name }
+
+        var removed = 0
+        mirror.listFiles().orEmpty().filter { it.isFile }.forEach { f ->
+            if (f.name !in archivedNames) return@forEach
+            // 共享资源 / 全局配置不在 ownership 里 → 保留
+            if (f.name !in ownerByName) return@forEach
+            if (runCatching { f.delete() }.getOrDefault(false)) removed++
+        }
+        // 顺带清掉可见目录里的 `*.userdb/`：历史版本曾把它们镜像过来，
+        // 现在是纯残留（用户要求不显示，且引擎读私有目录、可见目录不参与加载）。
+        mirror.listFiles().orEmpty().filter { it.isDirectory && it.name.endsWith(".userdb") }
+            .forEach { d ->
+                if (runCatching { d.deleteRecursively() }.getOrDefault(false)) removed++
+            }
+        if (removed > 0) {
+            FileLogger.i(TAG, "可见目录清理：移除 $removed 项（已归档文件与 userdb 残留）")
+        }
+        return removed
     }
 
     /**
@@ -605,8 +691,14 @@ object RimeUserFileSync {
     }
 
     private fun writeBaseline(context: Context, baseline: Map<String, String>) {
-        runCatching {
-            baselineFile(context).writeText(renderBaseline(baseline))
-        }.onFailure { FileLogger.w(TAG, "写基线清单失败：${it.message}", it) }
+        // write 失败返回 false 而不抛异常，必须采纳返回值；否则基线写失败会被静默吞掉，
+        // 下次同步会把「本地已删的词」当成新增再推一遍。
+        val ok = runCatching {
+            com.kingzcheung.xime.util.AtomicFileWriter.write(baselineFile(context), renderBaseline(baseline))
+        }.getOrElse {
+            FileLogger.w(TAG, "写基线清单异常：${it.message}", it)
+            false
+        }
+        if (!ok) FileLogger.w(TAG, "写基线清单失败：${baselineFile(context).absolutePath}")
     }
 }

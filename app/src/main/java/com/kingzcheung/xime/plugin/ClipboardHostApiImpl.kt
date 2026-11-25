@@ -14,7 +14,9 @@ class ClipboardHostApiImpl(context: Context) : ClipboardHostApi {
 
     override fun getText(): String? {
         return try {
-            clipboardManager.getCurrentClipboardText()?.takeIf { it.isNotEmpty() }
+            // 插件拿到就能外传（http 请求），敏感内容不给
+            clipboardManager.getCurrentClipboardText(allowSensitive = false)
+                ?.takeIf { it.isNotEmpty() }
         } catch (_: Exception) {
             null
         }

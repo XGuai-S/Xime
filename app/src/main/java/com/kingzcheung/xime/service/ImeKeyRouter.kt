@@ -50,9 +50,13 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      */
     private fun sendTransformedResult(
         result: com.kingzcheung.xime.rime.RimeProcessResult,
+        editorGeneration: Long,
         afterUpdate: (suspend () -> Unit)? = null,
     ) {
+        // 每个阻塞点返回后复核编辑器身份：同步 JNI 调用打不断，切框后旧结果仍会返回。
+        if (!service.isEditorKeyGenerationCurrent(editorGeneration)) return
         val transformed = service.candidateTransform.transformFor(result)
+        if (!service.isEditorKeyGenerationCurrent(editorGeneration)) return
         // 会话日志：记录本键处理后的组合快照（输入串/候选/上屏增量），供离线重建纠错标签。
         // 先判开关再构造参数：原来的 map 闭包在 enabled=false 时也每键分配一次 List。
         if (com.kingzcheung.xime.correction.KeyTapLogger.enabled) {
@@ -75,6 +79,9 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val promoted = promoteCorrectionCandidates(baseCandidates, baseActions)
 
         service.uiEventChannel.trySend {
+            // channel 是 CONFLATED：入队到消费之间可能又切了输入框，
+            // 消费时再复核一次，避免把旧框的候选写进新框。
+            if (!service.isEditorKeyGenerationCurrent(editorGeneration)) return@trySend
             service.sessionController.updateUIWithResult(
                 result.copy(candidates = (promoted?.first?.toList() ?: baseCandidates).toTypedArray()),
                 promoted?.second ?: baseActions
@@ -192,7 +199,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 先被清空，空格就退化成输入一个空格字符（用户反馈：候选栏里的复制内容点空格上不了屏）。
         val clipboardItemForSpace = if (key == "space") service.firstVisibleClipboardItem() else null
         service.markShowingClipboardConsumed()
-        val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
+        // 入队瞬间固定编辑代次：任务执行时用户可能已切框，之后每个阻塞点都要用它复核。
+        val editorKeyGeneration = service.captureEditorKeyGeneration()
+        val editorJob = service.editorBoundKeyJob()
+        val job = service.serviceScope.launch(
+            service.keyProcessingDispatcher + editorJob,
+            start = CoroutineStart.LAZY,
+        ) {
+            if (!service.isEditorKeyGenerationCurrent(editorKeyGeneration)) return@launch
             // 与 postRimeJob 同款兜底：serviceScope 没有 CoroutineExceptionHandler，
             // 主按键通道里任何 Rime/JNI 异常都会走进程默认处理器直接崩掉输入法。
             try {
@@ -218,11 +232,11 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 // 删除键左滑 / 右滑（用户 2026-11）：整段回删上一次上屏的内容，右滑恢复
                 "delete_last_commit" -> needsUIUpdate = handleDeleteLastCommitKey()
                 "restore_last_commit" -> needsUIUpdate = handleRestoreLastCommitKey()
-                "word_separator" -> needsUIUpdate = handleWordSeparatorKey(candState)
+                "word_separator" -> needsUIUpdate = handleWordSeparatorKey(candState, editorKeyGeneration)
                 "shift", "mode_change", "ime_switch", "ime_switch_panel",
                 "abc", "number", "common_symbol", "emoji" -> handleKeyboardSwitchKey(key)
                 else -> {
-                    val result = handleMainKey(key, candState, state.isAsciiMode, isShifted)
+                    val result = handleMainKey(key, candState, state.isAsciiMode, isShifted, editorKeyGeneration)
                     needsUIUpdate = result.needsUIUpdate
                     committedText = result.committedText
                     // 原先分支里的 return@launch 会跳过末尾的候选栏刷新，用 consumed 显式保留该语义。
@@ -231,12 +245,17 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             }
             
             if (needsUIUpdate) {
-                refreshAfterKey(committedText)
+                refreshAfterKey(committedText, editorKeyGeneration)
             }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 FileLogger.e("ImeKeyRouter", "key job failed", e)
+            }
+        }
+        job.invokeOnCompletion { cause ->
+            if (cause != null) {
+                FileLogger.d("ImeKeyRouter", "key job 未正常完成: ${cause.message}")
             }
         }
         sendKeyJob(job)
@@ -268,6 +287,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         candState: CandidateState,
         isAsciiMode: Boolean,
         isShifted: Boolean,
+        editorGeneration: Long,
     ): MainKeyResult {
         var needsUIUpdate = false
         var committedText: String? = null
@@ -337,7 +357,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 ) }
             }
         } else {
-            return handleEngineKey(key, candState, isAsciiMode, isShifted, pendingEnglish)
+            return handleEngineKey(key, candState, isAsciiMode, isShifted, pendingEnglish, editorGeneration)
         }
         return MainKeyResult(needsUIUpdate, committedText)
     }
@@ -353,6 +373,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         isAsciiMode: Boolean,
         isShifted: Boolean,
         pendingEnglish: String,
+        editorGeneration: Long,
     ): MainKeyResult {
         var needsUIUpdate = false
         var committedText: String? = null
@@ -382,7 +403,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     service.markCandidateSelection(result.committedText)
                     withContext(Dispatchers.Main) { service.commitText(result.committedText) }
                 }
-                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                    sendTransformedResult(result, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 } else {
                     committedText = char
                     needsUIUpdate = true
@@ -393,7 +414,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             }
         } else {
             return handleNormalEngineKey(
-                key, candState, isAsciiMode, isShifted, char, keyCode, mask, isShiftedChinese
+                key, candState, isAsciiMode, isShifted, char, keyCode, mask, isShiftedChinese,
+                editorGeneration
             )
         }
 
@@ -414,6 +436,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         keyCode: Int,
         mask: Int,
         isShiftedChinese: Boolean,
+        editorGeneration: Long,
     ): MainKeyResult {
         var needsUIUpdate = false
         var committedText: String? = null
@@ -440,7 +463,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             service.editingCaretInput = newInput
             // 单锁原子调用：两段式（setInput + tryLocked getProcessResult）在锁被抢占时
             // 会拿到空结果，把整串编码和候选一起清空。
-            sendTransformedResult(service.rimeEngine.setInputAndGetResult(newInput)) {
+            sendTransformedResult(service.rimeEngine.setInputAndGetResult(newInput), editorGeneration) {
                 if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
             }
             return MainKeyResult(needsUIUpdate, committedText, consumed = true)
@@ -458,13 +481,24 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 val nextCode = currentInput + key.lowercase()
                 val hasAutoWord = service.autoWordTemp[nextCode]?.isNotEmpty() == true ||
                     service.autoWordFixed[nextCode]?.isNotEmpty() == true
-                if (hasAutoWord) {
-                    FileLogger.d(
-                        "ImeKeyRouter",
-                        "avoidAutoSelect: input='$currentInput' + '$key' -> code='$nextCode' hasAutoWord=true, 改走 setInput"
-                    )
+                // 排序会不会改变首位：只在「确实做了重排」时才需要拦截。
+                // 用引擎当前的候选快照算一次重排后的首位，与引擎首位比对；
+                // 表里没有该编码时 reorder 返回 null，天然不拦截（零额外开销）。
+                val sortWouldChangeTop = !hasAutoWord &&
+                    sortWouldChangeTopCandidate(nextCode, autoWordConfig)
+                if (hasAutoWord || sortWouldChangeTop) {
+                    // 热路径（每键）上的日志：默认日志级别是 ERROR，d() 不落盘，
+                    // 但字符串插值在调用前就已构造完毕（6 次字符串拼接 + 装箱）。
+                    // 用 isDebugEnabled() 短路，避免为不存在的日志付分配成本。
+                    if (FileLogger.isDebugEnabled()) {
+                        FileLogger.d(
+                            "ImeKeyRouter",
+                            "avoidAutoSelect: input='$currentInput' + '$key' -> code='$nextCode' " +
+                                "hasAutoWord=$hasAutoWord sortWouldChangeTop=$sortWouldChangeTop, 改走 setInput"
+                        )
+                    }
                     val result = service.rimeEngine.setInputAndGetResult(nextCode)
-                    sendTransformedResult(result) {
+                    sendTransformedResult(result, editorGeneration) {
                         if (service.calculatorEngine.isActive()) updateCalculatorCandidates()
                     }
                     return MainKeyResult(needsUIUpdate, committedText, consumed = true)
@@ -475,9 +509,24 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             // 之后只能读到空串；而 UI 的 candidateState 又慢一个键。
             val preKeyInput = service.rimeEngine.getCachedInputText()
                 .ifEmpty { service.rimeEngine.getInput() }
+            // 满码后的这一键是「顶字上屏」：被顶出去的是上一键已成形的那段编码，
+            // 本键字符属于新一段，不能拼进去（拼成 5 码会让 4 码的词频永远不涨，
+            // 表现为「排序后不更新」）。
+            //
+            // ⚠️ 不要改回 `preKeyInput + key.lowercase()`。这条编码最终经
+            // markCandidateSelection → recordWordFrequency 落到 word_freq 表，
+            // 拼错一个字就会让该编码的词频永远记在一条不存在的 5 码上，候选永远不调频。
+            // 行为由 CandidateDisplayRulesTest + AutoCommitWiringContractTest 钉住。
             val commitCodeHint =
-                if (!isAsciiMode && char.length == 1 && key.length == 1) preKeyInput + key.lowercase()
-                else null
+                if (!isAsciiMode && char.length == 1 && key.length == 1) {
+                    resolveConsumedCode(preKeyInput, key)
+                } else {
+                    null
+                }
+            // 顶屏对齐的依据：按键前候选栏展示的就是用户正看着的那一屏。
+            // 取快照而非稍后再读，避免刷新把它改掉。
+            // ⚠️ 必须在 processKeyAndGetResult **之前**取：之后读到的是新一屏。
+            val displayedBeforeKey = candState.candidates
             val result = service.rimeEngine.processKeyAndGetResult(keyCode, mask)
         if (result.processed) {
             if (isShiftedChinese && result.committedText != char) {
@@ -496,14 +545,26 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     withContext(Dispatchers.Main) {
                         service.commitText(committed)
                     }
-                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                    sendTransformedResult(result, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 } else {
                     if (committed.isNotEmpty()) {
+                        // 顶屏时引擎提交的是它自己的首选，候选栏呈现的却是重排后的顺序：
+                        // 两者不一致时以用户看到的首词为准。
+                        //
+                        // ⚠️ 不要改回直接 `service.commitText(committed)`。引擎的 auto_select
+                        // 完全绕过 Kotlin 层重排，直接提交就会出现「候选栏首词是 A，顶出去的是 B」。
+                        // 见 CandidateDisplayRules.resolveAutoCommitTop + AutoCommitWiringContractTest。
+                        val committedWord = resolveAutoCommitTop(
+                            committed = committed,
+                            displayedCandidates = displayedBeforeKey,
+                            isAsciiMode = isAsciiMode,
+                            preKeyCodeLength = preKeyInput.length,
+                        )
                         // 带上真实编码：自动上屏时 UI 还停在上一个键（见 markCandidateSelection 注释）
-                        service.markCandidateSelection(committed, commitCodeHint)
-                        withContext(Dispatchers.Main) { service.commitText(committed) }
+                        service.markCandidateSelection(committedWord, commitCodeHint)
+                        withContext(Dispatchers.Main) { service.commitText(committedWord) }
                     }
-                    sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                    sendTransformedResult(result, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 }
             }
         } else {
@@ -766,12 +827,15 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      *
      * @return 是否需要刷新候选栏
      */
-    private suspend fun handleWordSeparatorKey(candState: CandidateState): Boolean {
+    private suspend fun handleWordSeparatorKey(
+        candState: CandidateState,
+        editorGeneration: Long,
+    ): Boolean {
         var needsUIUpdate = false
         if (candState.isComposing || candState.inputText.isNotEmpty()) {
             val result = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.APOSTROPHE, 0)
             if (result.processed) {
-                sendTransformedResult(result)
+                sendTransformedResult(result, editorGeneration)
             } else {
                 needsUIUpdate = true
             }
@@ -796,6 +860,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 目标框已丢失（面板关闭 / 旋转 / 切悬浮清过 holder）时不消费按键，
         // 让主流程把它交给宿主；否则文字会被吞掉且宿主毫无反应。
         if (ToolPanelEditTextHolder.editText == null) return false
+        // 入队前固定编辑代次：面板里的按键同样跑在 keyJobs 队列上，切框后旧结果要丢弃。
+        val editorGeneration = service.captureEditorKeyGeneration()
         com.kingzcheung.xime.util.FileLogger.d(
             "ImeKeyRouter",
             "toolPanelKey: key=$key et=${com.kingzcheung.xime.service.ToolPanelEditTextHolder.editText != null}"
@@ -850,7 +916,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         if (result.inputText.isEmpty()) {
                             service.rimeEngine.clearComposition()
                         }
-                        sendTransformedResult(result)
+                        sendTransformedResult(result, editorGeneration)
                     }
                 } else {
                     ToolPanelEditTextHolder.editText?.let { et ->
@@ -897,7 +963,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         postRimeJob {
                             val preKeyInput = service.rimeEngine.getCachedInputText()
                                 .ifEmpty { service.rimeEngine.getInput() }
-                            val commitCodeHint = preKeyInput + key.lowercase()
+                            val commitCodeHint = resolveConsumedCode(preKeyInput, key)
+                            val displayedBeforeKey = service.candidateState.value.candidates
                             val result = service.rimeEngine.processKeyAndGetResult(keyCode, 0)
                             if (result.processed) {
                                 // 引擎自动上屏（四码唯一、简繁转换等）的增量必须照常提交：
@@ -906,10 +973,16 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                                 // 面板/搜索态直接失效——按键被消费、字却没进输入框。
                                 val committed = result.committedText
                                 if (committed.isNotEmpty()) {
-                                    service.markCandidateSelection(committed, commitCodeHint)
-                                    withContext(Dispatchers.Main) { service.commitText(committed) }
+                                    val committedWord = resolveAutoCommitTop(
+                                        committed = committed,
+                                        displayedCandidates = displayedBeforeKey,
+                                        isAsciiMode = false,
+                                        preKeyCodeLength = preKeyInput.length,
+                                    )
+                                    service.markCandidateSelection(committedWord, commitCodeHint)
+                                    withContext(Dispatchers.Main) { service.commitText(committedWord) }
                                 }
-                                sendTransformedResult(result)
+                                sendTransformedResult(result, editorGeneration)
                             }
                         }
                         return true
@@ -943,6 +1016,8 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      */
     private fun handleQuickSendFormKey(key: String): Boolean {
         if (!service.uiState.value.showQuickSendForm) return false
+        // 入队前固定编辑代次：表单里的退格同样入 keyJobs，切框后旧结果要丢弃。
+        val editorGeneration = service.captureEditorKeyGeneration()
         when (key) {
             "enter" -> {
                 val editText = QuickSendFormEditTextHolder.editText
@@ -981,7 +1056,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                         if (result.inputText.isEmpty()) {
                             service.rimeEngine.clearComposition()
                         }
-                        sendTransformedResult(result)
+                        sendTransformedResult(result, editorGeneration)
                     }
                 } else {
                     // 无组合态 → 按焦点路由删除表单内（文本框/触发编码框）已上屏文字
@@ -1001,7 +1076,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * `result != null` 恒不成立，属不可达代码（`sendTransformedResult` 路径保留给
      * 真正拿到 RimeProcessResult 的调用点）。
      */
-    private suspend fun refreshAfterKey(committedText: String?) {
+    private suspend fun refreshAfterKey(committedText: String?, editorGeneration: Long) {
+        // 取快照前复核：按键任务从入队到执行之间用户可能已切框，
+        // 此时引擎状态属于新框，写进候选栏会把上一个框的编码带过来。
+        if (!service.isEditorKeyGenerationCurrent(editorGeneration)) return
         // 一次锁内取完整快照（原 5 次独立 tryLock 会在锁竞争时各自静默返回默认值，
         // 导致候选栏状态不一致/闪烁；合并后锁获取 5→1 次且快照自洽）。
         val snapshot = service.rimeEngine.getProcessSnapshot()
@@ -1469,9 +1547,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 排队中的退格据此整体作废，不再把上一个输入框的删除动作重放到新框上
         // （用户 2026-11 修复：长按删除时切应用/切输入框会多删字）。
         val generation = service.deleteGeneration
+        val editorGeneration = service.captureEditorKeyGeneration()
         val job = service.serviceScope.launch(service.keyProcessingDispatcher, start = CoroutineStart.LAZY) {
             try {
-                if (generation == service.deleteGeneration) processDeleteKey()
+                if (generation == service.deleteGeneration) processDeleteKey(editorGeneration)
             } catch (t: Throwable) {
                 FileLogger.e(XimeInputMethodService.TAG, "processDeleteKey failed", t)
             } finally {
@@ -1519,7 +1598,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
     }
 
     /** 单次退格处理（service.keyProcessingDispatcher 上执行）。 */
-    internal suspend fun processDeleteKey() {
+    internal suspend fun processDeleteKey(editorGeneration: Long) {
         // 内部编辑框（工具面板 / 剪贴板搜索框）聚焦时，退格只作用于那个框。
         // 正常路径已由 handleToolPanelKey 消费；这里再兜一道：holder 丢失或判定失败时
         // 若落到下方分支，sendDownUpKeyEvents(DEL) / deleteCommittedChar 删的是**宿主正文**，
@@ -1588,7 +1667,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             candState.isComposing || candState.inputText.isNotEmpty() ||
                 candState.preeditText.isNotEmpty() || service.rimeEngine.getInput().isNotEmpty() -> {
                 FileLogger.d("ImeKeyRouter", "[DEL] -> 分支2 Rime编码中")
-                deleteRimeComposition()
+                deleteRimeComposition(editorGeneration)
             }
 
             // 3. 联想词或剪贴板：仅清空候选栏，不回删已上屏字符
@@ -1659,7 +1738,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      *
      * 从 [processDeleteKey] 的 `when` 分支抽出，正文逐字一致。
      */
-    private suspend fun deleteRimeComposition() {
+    private suspend fun deleteRimeComposition(editorGeneration: Long) {
         val editingCaret = service.editingCaretPos
         val editingInput = if (editingCaret > 0) service.rimeEngine.getInput() else ""
         FileLogger.d("ImeKeyRouter", "[DEL] deleteRimeComposition: editCaret=" + editingCaret + " rimeInput=" + editingInput)
@@ -1674,7 +1753,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 service.rimeEngine.clearComposition()
                 service.editingCaretPos = -1
             }
-            sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+            sendTransformedResult(result, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
         } else {
             // ── 逐字符回退（不依赖 Rime 的 BackSpace 行为）──
             //
@@ -1701,7 +1780,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 // 没有可靠编码：用 Rime 退格（它在真正无组合时是无害的）
                 val r = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
                 if (r.processed) {
-                    sendTransformedResult(r) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                    sendTransformedResult(r, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 } else {
                     deleteCommittedChar()
                 }
@@ -1762,7 +1841,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 )
                 val r = service.rimeEngine.processKeyAndGetResult(RimeKeyCodes.BACKSPACE, 0)
                 if (r.processed) {
-                    sendTransformedResult(r) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+                    sendTransformedResult(r, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
                 } else {
                     // 引擎既不认 setInput 也不认退格（会话重建/部署后残留）：
                     // 必须落到删已上屏字符，否则这一下删除完全没反应（用户 2026-11 修复）。
@@ -1771,7 +1850,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 }
                 return
             }
-            sendTransformedResult(result) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
+            sendTransformedResult(result, editorGeneration) { if (service.calculatorEngine.isActive()) updateCalculatorCandidates() }
         }
         // 退格后确保 candidateState 与引擎同步（编码可能只在引擎里），
         // 否则候选栏看不到编码在减少
@@ -1858,14 +1937,34 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         sendKeyJob(job)
     }
 
+    /**
+     * 点选候选的快照：点击瞬间的候选文本与 actions。
+     *
+     * 必须在入队时固定，不能等协程执行时再读 `candidateState`——连打时点击任务
+     * 排在按键之后，那时候选可能已换一批，index 会落到新候选/插件候选上，
+     * 结果就是「点了 A 上屏 B」。与 [deleteCandidate] 入队即快照同口径。
+     */
+    internal data class CandidatePickSnapshot(
+        val text: String?,
+        val action: CandidateAction?,
+    )
+
     suspend fun selectCandidateAsync(index: Int, expandedCandidate: RimeCandidate? = null) {
+        selectCandidateAsync(index, expandedCandidate, snapshot = null)
+    }
+
+    suspend fun selectCandidateAsync(
+        index: Int,
+        expandedCandidate: RimeCandidate? = null,
+        snapshot: CandidatePickSnapshot? = null,
+    ) {
         // 展开页点选（expandedCandidate 非空）：取词/注释以展开页显示的同一份
         // 全量列表为准（所见即所得）。index 是全量索引，不得用于索引引擎当前页的
         // candidates/candidateComments——部分选拼音（SELECTION 态）或候选超页时
         // 两列表错位，全局索引套在当前页上会取错词（如点长词只上屏另一短词）。
         // 插件候选 actions 按页内索引记录，展开页索引同样不适用，直接跳过检测。
         val pendingAction = if (expandedCandidate == null) {
-            service.candidateState.value.candidateActions.getOrNull(index)
+            snapshot?.action ?: service.candidateState.value.candidateActions.getOrNull(index)
         } else {
             null
         }
@@ -1898,6 +1997,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         }
 
         val selectedCandidate = expandedCandidate?.text
+            ?: snapshot?.text
             ?: if (index < service.candidateState.value.candidates.size) {
                 service.candidateState.value.candidates[index]
             } else null
@@ -1983,11 +2083,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         candidatePinyin: String?,
         committedText: String,
     ) {
-        if (SettingsPreferences.isSmartPredictionEnabled(service) && selectedCandidate != null && AssociationManager.isInitialized()) {
-            if (service.predictionManager.lastCommittedText.isNotEmpty()) {
-                val lastChar = service.predictionManager.lastCommittedText.last().toString()
-                service.predictionManager.recordInputPair(lastChar, selectedCandidate)
-            }
+        if (SettingsPreferences.isSmartPredictionEnabled(service) && selectedCandidate != null &&
+            AssociationManager.isInitialized()
+        ) {
+            service.predictionManager.recordCommitWithContext(selectedCandidate)
         }
         // T9 full commit：以用户点选的候选词文本为权威上屏文本；
         // 非 T9 仍用 RIME committedText（可能含简繁转换等处理）。
@@ -2235,6 +2334,89 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         return ok
     }
 
+    /**
+     * 编辑器会话票：入队瞬间固定编辑代次与输入连接。
+     *
+     * 同步 JNI 调用（select/commit/delete）无法被协程取消打断，切框后旧任务仍会返回，
+     * 因此每个阻塞点返回后都要用本票复核，确认仍是入队时的那个输入框。
+     */
+    internal class EditorSessionTicket(
+        val generation: Long,
+        val inputConnection: android.view.inputmethod.InputConnection?,
+    )
+
+    /** 会话票是否仍属于当前编辑器（代次未失效且输入连接未换）。 */
+    internal fun isEditorSessionCurrent(ticket: EditorSessionTicket): Boolean =
+        service.isEditorKeyGenerationCurrent(ticket.generation) &&
+            service.currentInputConnection === ticket.inputConnection
+
+    /**
+     * 该编码下「按词频/手动排序重排后，首位是否与引擎首位不同」。
+     *
+     * 用途：满码唯一自动上屏由 librime 直接 commit 它的**引擎首选**，完全绕过 Kotlin
+     * 层的候选重排。若重排会把别的词顶到第一，用户看到的首选与上屏的词就不一致
+     * （反馈：「候选排序首码，顶屏却不是首码候选」）。命中时由调用方改走 setInput，
+     * 不触发引擎 auto_select，让用户自己点选。
+     *
+     * 只在排序功能开启且该编码确实有排序记录时才可能返回 true；
+     * 无记录 → reorder 返回 null → 不拦截（每键零额外开销之外只在按下第 4 键时算一次）。
+     */
+    private fun sortWouldChangeTopCandidate(
+        code: String,
+        autoWordConfig: com.kingzcheung.xime.settings.AutoWordConfig,
+    ): Boolean {
+        if (code.isEmpty()) return false
+        val manualTable = service.candidateOrderTable[code]
+        val useManual = autoWordConfig.sortByManual && !manualTable.isNullOrEmpty()
+        if (!useManual && !autoWordConfig.sortByFreq) return false
+        val table = if (useManual) service.candidateOrderTable else service.wordFreqTable
+        if (table[code].isNullOrEmpty()) return false
+        // 引擎当前候选：自动上屏前就是这一页，首位即引擎会上屏的那个词。
+        val engineCandidates = service.rimeEngine.getCandidates().toList()
+        if (engineCandidates.size < 2) return false
+        val reordered = CandidateOrderStore.reorder(
+            code = code,
+            candidates = engineCandidates,
+            comments = List(engineCandidates.size) { "" },
+            table = table,
+        ) ?: return false
+        // reorder 已保证「只有需要变化时才返回非 null」，但再核对一次首位，
+        // 避免排序把首位换回来又被误判（防御性判断，代价是一次字符串比较）。
+        return reordered.candidates.firstOrNull() != engineCandidates.firstOrNull()
+    }
+
+    internal fun postEditorRimeJob(block: suspend CoroutineScope.() -> Unit) {
+        postEditorRimeJobWithSession { block() }
+    }
+
+    /**
+     * 与 [postEditorRimeJob] 相同，另把入队时捕获的 [EditorSessionTicket] 交给任务，
+     * 供包含阻塞引擎调用的任务在返回后复核编辑器身份。
+     */
+    internal fun postEditorRimeJobWithSession(
+        block: suspend CoroutineScope.(EditorSessionTicket) -> Unit,
+    ) {
+        val ticket = EditorSessionTicket(
+            generation = service.captureEditorKeyGeneration(),
+            inputConnection = service.currentInputConnection,
+        )
+        val editorJob = service.editorBoundKeyJob()
+        val job = service.serviceScope.launch(
+            service.keyProcessingDispatcher + editorJob,
+            start = CoroutineStart.LAZY,
+        ) {
+            if (!isEditorSessionCurrent(ticket)) return@launch
+            try {
+                block(ticket)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                FileLogger.e("ImeKeyRouter", "editor Rime job failed", e)
+            }
+        }
+        sendKeyJob(job)
+    }
+
     internal fun updateCalculatorCandidates() {
         val candidate = service.calculatorEngine.getCandidate()
         val result = service.calculatorEngine.getResult()
@@ -2288,18 +2470,27 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             val capitalAmount = capitalState.capitalAmountAmount
             // index 0: 纯金额（已在输入框里，无需再改）；index 1: 「算式 = 金额」
             val formula = CapitalAmountKeys.candidates(capitalExpression, capitalAmount).getOrNull(1)
-            service.serviceScope.launch(Dispatchers.Main) {
+            // 必须入队（与按键同一 FIFO）：直接 launch 会插到排队按键之前执行，
+            // 后面的 deleteSurroundingText 就按错误的长度删区间。
+            postEditorRimeJobWithSession { ticket ->
                 // 金额已经随按键上屏，所以 index 1 是**替换**那笔金额，而不是再提交一次；
                 // index 0 则完全不动文本（它本来就等于屏幕上的内容）
                 if (index == 1 && formula != null) {
-                    service.replaceBeforeCursor(capitalAmount, formula)
+                    withContext(Dispatchers.Main) {
+                        if (isEditorSessionCurrent(ticket)) {
+                            service.replaceBeforeCursor(capitalAmount, formula)
+                        }
+                    }
                 }
-                clearCapitalAmountDisplay()
-                // 通知键盘退出模式并作废累积：这笔金额输完了，
-                // 否则下一个数字会接在旧算式上继续算
-                service.uiState.value = service.uiState.value.copy(
-                    capitalAmountExitSignal = service.uiState.value.capitalAmountExitSignal + 1,
-                )
+                if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
+                withContext(Dispatchers.Main) {
+                    clearCapitalAmountDisplay()
+                    // 通知键盘退出模式并作废累积：这笔金额输完了，
+                    // 否则下一个数字会接在旧算式上继续算
+                    service.uiState.value = service.uiState.value.copy(
+                        capitalAmountExitSignal = service.uiState.value.capitalAmountExitSignal + 1,
+                    )
+                }
             }
             return
         }
@@ -2319,16 +2510,21 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                     else -> ""
                 }
                 if (textToCommit.isNotEmpty()) {
-                    service.calculatorEngine.clear()
-                    service.serviceScope.launch(Dispatchers.Main) {
-                        val ic = service.currentInputConnection
-                        if (ic != null) {
-                            // 删除输入框中已键入的表达式
-                            ic.deleteSurroundingText(expression.length, 0)
-                            // 提交选中的文本
-                            ic.commitText(textToCommit, textToCommit.length)
+                    // 与按键同一 FIFO：直接 launch 会抢在排队按键前执行，删错区间。
+                    // clear() 也必须在**入队任务内**执行，否则队列里还有按键在算旧表达式。
+                    postEditorRimeJobWithSession { ticket ->
+                        service.calculatorEngine.clear()
+                        if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
+                        withContext(Dispatchers.Main) {
+                            val ic = service.currentInputConnection
+                            if (ic != null) {
+                                // 删除输入框中已键入的表达式
+                                ic.deleteSurroundingText(expression.length, 0)
+                                // 提交选中的文本
+                                ic.commitText(textToCommit, textToCommit.length)
+                            }
+                            service.updateCandidateState { CandidateState() }
                         }
-                        service.updateCandidateState { CandidateState() }
                     }
                 }
             }
@@ -2350,8 +2546,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
                 candidateComments = emptyList()
             ) }
         } else {
-            postRimeJob {
-                selectCandidateAsync(index)
+            // 点击瞬间快照文本与 actions：连打时本任务排在按键之后执行，
+            // 届时 candidateState 可能已换一批候选，按 index 现读会「点 A 上屏 B」。
+            val pick = CandidatePickSnapshot(
+                text = service.candidateState.value.candidates.getOrNull(index),
+                action = service.candidateState.value.candidateActions.getOrNull(index),
+            )
+            postEditorRimeJob {
+                selectCandidateAsync(index, snapshot = pick)
             }
         }
     }
@@ -2364,9 +2566,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
      * 注入会使两者错位，与 selectCandidateAsync 同口径），删除后刷新候选。
      */
     internal fun deleteCandidate(displayIndex: Int) {
-        postRimeJob {
-            val text = service.candidateState.value.candidates.getOrNull(displayIndex)
-            if (text.isNullOrEmpty()) return@postRimeJob
+        // 入队瞬间快照文本与编码：连打时任务排在按键之后，届时候选已换一批，
+        // 按 index 现读会删错词、并把编码记到错的条目上。
+        val text = service.candidateState.value.candidates.getOrNull(displayIndex)
+        if (text.isNullOrEmpty()) return
+        val code = service.candidateState.value.inputText
+            .ifEmpty { service.candidateState.value.preeditText }
+        postEditorRimeJobWithSession { ticket ->
+            if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
             val engineIndex = resolveRimeCandidateIndex(
                 displayIndex, text, service.rimeEngine.getCandidates().toList()
             )
@@ -2374,13 +2581,13 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             // 引擎删不动的词（方案词典里的固定词条）也要进黑名单：显示层统一屏蔽，
             // 保证用户「长按删除」之后它不再出现在候选栏。带当前输入编码记录，
             // 只屏蔽该编码下的这个词，不影响同一词在其它编码下的候选。
-            val code = service.candidateState.value.inputText
-                .ifEmpty { service.candidateState.value.preeditText }
+            // 删除本身是对旧框候选的操作，即使此刻已切框也要记下来（否则这个词删了又回来）。
             service.addWordBlacklist(text, code)
             FileLogger.i(
                 XimeInputMethodService.TAG,
                 "DeleteCandidate: text='$text' code='$code' display=$displayIndex engine=$engineIndex ok=$ok blacklisted"
             )
+            if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
             withContext(Dispatchers.Main) {
                 service.updateUI()
             }
@@ -2388,7 +2595,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
     }
     
     internal fun pageDown() {
-        postRimeJob {
+        postEditorRimeJob {
             service.rimeEngine.pageDown()
             withContext(Dispatchers.Main) {
                 service.updateUI()
@@ -2397,7 +2604,7 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
     }
     
     internal fun pageUp() {
-        postRimeJob {
+        postEditorRimeJob {
             service.rimeEngine.pageUp()
             withContext(Dispatchers.Main) {
                 service.updateUI()
@@ -2419,30 +2626,31 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         // 入队前先按全局索引取全量候选：调用线程读到的 expandedCandidates 正是
         // UI 渲染的同一份列表；入队后再取可能被编码刷新清空/重建而扑空
         val expandedCandidate = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)
-        postRimeJob {
+        postEditorRimeJobWithSession { ticket ->
             // T9 方案的选词消费由 t9_processor 独立完成，直接调引擎 select 会
             // 遗留 [confirmed, phony] 残留组合态（见 selectCandidateAsync 注释），
             // 降级走候选栏同款路径；取词/注释必须用展开页同一份全量候选——
             // 全局索引与引擎当前页列表错位时会取错词/丢字
             if (isT9Schema(service.uiState.value.currentSchemaId)) {
                 selectCandidateAsync(globalIndex, expandedCandidate)
-                return@postRimeJob
+                return@postEditorRimeJobWithSession
             }
             val ok = service.rimeEngine.selectCandidateByGlobalIndex(globalIndex)
             FileLogger.i(
                 "ImeKeyRouter",
                 "selectCandidateGlobal: index=$globalIndex ok=$ok"
             )
-            if (!ok) return@postRimeJob
+            if (!ok) return@postEditorRimeJobWithSession
 
             val committedText = service.rimeEngine.commit()
+            // 同步 JNI 打不断：等锁/提交期间用户可能已切框，结果绝不能写进新框。
+            if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
             if (committedText.isNotEmpty()) {
                 // 智能联想记录（对齐候选栏点选路径，以引擎实际返回文本为准）
-                if (SettingsPreferences.isSmartPredictionEnabled(service) && AssociationManager.isInitialized()) {
-                    if (service.predictionManager.lastCommittedText.isNotEmpty()) {
-                        val lastChar = service.predictionManager.lastCommittedText.last().toString()
-                        service.predictionManager.recordInputPair(lastChar, committedText)
-                    }
+                if (SettingsPreferences.isSmartPredictionEnabled(service) &&
+                    AssociationManager.isInitialized()
+                ) {
+                    service.predictionManager.recordCommitWithContext(committedText)
                 }
                 withContext(Dispatchers.Main) {
                     service.markCandidateSelection(committedText)
@@ -2470,18 +2678,20 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
 
     /** 候选展开页长按删除自造词：按跨页全局索引删除，删除后重拉全量候选 */
     internal fun deleteCandidateGlobal(globalIndex: Int) {
-        postRimeJob {
-            val text = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)?.text
-            if (text.isNullOrEmpty()) return@postRimeJob
+        // 入队瞬间快照：连打时任务排在按键之后，候选可能已重建。
+        val text = service.candidateState.value.expandedCandidates.getOrNull(globalIndex)?.text
+        if (text.isNullOrEmpty()) return
+        val code = service.candidateState.value.inputText
+            .ifEmpty { service.candidateState.value.preeditText }
+        postEditorRimeJobWithSession { ticket ->
             val ok = service.rimeEngine.deleteCandidateByGlobalIndex(globalIndex)
             // 与候选栏同口径：引擎删不动的词也进黑名单（带当前编码），保证删了就不再出现
-            val code = service.candidateState.value.inputText
-                .ifEmpty { service.candidateState.value.preeditText }
             service.addWordBlacklist(text, code)
             FileLogger.i(
                 "ImeKeyRouter",
                 "deleteCandidateGlobal: text='$text' code='$code' index=$globalIndex ok=$ok blacklisted"
             )
+            if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
             withContext(Dispatchers.Main) {
                 service.updateUI()
             }

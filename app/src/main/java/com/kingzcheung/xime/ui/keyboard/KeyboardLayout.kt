@@ -55,6 +55,7 @@ import com.kingzcheung.xime.settings.KeyboardKeyConfig
 import com.kingzcheung.xime.settings.KeysConfigHelper
 import com.kingzcheung.xime.settings.LongPressDirectCommitState
 import com.kingzcheung.xime.keyboard.GestureAction
+import com.kingzcheung.xime.keyboard.AxcvLongPressPolicy
 
 /** 半角 → 全角标点映射，中文模式下键帽显示用。提交仍走半角由 Rime 处理。 */
 import androidx.compose.ui.Modifier
@@ -1939,10 +1940,10 @@ private fun resolveKeyRenderConfig(key: String, isAsciiMode: Boolean): KeyRender
         swipeDownValue = swipeDownRaw?.value,
         swipeDownKeyLabel = if (swipeDownDisplay == DisplayMode.BUBBLE) "" else swipeDownLabel.orEmpty(),
         swipeDownText = if (swipeDownBubble) swipeDownLabel else null,
-        longPressLabels = if (zReverseActive) null else if (longPressDisplay == DisplayMode.BUBBLE) {
+        longPressLabels = if (zReverseActive || AxcvLongPressPolicy.actionFor(key) != null) null else if (longPressDisplay == DisplayMode.BUBBLE) {
             longPressConfig?.let { KeysConfigHelper.longPressDisplayItems(it) }?.ifEmpty { null }
         } else null,
-        longPressGestureMap = if (zReverseActive) null else if (longPressDisplay == DisplayMode.BUBBLE) {
+        longPressGestureMap = if (zReverseActive || AxcvLongPressPolicy.actionFor(key) != null) null else if (longPressDisplay == DisplayMode.BUBBLE) {
             longPressConfig?.let { KeysConfigHelper.longPressActionMap(it) }
         } else null,
         zReverseActive = zReverseActive,
@@ -2069,8 +2070,13 @@ fun KeyboardRowWithConfig(
             // 反查词典由 schema reverse_lookup.dictionary 指定（XGuai_flypy 主表已并入
             // XGuai_reverse 等全部码表，编译出 reverse.bin）；用户可自定义主表 import_tables
             // 里的反查词典文件。走 onKeyPress 字符串路由（与直接按键同管道）。
-            val onZReverseLongClick: (() -> Unit)? = remember(key, zReverseActive, onKeyPress) {
-                if (zReverseActive) ({ onKeyPress("`") }) else null
+            val onKeyLongClick: (() -> Unit)? = remember(key, zReverseActive, onKeyPress, onGestureAction) {
+                val editingAction = AxcvLongPressPolicy.actionFor(key)
+                when {
+                    editingAction != null -> ({ onGestureAction?.invoke(editingAction, ""); Unit })
+                    zReverseActive -> ({ onKeyPress("`") })
+                    else -> null
+                }
             }
 
             if (compactButton) {
@@ -2093,7 +2099,7 @@ fun KeyboardRowWithConfig(
                     onSwipeStateChange = onSwipeStateChange,
                     onPress = onPress,
                     onRelease = onRelease,
-                    onLongClick = onZReverseLongClick,
+                    onLongClick = onKeyLongClick,
                     onLongPressSelect = onLongPressSelect,
                     longPressItems = longPressLabels,
                     fontSize = config.fontSize,
@@ -2124,7 +2130,7 @@ fun KeyboardRowWithConfig(
                 onSwipeStateChange = onSwipeStateChange,
                 onPress = onPress,
                 onRelease = onRelease,
-                onLongClick = onZReverseLongClick,
+                onLongClick = onKeyLongClick,
                 onLongPressSelect = onLongPressSelect,
                 longPressItems = longPressLabels,
                 fontSize = config.fontSize,
@@ -2169,7 +2175,21 @@ private fun ShiftCapsKeyButton(
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
 
@@ -2234,7 +2254,7 @@ private fun ShiftCapsKeyButton(
                 }
             }
             .padding(LocalKeyVisualPadding.current)
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(keyClipShape)
             .background(
                 if (isPressed) darkenKeyColor(backgroundColor, 0.1f)
@@ -2242,6 +2262,7 @@ private fun ShiftCapsKeyButton(
                 else if (shiftMode == ShiftMode.SINGLE) darkenKeyColor(backgroundColor, 0.1f)
                 else backgroundColor
             )
+            .then(bevelLayer)
             .keySemantics(
                 "大小写切换",
                 when (shiftMode) {
@@ -2531,7 +2552,21 @@ fun SwipeableKeyButtonLandscape(
     // 长按已就地执行动作（上屏角标）——抬手时不能因为手指微小位移再补一次 onClick。
     var longPressDirectFired by remember { mutableStateOf(false) }
 
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    val depthColor = if (isPressed) darkenKeyColor(backgroundColor) else backgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = depthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = isPressed,
+        strengthPercent = 100,
+    )
     val keyCornerRadius = LocalKeyCornerRadius.current
     val keyClipShape = remember(keyCornerRadius) { RoundedCornerShape(keyCornerRadius) }
 
@@ -2806,9 +2841,10 @@ fun SwipeableKeyButtonLandscape(
                     KeyHeightCache.value = dp
                 }
             }
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(keyClipShape)
-            .background(if (isPressed) darkenKeyColor(backgroundColor) else backgroundColor),
+            .background(if (isPressed) darkenKeyColor(backgroundColor) else backgroundColor)
+            .then(bevelLayer),
         contentAlignment = Alignment.TopStart
     ) {
         val contentScale = adaptiveKeyContentScale(
@@ -2914,11 +2950,12 @@ fun CompactKeyboardRowWithConfig(
 
             val longPressConfig = KeysConfigHelper.getKeyGesture(key, isAsciiMode)?.longPress
             val longPressDisplay = longPressConfig?.display ?: DisplayMode.KEY
-            val longPressLabels = if (longPressDisplay == DisplayMode.BUBBLE) {
+            val editingLongPressAction = AxcvLongPressPolicy.actionFor(key)
+            val longPressLabels = if (editingLongPressAction != null) null else if (longPressDisplay == DisplayMode.BUBBLE) {
                 longPressConfig?.let { KeysConfigHelper.longPressDisplayItems(it) }
                     ?.ifEmpty { null }
             } else null
-            val longPressGestureMap = if (longPressDisplay == DisplayMode.BUBBLE) {
+            val longPressGestureMap = if (editingLongPressAction != null) null else if (longPressDisplay == DisplayMode.BUBBLE) {
                 longPressConfig?.let { KeysConfigHelper.longPressActionMap(it) }
             } else null
 
@@ -2984,6 +3021,9 @@ fun CompactKeyboardRowWithConfig(
                     }
                 }
             } else null
+            val compactOnLongClick: (() -> Unit)? = remember(editingLongPressAction, onGestureAction) {
+                editingLongPressAction?.let { action -> ({ onGestureAction?.invoke(action, ""); Unit }) }
+            }
             val compactOnLongPressSelect: ((String) -> Unit)? = remember(key, longPressGestureMap, onGestureAction, onCommitText, onKeyPress) { { selectedLabel: String ->
                 dispatchLongPressSelection(
                     selectedLabel, longPressGestureMap, onKeyPress, onCommitText, onGestureAction)
@@ -3009,6 +3049,7 @@ fun CompactKeyboardRowWithConfig(
                 onSwipeStateChange = onSwipeStateChange,
                 onPress = compactOnPress,
                 onRelease = compactOnRelease,
+                onLongClick = compactOnLongClick,
                 onLongPressSelect = compactOnLongPressSelect,
                 longPressItems = longPressLabels,
                 fontSize = config.fontSize,
@@ -3067,7 +3108,24 @@ private fun SpaceKey(
     val context = LocalContext.current
 
     val density = LocalDensity.current
-    val shadowModifier = rememberCrispShadowModifier(keyBackgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // 空格键此前没有按下态：整个渲染器都没有 isPressed，按下去只有 keyPressScale 的缩放，
+// 键面颜色与立体感都不变，观感像「按了没反应」。这里补上与其它键一致的按下状态。
+    var spacePressed by remember { mutableStateOf(false) }
+    val spaceDepthColor = if (spacePressed) darkenKeyColor(keyBackgroundColor, 0.2f) else keyBackgroundColor
+    val shadowLayer = rememberKeyShadowModifier(
+        backgroundColor = spaceDepthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = spacePressed,
+        strengthPercent = 100,
+    )
+    val bevelLayer = rememberKeyBevelModifier(
+        backgroundColor = spaceDepthColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = spacePressed,
+        strengthPercent = 100,
+    )
     val keyFontFamily = AppFonts.keyFontFamily
 
     Box(
@@ -3076,6 +3134,8 @@ private fun SpaceKey(
             .pointerInput(isSttEnabled, voiceSticky, longPressMs) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    spacePressed = true
+                    try {
 
                     if (voiceSticky) {
                         // 常驻语音模式：轻触空格即结束语音
@@ -3217,14 +3277,18 @@ private fun SpaceKey(
                     } else if (!longPressTriggered) {
                         if (currentOnTap != null) currentOnTap?.invoke() else currentOnKeyPress("space")
                     }
+                    } finally {
+                        spacePressed = false
+                    }
                 }
             }
             .padding(LocalKeyVisualPadding.current)
             .fillMaxWidth()
             .fillMaxHeight()
-            .then(shadowModifier)
+            .then(shadowLayer)
             .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
-            .background(keyBackgroundColor)
+            .background(if (spacePressed) darkenKeyColor(keyBackgroundColor, 0.2f) else keyBackgroundColor)
+            .then(bevelLayer)
             .keySemantics(
                 when {
                     voiceSticky -> "轻触结束语音"

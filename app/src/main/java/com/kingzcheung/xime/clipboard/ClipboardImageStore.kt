@@ -1,6 +1,7 @@
 package com.kingzcheung.xime.clipboard
 
 import java.io.File
+import kotlinx.coroutines.sync.Mutex
 
 /**
  * 剪贴板图片文件存储（内容寻址）。
@@ -26,6 +27,9 @@ class ClipboardImageStore(private val rootDir: File) {
     }
 
     companion object {
+        /** 采集、孤儿回收与完整备份共用，避免备份中的图片被并发删掉。 */
+        internal val mutationMutex = Mutex()
+
         const val DIR_NAME = "clipboard_images"
 
         /**

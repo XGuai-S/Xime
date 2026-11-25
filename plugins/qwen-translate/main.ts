@@ -289,17 +289,13 @@ async function translateGoogle(text: string): Promise<string> {
   return str((list[0] as Record<string, unknown>).translatedText);
 }
 
-/** 统一入口：按当前引擎切换。返回 true 表示走了流式（结果经 SSE 回调累积）。 */
-async function translate(text: string): Promise<string> {
+/** 区分流式等待与非流式空结果，失败时允许再次生成。 */
+async function translate(text: string): Promise<{ streaming: boolean; text: string }> {
   const engine = currentEngine();
-  if (engine === ENGINE_DEEPL) return await translateDeepL(text);
-  if (engine === ENGINE_GOOGLE) return await translateGoogle(text);
-  if (engine === ENGINE_OPENAI) {
-    await startOpenAi(text);
-    return ''; // 流式：结果由 onData 累积
-  }
-  await startQwen(text);
-  return ''; // 流式
+  if (engine === ENGINE_DEEPL) return { streaming: false, text: await translateDeepL(text) };
+  if (engine === ENGINE_GOOGLE) return { streaming: false, text: await translateGoogle(text) };
+  const streaming = engine === ENGINE_OPENAI ? await startOpenAi(text) : await startQwen(text);
+  return { streaming, text: '' };
 }
 
 // ================= 插件定义（宿主按扩展点路由调用） =================
@@ -448,10 +444,9 @@ const plugin = definePlugin({
       buffer = '';
       sessionId = -1;
       try {
-        const sync = await translate(context);
-        if (sync !== '') {
-          // 非流式引擎（DeepL / Google）：直接出结果
-          buffer = sync;
+        const result = await translate(context);
+        if (!result.streaming) {
+          buffer = result.text;
           generating = false;
         }
         // 流式引擎：保持 generating=true，等 onDone/onError 收尾

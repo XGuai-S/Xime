@@ -509,6 +509,25 @@ data class AutoWordConfig(
      */
     @SerialName("char_dict")
     val charDict: String = "Flypy_char",
+    /**
+     * 按**方案**指定单字码表：方案 id → 词典名（不含 `.dict.yaml`）。
+     *
+     * 为什么要它：只有一个全局 [charDict] 时，用户切换到别的方案（五笔/其它音形）后，
+     * 造词仍在用这张表的字码，造出来的词在**当前方案里打不出来**——表现为
+     * 「自动造词识别到了次方案，导致有些词组不了」。
+     *
+     * 优先级：[charDictBySchema]（当前方案命中）> [charDict]（全局）> 方案主词典兜底。
+     * 一个方案只配自己方案的单字表，就不会再串方案了：
+     * ```yaml
+     * auto_word:
+     *   char_dict: Flypy_char           # 全局默认（兼容旧配置）
+     *   char_dict_by_schema:
+     *     xime_flypy: Flypy_char        # 小鹤音形
+     *     wubi86: Wubi_char             # 五笔
+     * ```
+     */
+    @SerialName("char_dict_by_schema")
+    val charDictBySchema: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -552,7 +571,7 @@ data class BackupConfig(
      * - 修改后重启应用生效（进程存活期间不会热更新周期）。
      */
     @SerialName("auto_interval_hours")
-    val autoIntervalHours: Int = 12,
+    val autoIntervalHours: Int = 24,
     /**
      * 云端备份保留份数。默认 2：远端备份目录只保留最近 2 份（含刚上传的），
      * 更旧的自动删除，避免坚果云等 WebDAV 目录文件越积越多。

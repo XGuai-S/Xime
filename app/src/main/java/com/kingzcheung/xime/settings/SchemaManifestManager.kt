@@ -79,7 +79,11 @@ object SchemaManifestManager {
         withContext(Dispatchers.IO) {
             val file = getRegistryFile(context)
             file.parentFile?.mkdirs()
-            file.writeText(registry.toString(2))
+            // write 失败返回 false 不抛异常：调用方靠外层 try/catch 判定成功与否，
+            // 这里必须抛出，否则「注册表没写进去」会被当成成功返回。
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(file, registry.toString(2))) {
+                throw java.io.IOException("写 manifest 注册表失败: ${file.absolutePath}")
+            }
         }
     }
 
@@ -100,7 +104,10 @@ object SchemaManifestManager {
         withContext(Dispatchers.IO) {
             val file = getManifestFile(context, schemeId)
             file.parentFile?.mkdirs()
-            file.writeText(manifest.toString(2))
+            // 同上：调用方以「函数正常返回」作为写盘成功的依据
+            if (!com.kingzcheung.xime.util.AtomicFileWriter.write(file, manifest.toString(2))) {
+                throw java.io.IOException("写方案 manifest 失败: $schemeId")
+            }
         }
     }
 

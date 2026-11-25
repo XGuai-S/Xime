@@ -18,6 +18,8 @@ import java.util.concurrent.LinkedBlockingQueue
 object FileLogger {
     private const val TAG = "FileLogger"
     private const val MAX_LOG_SIZE = 5 * 1024 * 1024
+    /** 每写出这么多字符才做一次尺寸检查（约 1MB 日志量），避免每批日志都 stat。 */
+    private const val SIZE_CHECK_INTERVAL_CHARS = 1024 * 1024L
     private const val MAX_LOG_FILES = 10
     private const val QUEUE_CAPACITY = 4096
     
@@ -122,6 +124,8 @@ object FileLogger {
     
     private fun flusherLoop() {
         val batch = ArrayList<String>(100)
+        // 自上次尺寸检查以来写出的字符数（粗略计数，避免每批都 stat 一次）。
+        var sinceSizeCheck = 0L
         while (running) {
             try {
                 batch.clear()
@@ -129,11 +133,22 @@ object FileLogger {
                 logQueue.drainTo(batch, 99)
 
                 val w = writer ?: continue
+                var written = 0L
                 synchronized(writeLock) {
                     for (line in batch) {
                         w.write(line)
+                        written += line.length
                     }
                     w.flush()
+                }
+                // 运行期轮转：输入法是常驻进程，可能连续跑数天不重启。
+                // 旧实现只在 init() 里判一次 MAX_LOG_SIZE，之后的日志无上限增长
+                // （单日文件涨到几十 MB，既占空间又让每次 append 变慢）。
+                // 每累积 SIZE_CHECK_INTERVAL_CHARS 才 stat 一次，热路径仍近乎零成本。
+                sinceSizeCheck += written
+                if (sinceSizeCheck >= SIZE_CHECK_INTERVAL_CHARS) {
+                    sinceSizeCheck = 0L
+                    rotateIfOversized()
                 }
             } catch (e: InterruptedException) {
                 Thread.currentThread().interrupt()
@@ -142,6 +157,26 @@ object FileLogger {
                 Log.e(TAG, "Log flusher error", e)
             }
         }
+    }
+
+    /** 当前日志文件超过上限时改名归档并重开新文件（由 flusher 线程调用）。 */
+    private fun rotateIfOversized() {
+        val dir = logsDir ?: return
+        val current = logFile ?: return
+        if (!current.exists() || current.length() <= MAX_LOG_SIZE) return
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val archived = File(dir, "kime_$ts.log")
+        synchronized(writeLock) {
+            runCatching { writer?.close() }
+            writer = null
+            if (!current.renameTo(archived)) {
+                // 改名失败（极少见）时直接清空，宁丢旧日志也不让文件无限增长
+                runCatching { current.delete() }
+            }
+            logFile = File(dir, "kime_${fileDayOf()}.log")
+            runCatching { writer = BufferedWriter(FileWriter(logFile, true)) }
+        }
+        cleanOldLogs()
     }
     
     fun isInitialized(): Boolean = isInitialized

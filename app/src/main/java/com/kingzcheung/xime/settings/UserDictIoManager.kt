@@ -30,10 +30,13 @@ object UserDictIoManager {
     internal const val MAX_IMPORT_BYTES = 8 * 1024 * 1024
 
     private const val USERDB_EXTENSION = ".userdb"
-    private const val EXPORT_TEMP_NAME = "userdict_export.txt"
-    private const val IMPORT_TEMP_NAME = "userdict_import.txt"
-    /** 单条增删用的临时码表（与整库导入分开，避免互相覆盖）。 */
-    private const val EDIT_TEMP_NAME = "userdict_edit.txt"
+    private const val EXPORT_TEMP_PREFIX = "userdict_export_"
+    private const val IMPORT_TEMP_PREFIX = "userdict_import_"
+    private const val EDIT_TEMP_PREFIX = "userdict_edit_"
+
+    /** 每次操作独立的临时文件：固定名时并发操作会互相覆盖、互删对方正在交给引擎的文件。 */
+    private fun newTempFile(context: Context, prefix: String): File =
+        File.createTempFile(prefix, ".txt", context.cacheDir)
 
     /**
      * 列出本机用户词库，按名称升序。
@@ -73,7 +76,7 @@ object UserDictIoManager {
      * @return 导出的条目数
      */
     fun exportTo(context: Context, dictName: String, uri: Uri): Result<Int> = runCatching {
-        val temp = File(context.cacheDir, EXPORT_TEMP_NAME)
+        val temp = newTempFile(context, EXPORT_TEMP_PREFIX)
         try {
             val count = RimeEngine.getInstance().exportUserDict(dictName, temp.absolutePath)
             if (count < 0) throw IOException("导出失败：打不开「$dictName」用户词库")
@@ -105,7 +108,7 @@ object UserDictIoManager {
         val text = bytes.toString(Charsets.UTF_8)
         validateImportText(text)?.let { throw IOException(it) }
 
-        val temp = File(context.cacheDir, IMPORT_TEMP_NAME)
+        val temp = newTempFile(context, IMPORT_TEMP_PREFIX)
         try {
             temp.writeText(text, Charsets.UTF_8)
             val count = RimeEngine.getInstance().importUserDict(dictName, temp.absolutePath)
@@ -196,7 +199,7 @@ object UserDictIoManager {
      */
     private fun applyCodeTable(context: Context, dictName: String, text: String): Result<Int> =
         runCatching {
-            val temp = File(context.cacheDir, EDIT_TEMP_NAME)
+            val temp = newTempFile(context, EDIT_TEMP_PREFIX)
             try {
                 temp.writeText(text, Charsets.UTF_8)
                 val count = RimeEngine.getInstance().importUserDict(dictName, temp.absolutePath)

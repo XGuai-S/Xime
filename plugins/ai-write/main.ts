@@ -44,6 +44,7 @@ let lastContext = '';
 let buffer = '';
 let generating = false;
 let sessionId = -1;
+let generation = 0;
 
 function buildItems(): ResultItem[] {
   if (buffer === '') return [];
@@ -104,15 +105,17 @@ const plugin = definePlugin({
 
     async onAction(input: XimePanelActionEvent): Promise<void> {
       if (input.actionId === 'stop') {
-        if (sessionId >= 0) {
+        generation++;
+        const sid = sessionId;
+        sessionId = -1;
+        generating = false;
+        if (sid >= 0) {
           try {
-            await host.http.closeStream(sessionId);
+            await host.http.closeStream(sid);
           } catch (e) {
             host.logError('AI 流式中断失败: ' + ((e as Error).message || '未知错误'));
           }
-          sessionId = -1;
         }
-        generating = false;
         return;
       }
       if (input.actionId !== 'generate') return;
@@ -129,6 +132,7 @@ const plugin = definePlugin({
         return;
       }
 
+      const requestGeneration = ++generation;
       buffer = '';
       generating = true;
 
@@ -157,8 +161,14 @@ const plugin = definePlugin({
 
       // SSE 流式：await 建立，resolve 会话 id（回调槽 sse.onData/onDone/onError 携带该 id）；失败 reject XimeError
       try {
-        sessionId = await host.http.stream(url, headers, 0, 'POST', body);
+        const sid = await host.http.stream(url, headers, 0, 'POST', body);
+        if (requestGeneration !== generation) {
+          await host.http.closeStream(sid);
+          return;
+        }
+        sessionId = sid;
       } catch (e) {
+        if (requestGeneration !== generation) return;
         generating = false;
         host.logError('AI 流式连接被拒绝: ' + ((e as Error).message || '未知错误'));
       }
@@ -172,7 +182,8 @@ const plugin = definePlugin({
   // ---- SSE 回调槽（宿主投递；形参 id 与模块态 sessionId 同名会遮蔽，统一用 sid） ----
 
   sse: {
-    onData(_sid: number, text: string): void {
+    onData(sid: number, text: string): void {
+      if (sid < 0 || sid !== sessionId) return;
       if (text === undefined || text === null || text === '' || text === '[DONE]') return;
       // 原生 JSON.parse 非法输入抛异常（原 host.json.decode 返回 nil）
       let data: unknown = null;
@@ -190,7 +201,8 @@ const plugin = definePlugin({
       }
     },
 
-    onDone(_sid: number, fullText: string): void {
+    onDone(sid: number, fullText: string): void {
+      if (sid < 0 || sid !== sessionId) return;
       if (fullText !== undefined && fullText !== null && fullText !== '' && buffer === '') {
         buffer = fullText;
       }
@@ -198,7 +210,8 @@ const plugin = definePlugin({
       sessionId = -1;
     },
 
-    onError(_sid: number, message: string): void {
+    onError(sid: number, message: string): void {
+      if (sid < 0 || sid !== sessionId) return;
       host.logError('AI 流式请求失败: ' + (message !== null && message !== undefined ? message : '未知错误'));
       generating = false;
       sessionId = -1;

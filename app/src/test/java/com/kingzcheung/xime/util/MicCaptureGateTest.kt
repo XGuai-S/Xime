@@ -72,4 +72,68 @@ class MicCaptureGateTest {
         assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = justBefore + 1))
         assertEquals("悬浮胶囊", MicCaptureGate.currentHolder())
     }
+
+    @Test
+    fun `process change logs a gate-broken error`() {
+        val errors = mutableListOf<String>()
+        var process = "com.kingzcheung.xime"
+        MicCaptureGate.processNameProvider = { process }
+        MicCaptureGate.errorReporter = { errors.add(it) }
+
+        assertTrue(MicCaptureGate.tryAcquire("键盘语音", nowMs = 1_000L))
+        assertTrue(errors.isEmpty())
+        MicCaptureGate.release("键盘语音")
+
+        // 模拟有人给悬浮胶囊组件加了 android:process：两条路径各自持锁，互斥静默失效
+        process = "com.kingzcheung.xime:bubble"
+        assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = 2_000L))
+
+        assertEquals(1, errors.size)
+        assertTrue(errors[0].contains("闸门已失效"))
+        assertTrue(errors[0].contains("com.kingzcheung.xime:bubble"))
+    }
+
+    @Test
+    fun `process mismatch is reported only once`() {
+        val errors = mutableListOf<String>()
+        var process = "com.kingzcheung.xime"
+        MicCaptureGate.processNameProvider = { process }
+        MicCaptureGate.errorReporter = { errors.add(it) }
+
+        assertTrue(MicCaptureGate.tryAcquire("键盘语音", nowMs = 1_000L))
+        process = "com.kingzcheung.xime:bubble"
+        MicCaptureGate.release("键盘语音")
+        assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = 2_000L))
+        MicCaptureGate.release("悬浮胶囊")
+        assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = 3_000L))
+
+        // 每次起录音都刷同一条 ERROR 只会淹没日志
+        assertEquals(1, errors.size)
+    }
+
+    @Test
+    fun `same process never warns`() {
+        val errors = mutableListOf<String>()
+        MicCaptureGate.processNameProvider = { "com.kingzcheung.xime" }
+        MicCaptureGate.errorReporter = { errors.add(it) }
+
+        assertTrue(MicCaptureGate.tryAcquire("键盘语音", nowMs = 1_000L))
+        MicCaptureGate.release("键盘语音")
+        assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = 2_000L))
+
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun `unknown process name skips the assertion`() {
+        val errors = mutableListOf<String>()
+        MicCaptureGate.processNameProvider = { null }
+        MicCaptureGate.errorReporter = { errors.add(it) }
+
+        assertTrue(MicCaptureGate.tryAcquire("键盘语音", nowMs = 1_000L))
+        MicCaptureGate.release("键盘语音")
+        assertTrue(MicCaptureGate.tryAcquire("悬浮胶囊", nowMs = 2_000L))
+
+        assertTrue(errors.isEmpty())
+    }
 }

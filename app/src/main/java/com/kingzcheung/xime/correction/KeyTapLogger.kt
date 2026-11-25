@@ -8,7 +8,9 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -34,6 +36,7 @@ object KeyTapLogger {
     private const val KEEP_LINES_ON_TRIM = 200_000
     private const val MAX_CANDIDATES = 8
     private const val MAX_TEXT = 64
+    private const val MAX_PENDING_WRITES = 256
 
     /** 开关（由设置同步，见 XimeApplication / DeveloperScreen）。 */
     @Volatile
@@ -49,9 +52,9 @@ object KeyTapLogger {
 
     private var logFile: File? = null
     private val seq = AtomicLong(0)
-
-    private val executor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "KeyTapLog").apply { isDaemon = true }
+    private val droppedWrites = AtomicLong(0)
+    private val executor = createBoundedKeyTapExecutor(MAX_PENDING_WRITES) {
+        droppedWrites.incrementAndGet()
     }
 
     fun init(context: Context) {
@@ -176,6 +179,8 @@ object KeyTapLogger {
         val s = seq.incrementAndGet()
         executor.execute {
             try {
+                val dropped = droppedWrites.getAndSet(0)
+                if (dropped > 0) Log.w(TAG, "dropped $dropped queued diagnostic events under storage backpressure")
                 val json = buildJsonObject {
                     put("v", 2)
                     put("e", event)
@@ -199,4 +204,20 @@ object KeyTapLogger {
             file.writeText(kept.joinToString("\n") + "\n")
         }
     }
+}
+
+internal fun createBoundedKeyTapExecutor(
+    queueCapacity: Int,
+    onRejected: () -> Unit,
+): ThreadPoolExecutor {
+    require(queueCapacity > 0)
+    return ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(queueCapacity),
+        { task -> Thread(task, "KeyTapLog").apply { isDaemon = true } },
+        { _, _ -> onRejected() },
+    )
 }

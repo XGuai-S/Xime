@@ -5,6 +5,7 @@ import com.kingzcheung.xime.plugin.core.api.BackupDownload
 import com.kingzcheung.xime.plugin.core.api.BackupPlugin
 import com.kingzcheung.xime.plugin.core.api.BackupResult
 import com.kingzcheung.xime.plugin.core.api.RemoteBackupEntry
+import com.kingzcheung.xime.plugin.core.api.RemoteFileEntry
 import com.kingzcheung.xime.plugin.core.js.http.BlobStore
 import com.kingzcheung.xime.plugin.core.js.sdk.JsPluginContract
 import com.kingzcheung.xime.plugin.core.model.PluginContext
@@ -102,8 +103,10 @@ class JsBackupPluginAdapter(
 
     override suspend fun testConnection(): String? = withContext(Dispatchers.IO) {
         try {
-            val result = runtime.callAsync(JsPluginContract.PATH_BACKUP_TEST)
-            val v = JsScriptRuntime.jsToKotlin(result)
+            val method = JsPluginContract.PATH_BACKUP_TEST
+            if (!runtime.hasMethod(method)) return@withContext "插件未提供连接测试"
+            val result = runtime.callAsyncResult(method) ?: return@withContext "连接测试执行失败"
+            val v = result.value
             when (v) {
                 null -> null
                 is Boolean -> if (v) null else "连接失败"
@@ -138,6 +141,91 @@ class JsBackupPluginAdapter(
             )
         }
         return BackupResult(ok = (v as? Boolean) ?: false)
+    }
+
+    // ------------------------------------------------------------------
+    // 文件级增量备份（v3.1）
+    //
+    // 插件不支持时 [supportsFileLevel] 返回 false，宿主自动回退整包路径，
+    // 因此这里每个方法都要能安全地被「未实现」的插件触发（返回 null / false）。
+    // ------------------------------------------------------------------
+
+    override fun supportsFileLevel(): Boolean =
+        runtime.hasMethod(JsPluginContract.PATH_BACKUP_PUSH_FILE) &&
+            runtime.hasMethod(JsPluginContract.PATH_BACKUP_LIST_FILES)
+
+    override suspend fun listRemoteFiles(): List<RemoteFileEntry>? = withContext(Dispatchers.IO) {
+        try {
+            val result = runtime.callAsync(JsPluginContract.PATH_BACKUP_LIST_FILES)
+            // 空数组表示「远端还没有任何文件」，是合法状态；
+            // 只有插件抛错/返回非数组才返回 null（宿主据此回退整包，不会误判成远端全空）
+            val items = JsScriptRuntime.jsToKotlin(result) as? List<*> ?: return@withContext null
+            items.mapNotNull { item ->
+                val map = JsScriptRuntime.jsToKotlin(item) as? Map<*, *> ?: return@mapNotNull null
+                val path = map["path"]?.toString()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                RemoteFileEntry(
+                    path = path,
+                    sha256 = map["sha256"]?.toString().orEmpty(),
+                    size = (map["size"] as? Number)?.toLong() ?: -1L,
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("JsBackup", "listRemoteFiles failed", e)
+            null
+        }
+    }
+
+    override suspend fun pushFile(
+        path: String,
+        file: File,
+        sha256: String,
+    ): BackupResult = withContext(Dispatchers.IO) {
+        val store = blobStore
+            ?: return@withContext BackupResult(ok = false, message = "宿主未提供流式传输能力")
+        // 所有权仍属调用方：release 只注销句柄，不删文件
+        val blobId = store.register(pluginContext.pluginInfo.id, file, owned = false)
+        try {
+            val result = runtime.callAsync(
+                JsPluginContract.PATH_BACKUP_PUSH_FILE,
+                mapOf(
+                    "path" to path,
+                    "sha256" to sha256,
+                    "size" to file.length(),
+                    "blobId" to blobId,
+                )
+            )
+            parseBackupResult(result)
+        } catch (e: Exception) {
+            Log.e("JsBackup", "pushFile failed", e)
+            BackupResult(ok = false, message = e.message ?: "pushFile failed")
+        } finally {
+            store.release(blobId)
+        }
+    }
+
+    override suspend fun pullFile(path: String): BackupDownload? = withContext(Dispatchers.IO) {
+        try {
+            val result = runtime.callAsync(JsPluginContract.PATH_BACKUP_PULL_FILE, path)
+            val blobId = (JsScriptRuntime.jsToKotlin(result) as? String)?.takeIf { it.isNotEmpty() }
+                ?: return@withContext null
+            val store = blobStore ?: return@withContext null
+            val file = store.resolve(pluginContext.pluginInfo.id, blobId)
+                ?: return@withContext null
+            BackupDownload(blobId = blobId, file = file, size = file.length())
+        } catch (e: Exception) {
+            Log.e("JsBackup", "pullFile failed", e)
+            null
+        }
+    }
+
+    override suspend fun deleteRemoteFile(path: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val result = runtime.callAsync(JsPluginContract.PATH_BACKUP_REMOVE_FILE, path)
+            (JsScriptRuntime.jsToKotlin(result) as? Boolean) ?: false
+        } catch (e: Exception) {
+            Log.e("JsBackup", "deleteRemoteFile failed", e)
+            false
+        }
     }
 
     companion object {

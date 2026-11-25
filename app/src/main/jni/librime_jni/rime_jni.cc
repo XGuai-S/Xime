@@ -1016,10 +1016,10 @@ public:
         if (!result)
         {
             LOGE("syncUserData: sync_user_data() returned false");
-            rime::T9DigitUserDict::AcquireDb();
-            return false;
         }
 
+        // sync_user_data 即使返回 false，也可能已启动维护任务（例如已有维护线程）；
+        // 必须先等待维护退出，再恢复 T9 句柄并重建主会话，不能在此分支提前返回。
         // user_dict_sync 是部署任务，等待维护结束（与 deploy() 同款轮询）
         int wait_count = 0;
         while (rime->is_maintenance_mode())
@@ -1043,8 +1043,11 @@ public:
         }
         reapplyPageSizeIfNeeded();
 
-        LOGI("User dict sync completed successfully");
-        return true;
+        if (result)
+        {
+            LOGI("User dict sync completed successfully");
+        }
+        return result;
     }
 
     /**

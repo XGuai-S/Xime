@@ -16,7 +16,11 @@ import com.kingzcheung.xime.settings.SettingsPreferences
 import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.util.MicCaptureGate
 
-class SpeechRecognitionManager(private val context: Context) {
+class SpeechRecognitionManager(
+    private val context: Context,
+    private val mainHandler: Handler = Handler(Looper.getMainLooper()),
+    private val backendFactory: (() -> AsrBackend?)? = null,
+) {
 
     companion object {
         private const val TAG = "SpeechRecognitionManager"
@@ -42,10 +46,27 @@ class SpeechRecognitionManager(private val context: Context) {
 
     private var backend: AsrBackend? = null
     private var recordingThread: RecordingThread? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     // 会话序号：用于区分连续语音会话，防止旧会话的回收线程误释放新会话的后端
     private var sessionId = 0
+
+    /**
+     * 当前活动会话号（0 = 没有活动会话）。
+     *
+     * 后端回调本身不带来源信息，只能按「回调到达时哪个会话是活动的」判定：
+     * 只接受来自当前活动会话的结果/错误，旧会话的迟到包一律丢弃。
+     */
+    @Volatile
+    private var activeSession = 0
+
+    /**
+     * 当前会话是否已开始向后端送入音频。
+     *
+     * 用来关掉「取消 A → 立刻开始 B → A 的最终包到达」那个窗口：
+     * 后端回调不带来源会话号，B 尚未送音频时的最终包只可能来自 A。
+     */
+    @Volatile
+    private var audioFlowing = false
     // 待执行的延迟释放所对应的会话序号（-1 表示无待释放）
     @Volatile
     private var pendingReleaseSession = -1
@@ -85,16 +106,7 @@ class SpeechRecognitionManager(private val context: Context) {
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startRecognition() {
-        synchronized(preloadLock) {
-            while (isPreloading) {
-                try {
-                    preloadLock.wait()
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return
-                }
-            }
-        }
+        // 加载期间的重复请求由下方 loadingInProgress 合并，不在 UI 线程等待模型。
         
         if (recordingThread != null) {
             FileLogger.w(TAG, "Recognition already running, ignoring start request")
@@ -104,44 +116,38 @@ class SpeechRecognitionManager(private val context: Context) {
         FileLogger.i(TAG, "Starting speech recognition")
         setState(RecognitionState.PROCESSING)
 
-        if (backend == null) {
-            // 按需加载：后台线程加载 ASR 模型，完成后在主线程启动录音，避免阻塞键盘 UI
-            FileLogger.i(TAG, "ASR backend not loaded, loading on demand")
-            synchronized(preloadLock) {
-                if (loadingInProgress) {
-                    // 已有加载进行中（如设置开启触发的预加载），等待其完成
-                    loadingCancelled = false
-                    return
-                }
+        val loadEpoch = synchronized(preloadLock) {
+            if (released) return
+            if (loadingInProgress) {
+                loadingCancelled = false
+                return
+            }
+            if (backend != null) null else {
                 loadingInProgress = true
                 loadingCancelled = false
+                lifecycleEpoch
             }
+        }
+        if (loadEpoch != null) {
             Thread {
-                try {
-                    val ok = preload()
-                    if (!ok || synchronized(preloadLock) { backend } == null) {
-                        mainHandler.post {
+                val ok = preload()
+                // Ownership ends in the callback, so stop/cancel can still revoke queued starts.
+                val posted = mainHandler.post {
+                    synchronized(preloadLock) {
+                        if (released || lifecycleEpoch != loadEpoch) return@post
+                        loadingInProgress = false
+                        if (loadingCancelled) {
+                            setState(RecognitionState.IDLE)
+                        } else if (!ok || backend == null) {
                             errorCallback?.invoke("无法初始化语音引擎，请检查本地模型或在线语音插件配置", true)
                             setState(RecognitionState.ERROR)
-                        }
-                        return@Thread
-                    }
-                    if (loadingCancelled) {
-                        mainHandler.post {
-                            setState(RecognitionState.IDLE)
-                        }
-                        return@Thread
-                    }
-                    mainHandler.post {
-                        if (recordingThread == null && !loadingCancelled) {
+                        } else if (recordingThread == null) {
                             startRecording()
                         }
                     }
-                } finally {
-                    synchronized(preloadLock) {
-                        loadingInProgress = false
-                        preloadLock.notifyAll()
-                    }
+                }
+                if (!posted) synchronized(preloadLock) {
+                    if (lifecycleEpoch == loadEpoch) loadingInProgress = false
                 }
             }.start()
             return
@@ -152,9 +158,12 @@ class SpeechRecognitionManager(private val context: Context) {
 
     private fun startRecording() {
         val currentBackend = synchronized(preloadLock) { backend } ?: return
-        synchronized(preloadLock) { sessionId++ }
+        val session = synchronized(preloadLock) { ++sessionId }
         // 新会话开始：解除「取消后抑制结果」（见 cancelRecognition / handleResult）
         suppressResults = false
+        // 登记活动会话；audioFlowing 待本会话真正送出音频后才放开
+        activeSession = session
+        audioFlowing = false
 
         // 新会话复用后端：取消上一次会话遗留的延迟释放
         mainHandler.removeCallbacks(pendingBackendRelease)
@@ -168,7 +177,7 @@ class SpeechRecognitionManager(private val context: Context) {
         }
         mainHandler.removeCallbacks(preStartTimeoutRunnable)
 
-        val thread = RecordingThread(currentBackend, preStarted)
+        val thread = RecordingThread(currentBackend, preStarted, session)
         recordingThread = thread
         thread.start()
     }
@@ -203,6 +212,8 @@ class SpeechRecognitionManager(private val context: Context) {
         }
         recordingThread = null
         thread.stopRequested = true
+        // 会话结束：不再接受任何结果（stop 的最终包由 stopRecognition 之后的
+        // 「延迟释放窗口」内存留的后端送达——此窗口内 activeSession 保持，见 scheduleBackendRelease 注释）
         val session = synchronized(preloadLock) { sessionId }
         // 不能 interrupt：录音线程可能正阻塞在 backend.stop() 同步等待最终结果
         // （本地 stopAsr 的 runBlocking），中断会吞掉最终文本；forceStopAudio 释放
@@ -231,6 +242,8 @@ class SpeechRecognitionManager(private val context: Context) {
         Log.d(TAG, "Canceling recognition")
         // 取消 = 用户不要这段结果：此后到达的最终包一律丢弃（见 handleResult）。
         suppressResults = true
+        activeSession = 0
+        audioFlowing = false
         val thread = recordingThread
         if (thread == null) {
             // 模型仍在后台加载中：标记取消，加载完成后不再启动录音
@@ -244,6 +257,8 @@ class SpeechRecognitionManager(private val context: Context) {
         }
         recordingThread = null
         thread.stopRequested = true
+        // 会话结束：不再接受任何结果（stop 的最终包由 stopRecognition 之后的
+        // 「延迟释放窗口」内存留的后端送达——此窗口内 activeSession 保持，见 scheduleBackendRelease 注释）
         val session = synchronized(preloadLock) { sessionId }
         // 同 stopRecognition：不打断 backend.stop()，避免破坏引擎收尾状态
         thread.forceStopAudio()
@@ -326,6 +341,12 @@ class SpeechRecognitionManager(private val context: Context) {
 
     fun release() {
         Log.d(TAG, "Releasing speech recognition")
+        synchronized(preloadLock) {
+            released = true
+            lifecycleEpoch++
+            loadingCancelled = true
+            loadingInProgress = false
+        }
         cancelPreStart()
         mainHandler.removeCallbacks(pendingBackendRelease)
         pendingReleaseSession = -1
@@ -343,48 +364,46 @@ class SpeechRecognitionManager(private val context: Context) {
         }
     }
 
-    private var isPreloading = false
     private val preloadLock = Object()
 
-    fun preload(): Boolean {
-        synchronized(preloadLock) {
+    private val initializationLock = Any()
+    private var lifecycleEpoch = 0L
+    private var released = false
+
+    fun preload(): Boolean = synchronized(initializationLock) {
+        val epoch = synchronized(preloadLock) {
+            if (released) return false
             if (backend != null) return true
-            isPreloading = true
+            lifecycleEpoch
         }
-        
-        // 整体包 try/finally：createBackend()（走插件实例化）与 initialize()（原生库/远端）
-        // 都可能抛任意 Throwable。旧实现只在「返回 null / 返回 false」两个正常失败分支里复位
-        // isPreloading 并 notifyAll；一旦抛异常，标志永远停在 true，而 startRecognition()
-        // 在**主线程**用无超时的 preloadLock.wait() 等它 —— 之后每次按麦克风都永久阻塞，
-        // 直接 ANR（整块键盘冻死）。finally 保证无论怎么退出都放开等待者。
+        var candidate: AsrBackend? = null
+        var published = false
         try {
             val newBackend = createBackend() ?: return false
-
+            candidate = newBackend
             newBackend.setCallbacks(
                 onResult = { text -> handleResult(text) },
                 onPartialResult = { text -> handlePartialResult(text) },
                 onStateChange = { state -> setState(state) },
                 onError = { error -> handleError(error) }
             )
-
             if (!newBackend.initialize()) return false
-
             synchronized(preloadLock) {
+                if (released || lifecycleEpoch != epoch) return false
                 backend = newBackend
+                published = true
             }
-            return true
+            true
         } catch (t: Throwable) {
             FileLogger.w(TAG, "STT 预加载失败: ${t.javaClass.simpleName}: ${t.message}")
-            return false
+            false
         } finally {
-            synchronized(preloadLock) {
-                isPreloading = false
-                preloadLock.notifyAll()
-            }
+            if (!published) runCatching { candidate?.release() }
         }
     }
 
     private fun createBackend(): AsrBackend? {
+        backendFactory?.let { return it() }
         // 用户开启"本地识别"时才使用离线后端，否则走在线插件（严格互斥，不自动切换）
         val useLocal = SettingsPreferences.isSttUseLocal(context)
         return if (useLocal) {
@@ -437,7 +456,8 @@ class SpeechRecognitionManager(private val context: Context) {
 
     private inner class RecordingThread(
         private val currentBackend: AsrBackend,
-        private val preStarted: AudioRecord? = null
+        private val preStarted: AudioRecord? = null,
+        private val session: Int = 0,
     ) : Thread("AsrRecording") {
 
         private val spectrumAnalyzer = SpectrumAnalyzer()
@@ -543,24 +563,28 @@ class SpeechRecognitionManager(private val context: Context) {
                             // 保证整段弱音内容也能送入 ASR（开头静音已被缓冲丢弃）
                             if (preSpeechBuffer.size >= maxPreSpeechChunks) {
                                 speechDetected = true
+                                markAudioFlowing()
                                 while (preSpeechBuffer.isNotEmpty()) {
                                     currentBackend.processAudioChunk(preSpeechBuffer.removeFirst())
                                 }
                             } else if (isSpeech(chunk)) {
                                 speechDetected = true
+                                markAudioFlowing()
                                 // 把语音前缓冲的块按顺序送入 ASR，保证开头不丢失
                                 while (preSpeechBuffer.isNotEmpty()) {
                                     currentBackend.processAudioChunk(preSpeechBuffer.removeFirst())
                                 }
                             }
                         } else {
+                            markAudioFlowing()
                             currentBackend.processAudioChunk(chunk)
                         }
                     } else if (nread < 0) {
                         break
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "录音循环异常退出: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
                 // forceStopAudio 可能已从外部 stop/release，这里需容错（重复释放不抛异常中断后续流程）
                 try { audioRecord.stop() } catch (_: Exception) { }
@@ -569,8 +593,45 @@ class SpeechRecognitionManager(private val context: Context) {
                 MicCaptureGate.release(MIC_OWNER)
             }
 
-            currentBackend.stop()
+            // 只有本会话仍持有后端时才收尾：旧线程晚退出时若仍调 stop()，
+            // 会把新会话正在用的引擎停掉（用户表现为「说着说着突然断了」）。
+            if (ownsBackend()) {
+                currentBackend.stop()
+            } else {
+                Log.d(TAG, "skip backend.stop(): session $session superseded")
+            }
+            finishRecording()
             Log.d(TAG, "Recognition thread ended")
+        }
+
+        /**
+         * 录音循环结束后的统一收尾（M03）。
+         *
+         * 录音线程因 read() 返回负数或处理中抛异常自然退出时，旧实现不清
+         * recordingThread，之后 startRecognition() 首行判定「已在录音」直接忽略，
+         * 用户必须显式 stop/cancel 才能再录。这里按会话身份清槽位（只清自己的，
+         * 避免误清新会话），并对非主动 stop/cancel 的异常退出报一次错误。
+         */
+        private fun finishRecording() {
+            synchronized(preloadLock) {
+                if (recordingThread === this) recordingThread = null
+            }
+            // 主动 stop/cancel 或被新会话取代：不打扰用户
+            if (stopRequested || !ownsBackend()) return
+            mainHandler.post {
+                if (stopRequested || !ownsBackend()) return@post
+                errorCallback?.invoke("语音识别已中断，请重新开始说话", true)
+                setState(RecognitionState.ERROR)
+            }
+        }
+
+        /** 本会话是否仍拥有当前后端（活动会话未被新会话取代）。 */
+        private fun ownsBackend(): Boolean =
+            session != 0 && synchronized(preloadLock) { session == sessionId }
+
+        /** 本会话开始向后端送音频：只有仍持有后端时才放开结果门。 */
+        private fun markAudioFlowing() {
+            if (ownsBackend()) audioFlowing = true
         }
 
         /** 从外部强制停止录音：录音线程阻塞在 read() 等不可中断调用时，释放 AudioRecord 使其立即返回错误并退出。 */
@@ -601,13 +662,30 @@ class SpeechRecognitionManager(private val context: Context) {
     @Volatile
     private var suppressResults = false
 
+    /**
+     * 后端最终结果入口。
+     *
+     * 后端回调不带来源会话号，只能按「回调到达时哪个会话是活动会话」判定：
+     * 取消后（suppressResults）或旧会话的迟到包一律丢弃，避免 A 的尾包被当作 B 的结果上屏。
+     */
     private fun handleResult(text: String) {
         if (suppressResults) {
             Log.d(TAG, "取消后到达的识别结果已丢弃 len=${text.length}")
             return
         }
+        // 没有活动录音会话（已 stop/cancel）时到达的包一律丢弃
+        if (activeSession == 0) {
+            Log.d(TAG, "无活动会话的识别结果已丢弃 len=${text.length}")
+            return
+        }
+        // 新会话尚未送入任何音频时的「最终包」只能是上一会话的尾巴（后端回调不带来源会话号，
+        // 这是唯一可判定的窗口），丢弃以免被当成新会话结果上屏
+        if (!audioFlowing) {
+            Log.d(TAG, "新会话未开始送音频，丢弃迟到最终包 len=${text.length}")
+            return
+        }
         mainHandler.post {
-            if (suppressResults) return@post
+            if (suppressResults || activeSession == 0 || !audioFlowing) return@post
             resultCallback?.invoke(text)
         }
     }
@@ -622,7 +700,12 @@ class SpeechRecognitionManager(private val context: Context) {
 
     private fun handleError(error: String) {
         Log.e(TAG, "Recognition error: $error")
+        if (suppressResults || activeSession == 0) {
+            Log.d(TAG, "无活动会话的错误已丢弃")
+            return
+        }
         mainHandler.post {
+            if (suppressResults || activeSession == 0) return@post
             errorCallback?.invoke(error, true)
         }
     }

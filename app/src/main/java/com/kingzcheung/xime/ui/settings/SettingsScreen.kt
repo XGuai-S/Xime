@@ -163,7 +163,6 @@ fun SettingsScreen(
                     navController.navigate("plugin_market_detail/$pluginId")
                 },
                 onNavigateToSpeechToText = { navController.navigate(SettingsRoutes.SpeechToText) },
-                onNavigateToClipboardSync = { navController.navigate(SettingsRoutes.ClipboardSync) },
                 onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) }
             )
         }
@@ -247,15 +246,16 @@ composable(SettingsRoutes.SmartPrediction) {
         composable(SettingsRoutes.Clipboard) {
             ClipboardSettingsContent(
                 onBack = { navController.popBackStack() },
-                // 剪贴板同步作为剪贴板的内页（返回回到剪贴板设置）
-                onNavigateToClipboardSync = { navController.navigate(SettingsRoutes.ClipboardSync) }
+                onNavigateToBackup = { navController.navigate(SettingsRoutes.Backup) }
             )
         }
+        // 旧设置链接兼容重定向到统一备份页，不再展示独立剪贴板云服务配置。
         composable(SettingsRoutes.ClipboardSync) {
-            ClipboardSyncSettingsContent(
-                onBack = { navController.popBackStack() },
-                onNavigateToMarket = { navController.navigate(SettingsRoutes.MarketPlugins) }
-            )
+            LaunchedEffect(Unit) {
+                navController.navigate(SettingsRoutes.Backup) {
+                    popUpTo(SettingsRoutes.ClipboardSync) { inclusive = true }
+                }
+            }
         }
         composable(SettingsRoutes.Backup) {
             BackupSettingsContent(

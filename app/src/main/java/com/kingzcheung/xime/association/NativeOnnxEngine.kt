@@ -73,13 +73,12 @@ object NativeOnnxEngine {
     }
 
     fun initialize(context: Context, modelPath: String): Boolean {
-        try {
-            nativeInitialize(modelPath)
+        val initialized = attemptNativeInitialization { nativeInitialize(modelPath) }
+        if (initialized != null) {
             FileLogger.d(TAG, "Native method already available")
-            return true
-        } catch (e: UnsatisfiedLinkError) {
-            FileLogger.d(TAG, "Native method not available, loading libraries...")
+            return initialized
         }
+        FileLogger.d(TAG, "Native method not available, loading libraries...")
 
         if (!loadNativeLibrary(context)) {
             FileLogger.e(TAG, "Native libraries not loaded")
@@ -136,4 +135,11 @@ object NativeOnnxEngine {
     private external fun nativeRelease()
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeReleaseSharedEnv()
+}
+
+/** null 只表示 JNI 尚不可调用；false 必须保留为模型初始化失败。 */
+internal fun attemptNativeInitialization(initialize: () -> Boolean): Boolean? = try {
+    initialize()
+} catch (_: UnsatisfiedLinkError) {
+    null
 }

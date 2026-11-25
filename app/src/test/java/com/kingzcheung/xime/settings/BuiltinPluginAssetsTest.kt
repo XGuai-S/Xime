@@ -44,6 +44,31 @@ class BuiltinPluginAssetsTest {
         }
     }
 
+    /**
+     * 内置包必须实现文件级增量备份（3.1.0 起）。
+     *
+     * 少了这几个方法，宿主会**静默回退**到整包上传——功能不报错，但每次备份都重传
+     * 几十 MB，用户感知是"备份还是很慢"，且不会有任何错误提示。
+     * 这个用例把"资产没重建/漏打包"挡在构建期。
+     */
+    @Test
+    fun `内置包实现文件级增量备份`() {
+        assertTrue("缺少内置包，先看第一个用例", bundledXipks.isNotEmpty())
+        ZipFile(bundledXipks.first()).use { zip ->
+            val manifest = zip.getInputStream(zip.getEntry("manifest.json"))
+                .use { it.readBytes().toString(Charsets.UTF_8) }
+            assertTrue(
+                "内置 webdav-backup 版本应 >= 3.1.0（文件级增量备份），实际：$manifest",
+                Regex("\"version\"\\s*:\\s*\"3\\.([1-9]|[1-9]\\d)\\.").containsMatchIn(manifest),
+            )
+            val mainJs = zip.getInputStream(zip.getEntry("main.js"))
+                .use { it.readBytes().toString(Charsets.UTF_8) }
+            for (fn in listOf("listFiles", "pushFile", "pullFile", "removeFile")) {
+                assertTrue("内置插件的 main.js 缺少 $fn（会导致静默回退整包）", mainJs.contains(fn))
+            }
+        }
+    }
+
     @Test
     fun `内置插件在 debug 与 release 都会安装`() {
         val application = RepoFiles.file("app/src/main/java/com/kingzcheung/xime/XimeApplication.kt").readText()

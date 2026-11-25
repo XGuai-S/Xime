@@ -129,8 +129,11 @@ object LocalPiiRedactor {
     )
 
     // 2. Context-triggered password / secret assignment
+    // 支持 JSON / YAML / env 三种常见形态：
+    //   {"password":"xxx"}   password: xxx   PASSWORD=xxx
+    // 旧写法在冒号后直接取非空白串，JSON 的 `"` 会被吃进值里、导致判定与脱敏位置错位。
     private val PASSWORD_CONTEXT_REGEX = Regex(
-        """(?i)(?:密码|口令|登录密码|支付密码|交易密码|password|passwd|pwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\s*(?:[:：=]|是|为)\s*([^\s,，。；;！!？?、\n\r]{4,64})"""
+        """(?i)(?:密码|口令|登录密码|支付密码|交易密码|password|passwd|pwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\s*["']?\s*(?:[:：=]|是|为)\s*["']?([^\s,，。；;！!？?、"'\n\r]{4,64})"""
     )
 
     // 3. OTP verification code context & digits
@@ -159,8 +162,16 @@ object LocalPiiRedactor {
     )
 
     // 6. 13..19 digit bank card candidate (allows spaces or hyphens between groups)
+    //
+    // 旧写法 `(\d(?:[ -]?\d){12,18})` 是贪婪的：`4111111111111111 12/26` 会被吞成
+    // `4111111111111111 12`（18 位），Luhn 必然失败 → 「卡号+有效期」这种最典型的
+    // 信用卡粘贴形态全部漏判。同理 `4111 1111 1111 1111 123` 被吞成 19 位也失败。
+    //
+    // 改为「组边界」匹配：每组 4~6 位数字，组间只允许单个空格/连字符，且**后面不能再跟
+    // 数字或数字组**。这样 `4111 1111 1111 1111 123` 只会匹配到前 16 位（4 组），
+    // 末尾的 `123` 因为组数超限被自然排除，Luhn 就能通过。
     private val BANK_CARD_CANDIDATE_REGEX = Regex(
-        """(?<!\d)(\d(?:[ -]?\d){12,18})(?!\d)"""
+        """(?<![\d-])(\d{4}(?:[ -]?\d{4}){2,3}|\d{13,19})(?![\d-])"""
     )
 
     // 7. Mainland mobile phone & landline
@@ -422,14 +433,26 @@ object LocalPiiRedactor {
 
         // Priority 85: 13..19 digit bank card (verified by Luhn mod-10 checksum)
         BANK_CARD_CANDIDATE_REGEX.findAll(text).forEach { m ->
+            // 先验整段；失败则按「去掉最后一组数字」回退一次。
+            // 正则已尽量避免吞并后续数字，但用户输入格式千奇百怪
+            //（如 `4111-1111-1111-1111-1234`），回退能兜住尾部多带一段的情况。
             val candidate = m.value
-            if (isValidLuhnBankCard(candidate)) {
+            val matched = if (isValidLuhnBankCard(candidate)) candidate else {
+                val trimmed = candidate.trimEnd { it.isDigit() || it == ' ' || it == '-' }
+                val groups = candidate.split(' ', '-').filter { it.isNotBlank() }
+                if (groups.size > 3) {
+                    val shorter = groups.dropLast(1).joinToString(" ")
+                    if (isValidLuhnBankCard(shorter)) shorter else null
+                } else null
+            }
+            if (matched != null) {
+                val start = m.range.first
                 list.add(
                     CandidateMatch(
                         category = PiiCategory.BANK_CARD,
-                        startIndex = m.range.first,
-                        endIndex = m.range.last + 1,
-                        originalText = candidate,
+                        startIndex = start,
+                        endIndex = start + matched.length,
+                        originalText = matched,
                         priority = 85
                     )
                 )

@@ -27,7 +27,7 @@ data class ClipboardEntry(
     @ColumnInfo(defaultValue = "0") val isPinned: Boolean = false,
     @ColumnInfo(defaultValue = "0") val isQuickSend: Boolean = false,
     @ColumnInfo(defaultValue = "0") val consumed: Boolean = false,
-    /** 条目类型：[TYPE_TEXT] 文本 / [TYPE_IMAGE] 图片（图片条目的 text 为空串）。 */
+    /** 条目类型：[TYPE_TEXT] 文本 / [TYPE_IMAGE] 图片 / [TYPE_OTP] 临时验证码。 */
     @ColumnInfo(defaultValue = TYPE_TEXT) val type: String = TYPE_TEXT,
     /** 图片文件在 `files/` 下的相对路径（如 `clipboard_images/<sha256>.png`）；非图片为空串。 */
     @ColumnInfo(defaultValue = "") val imagePath: String = "",
@@ -43,5 +43,14 @@ data class ClipboardEntry(
     companion object {
         const val TYPE_TEXT = "text"
         const val TYPE_IMAGE = "image"
+        const val TYPE_OTP = "otp"
+
+        /**
+         * 内容含高风险凭据（密码/证件号/银行卡/密钥）的文本条目。
+         *
+         * 与 [TYPE_TEXT] 的唯一区别是**排除在备份与云同步之外**：用户复制完要能粘回去，
+         * 所以仍然入库；但这类内容不该随备份 zip 落到 Downloads、也不该推到云端。
+         */
+        const val TYPE_SENSITIVE = "sensitive"
     }
 }

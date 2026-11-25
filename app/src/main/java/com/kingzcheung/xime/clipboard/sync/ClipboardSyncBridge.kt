@@ -5,6 +5,7 @@ import com.kingzcheung.xime.clipboard.ClipboardImageStore
 import com.kingzcheung.xime.util.FileLogger
 import com.kingzcheung.xime.clipboard.ClipboardItem
 import com.kingzcheung.xime.clipboard.ClipboardManager
+import com.kingzcheung.xime.clipboard.OtpClipboardPolicy
 import com.kingzcheung.xime.plugin.core.api.ClipboardProfile
 import com.kingzcheung.xime.plugin.core.api.ClipboardSyncPlugin
 import kotlinx.coroutines.CoroutineScope
@@ -150,6 +151,7 @@ class ClipboardSyncBridge(
         //    图片条目按 type 分流：附件走 pushLocalImage，文本路径行为不变
         collectJob = clipboardManager.clipboardChanged
             .onEach { item ->
+                if (!OtpClipboardPolicy.canSync(item.type)) return@onEach
                 if (item.isImage) {
                     pushLocalImage(item)
                     return@onEach

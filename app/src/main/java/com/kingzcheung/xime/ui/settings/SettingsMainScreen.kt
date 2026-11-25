@@ -505,12 +505,12 @@ fun SettingsMainContent(
             }
 
             item {
-                // 分组含两类"本地数据/数据流向"设置：剪贴板（内容与同步）优先，其后是词典与配置的同步备份
+                // 分组含两类“本地数据/数据流向”设置：剪贴板内容优先，其后是词典与配置的完整备份
                 SettingsSection(title = "数据与同步", content = {
                     SettingsItem(
                         icon = Icons.TwoTone.ContentPaste,
                         title = "剪贴板",
-                        subtitle = "图片记录、体积限制、占用清理与剪贴板同步",
+                        subtitle = "图片记录与占用管理，剪贴板和快捷发送随完整备份",
                         onClick = onNavigateToClipboard,
                         showArrow = true
                     )
@@ -522,7 +522,7 @@ fun SettingsMainContent(
                     SettingsItem(
                         icon = Icons.TwoTone.Backup,
                         title = "同步与备份",
-                        subtitle = "多设备词典互通与配置备份",
+                        subtitle = "词库、配置、剪贴板与快捷发送的完整备份",
                         onClick = onNavigateToBackup,
                         showArrow = true
                     )

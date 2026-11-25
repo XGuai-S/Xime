@@ -20,6 +20,10 @@ import android.os.SystemClock
  * 因此每次持有都记时间戳，超过 LEASE_TIMEOUT_MS 后允许后来者强制接管并写警告日志。
  * 阈值取 5 分钟——远超任何正常单次语音输入（胶囊最长 120s、键盘语音一般 <60s），
  * 正常使用不会误抢，异常泄漏也能自愈。
+ *
+ * 关于跨进程：本对象是**进程内单例**。键盘语音与悬浮胶囊目前都在默认进程，互斥成立；
+ * 一旦任一组件被加上 `android:process`，两条路径会各自持有一把互不相干的锁，闸门静默失效。
+ * 因此 [tryAcquire] 首次调用记录进程名，之后发现不一致就写一条明确 ERROR（见 [checkProcessOwnership]）。
  */
 object MicCaptureGate {
 
@@ -32,6 +36,50 @@ object MicCaptureGate {
     private var holder: String? = null
     private var acquiredAtMs = 0L
 
+    /** 首次 tryAcquire 时记录的调用方进程名；null = 尚未记录或取不到。 */
+    private var recordedProcessName: String? = null
+
+    /** 进程不一致只告警一次，避免每次起录音都刷同一条 ERROR。 */
+    private var processMismatchWarned = false
+
+    /**
+     * 进程名提供者。默认读 [android.app.Application.getProcessName]（API 28+，与 minSdk 一致）；
+     * JVM 单测可替换成固定值，不依赖 Android 运行时。
+     */
+    @Volatile
+    internal var processNameProvider: () -> String? = { readProcessName() }
+
+    /** 告警输出，单测可替换以断言文案。 */
+    @Volatile
+    internal var errorReporter: (String) -> Unit = { FileLogger.e(TAG, it) }
+
+    private fun readProcessName(): String? = try {
+        android.app.Application.getProcessName()
+    } catch (_: Throwable) {
+        null
+    }
+
+    /**
+     * 进程归属断言：闸门是进程内单例，只有两条录音路径同进程时才互斥。
+     * 一旦有人给语音或胶囊组件加 `android:process`，这里会记录到不同的进程名并告警。
+     */
+    private fun checkProcessOwnership(owner: String) {
+        val current = processNameProvider() ?: return
+        val recorded = recordedProcessName
+        if (recorded == null) {
+            recordedProcessName = current
+            return
+        }
+        if (recorded != current && !processMismatchWarned) {
+            processMismatchWarned = true
+            errorReporter(
+                "麦克风闸门已失效：两条录音路径分属不同进程" +
+                    "（已记录=$recorded，当前=$current，请求者=$owner），麦克风互斥不生效。" +
+                    "请检查 AndroidManifest 中语音/悬浮胶囊组件是否被加了 android:process"
+            )
+        }
+    }
+
     /**
      * 尝试占用麦克风。
      *
@@ -39,6 +87,7 @@ object MicCaptureGate {
      */
     fun tryAcquire(owner: String, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {
         synchronized(lock) {
+            checkProcessOwnership(owner)
             val current = holder
             if (current == null) {
                 holder = owner
@@ -82,6 +131,10 @@ object MicCaptureGate {
         synchronized(lock) {
             holder = null
             acquiredAtMs = 0L
+            recordedProcessName = null
+            processMismatchWarned = false
+            processNameProvider = { readProcessName() }
+            errorReporter = { FileLogger.e(TAG, it) }
         }
     }
 }

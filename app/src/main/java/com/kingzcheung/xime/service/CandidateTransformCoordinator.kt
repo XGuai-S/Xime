@@ -95,12 +95,26 @@ internal class CandidateTransformCoordinator(private val service: XimeInputMetho
     fun transformFor(result: RimeProcessResult): CandidateTransformResult? {
         if (result.isAsciiMode) return null
         if (result.inputText.isEmpty() && result.candidates.isEmpty()) return null
+        // 先判「有没有插件要处理」：没有时直接返回，不为 toList() 付一次数组复制。
+        // 这是每键路径，一次 Array→List 复制的分配在长会话里会累积成可观的 GC 压力。
+        if (!hasTransformPlugin()) return null
         return transform(
             inputText = result.inputText,
             preedit = result.preeditText,
             engineCandidates = result.candidates.toList(),
             asciiMode = result.isAsciiMode,
         )
+    }
+
+    /** 是否有已加载的 candidate_transform 插件（纯内存判读，无分配）。 */
+    private fun hasTransformPlugin(): Boolean {
+        if (disabledThisSession) return false
+        for ((_, loaded) in PluginManager.loadedPluginsFlow.value) {
+            if (loaded.pluginInfo.capabilities?.candidateTransform == true && loaded.script != null) {
+                return true
+            }
+        }
+        return false
     }
 
     /**
@@ -219,6 +233,11 @@ internal class CandidateTransformCoordinator(private val service: XimeInputMetho
         for ((pluginId, loaded) in PluginManager.loadedPluginsFlow.value) {
             if (loaded.pluginInfo.capabilities?.candidateTransform != true) continue
             val script = loaded.script ?: continue
+            // 每键命中即视为在用：这里直接遍历 loadedPluginsFlow 拿 runtime，
+            // 绕过了 PluginManager.getPluginInstance 的 touchPlugin。不补这一笔，
+            // 一个每键都在跑的变换插件 lastUsedAtMs 永不更新，空闲 15 分钟后
+            // 会在用户打字途中被回收，表现为候选变换忽然失效。
+            PluginManager.touchPlugin(pluginId)
             return pluginId to script
         }
         return null

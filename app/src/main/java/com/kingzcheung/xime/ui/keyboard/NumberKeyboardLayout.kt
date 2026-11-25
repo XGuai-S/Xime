@@ -10,7 +10,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -27,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -337,7 +341,24 @@ private fun NumberRows(
     val keyFontSize = if (compactMode) 16.sp else androidx.compose.ui.unit.TextUnit.Unspecified
     val ctrlFontSize = if (compactMode) 12.sp else androidx.compose.ui.unit.TextUnit.Unspecified
     val suppressCursorMove = LocalSuppressCursorMove.current
-    val symbols = listOf("+", "-", "*", "/")
+    // 运算符列可滚动，顺序**按实际使用频率自适应**：点某个符号后立刻重排，
+// 下次渲染即为新顺序（越常用越靠上，不用滑动去够）。
+//
+// 规则见 [SymbolUsagePolicy]：四则 `+ - * /` 固定在最前（肌肉记忆位置，不随频率跳动），
+// 其余按点击次数降序、同次数保持默认表顺序（新用户看到的是按日常频率排好的初始顺序）。
+    val symbolContext = LocalContext.current
+    var symbols by remember {
+        mutableStateOf(SymbolUsagePolicy.orderedSymbols(SymbolUsageStore.counts(symbolContext)))
+    }
+    // 使用记录由后台线程载入（避免组合期读盘卡首帧）。载入完成后刷新一次顺序，
+    // 否则首次弹出键盘会一直停留在默认顺序，直到用户点了某个符号才更新。
+    LaunchedEffect(Unit) {
+        val loadedOrder = SymbolUsagePolicy.orderedSymbols(SymbolUsageStore.awaitLoaded(symbolContext))
+        if (loadedOrder != symbols) symbols = loadedOrder
+    }
+    // 滚动列里每项必须定高（无界高度下 weight 会崩）。
+    // 取紧凑档 34dp / 常规 38dp，随键盘整体拉伸系数缩放，与其它键的视觉节奏一致。
+    val symbolKeyHeightDp = (if (compactMode) 34f else 38f) * LocalStretchFactor.current
     Row(
         modifier = Modifier
             .fillMaxSize(),
@@ -364,27 +385,67 @@ private fun NumberRows(
                         .weight(0.8f),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    // +-*/ 四个键紧贴成一条，立体感加在**整体外框**上：单个键不外扩阴影
+    // （否则接缝处叠出暗线），整体作为一张面浮起。
+    val symbolPanelRadius = LocalKeyCornerRadius.current
+    val symbolPanelShadow = rememberKeyShadowModifier(
+        backgroundColor = keyBackgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = symbolPanelRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
+    val symbolPanelBevel = rememberKeyBevelModifier(
+        backgroundColor = keyBackgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = symbolPanelRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
                     Column(
                         modifier = Modifier
                             .fillMaxHeight()
                             .weight(3f)
+                            .then(symbolPanelShadow)
+                            .clip(RoundedCornerShape(symbolPanelRadius))
+                            .background(keyBackgroundColor)
+                            .then(symbolPanelBevel)
                             .padding(LocalKeyVisualPadding.current),
                     ) {
-                        symbols.forEach { symbol ->
-                            NumberSymbolKey(
-                                text = symbol,
-                                onClick = { onKeyPress(symbol) },
-                                backgroundColor = keyBackgroundColor,
-                                textColor = keyTextColor,
-                                modifier = Modifier.weight(1f),
-                                onPress = { onKeyPressDown?.invoke(symbol) },
-                                isFirst = symbol == "+",
-                                isLast = symbol == "/",
-                                fontSize = symFontSize,
-                                shadowEnabled = shadowEnabled,
-                                shadowElevation = shadowElevation,
-                                shadowShapeRadius = shadowShapeRadius,
-                            )
+                        // 可滚动：符号数超过可视高度时可上下滑动。
+                        // 用 LazyColumn 而非 Column：只组合可见项，符号增多也不增加布局开销。
+                        // key 用符号本身：重排序后同一符号的键被复用，不会重建；
+                        // 若用下标，排序变化会让所有项被视为新项。
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            contentPadding = PaddingValues(0.dp),
+                        ) {
+                            items(symbols, key = { it }) { symbol ->
+                                val isFirst = symbol == symbols.first()
+                                val isLast = symbol == symbols.last()
+                                NumberSymbolKey(
+                                    text = symbol,
+                                    onClick = {
+                                        onKeyPress(symbol)
+                                        // 记录本次使用并**立刻**重排：下次渲染即为新顺序
+                                        symbols = SymbolUsageStore.recordAndOrder(symbolContext, symbol)
+                                    },
+                                    backgroundColor = keyBackgroundColor,
+                                    textColor = keyTextColor,
+                                    // 固定高度：滚动列里不能用 weight(1f)（无界高度会崩）
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(symbolKeyHeightDp.dp),
+                                    onPress = { onKeyPressDown?.invoke(symbol) },
+                                    isFirst = isFirst,
+                                    isLast = isLast,
+                                    fontSize = symFontSize,
+                                    shadowEnabled = shadowEnabled,
+                                    shadowElevation = shadowElevation,
+                                    shadowShapeRadius = shadowShapeRadius,
+                                )
+                            }
                         }
                     }
                     Row(
@@ -679,11 +740,15 @@ private fun NumberSymbolKey(
         bottomStart = if (isLast) cornerRadius else 0.dp,
         bottomEnd = if (isLast) cornerRadius else 0.dp
     )
-    val shadowModifier = rememberCrispShadowModifier(backgroundColor, shadowEnabled, shadowElevation, shadowShapeRadius)
+    // +-*/ 四个键紧贴成一条，立体感由**整体外框**（symbolPanelShadow/Bevel）提供。
+    // 单键这里什么都不画：
+    //   · 不外扩阴影 —— 否则接缝处叠出暗线；
+    //   · 也不画高光/压暗 —— 每个键自带的「顶部亮 + 底部暗」在接缝处会连成
+    //     一条明暗分界线，看起来像四个键之间夹了阴影。
+    // 按下反馈仍由下面的 background 颜色变化表达。
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .then(shadowModifier)
             .clip(shape)
             .background(if (isPressed) backgroundColor.copy(alpha = 0.7f) else backgroundColor)
             .pointerInput(Unit) {

@@ -142,7 +142,7 @@ class HttpHostApiImpl(
                 val source = response.body ?: throw IOException("响应体为空")
                 var total = 0L
                 source.byteStream().use { input ->
-                    temp.outputStream().use { output ->
+                    blobStore.openTempOutputStream(pluginId, temp).use { output ->
                         val buffer = ByteArray(COPY_BUFFER_BYTES)
                         while (true) {
                             val read = input.read(buffer)
@@ -164,14 +164,39 @@ class HttpHostApiImpl(
                     size = total
                 )
             } catch (e: Exception) {
-                // 落盘失败不泄漏暂存文件（blob 未登记则直接删除）
-                if (blobId == null) temp.delete()
+                // 未登记的半成品连同配额预扣一起释放，保留原始下载错误。
+                if (blobId == null) {
+                    try {
+                        blobStore.discardTempFile(pluginId, temp)
+                    } catch (cleanup: Exception) {
+                        if (cleanup !== e) e.addSuppressed(cleanup)
+                    }
+                }
                 throw e
             }
         }
     }
 
     override fun lastError(): String? = lastErrorMsg
+
+    /** 释放插件下载产生的 blob 句柄（幂等），归还全插件共享的有限槽位。 */
+    override fun releaseBlob(blobId: String): Boolean {
+        if (blobId.isEmpty()) return true
+        // 只允许释放本插件名下的句柄：跨插件释放等于越权（可删别人的备份包）
+        if (blobStore.resolve(pluginId, blobId) == null) {
+            Log.w(TAG, "[$pluginId] 释放 blob 被忽略（不存在或不属于本插件）: $blobId")
+            return true
+        }
+        return runCatching { blobStore.release(blobId) }
+            .onFailure { Log.w(TAG, "[$pluginId] 释放 blob 失败: $blobId", it) }
+            .isSuccess
+    }
+
+    /** 插件卸载 / 运行时关闭时回收本插件全部 blob（含未登记的半成品下载文件）。 */
+    override fun releaseAllBlobs(): Int =
+        runCatching { blobStore.releaseAll(pluginId) }
+            .onFailure { Log.w(TAG, "[$pluginId] 回收 blob 失败", it) }
+            .getOrDefault(0)
 
     // ---- 内部 ----
 
@@ -225,9 +250,16 @@ class HttpHostApiImpl(
                 "PUT" -> requestBuilder.put(body ?: ByteArray(0).toRequestBody())
                 "POST" -> requestBuilder.post(body ?: ByteArray(0).toRequestBody())
                 "PATCH" -> requestBuilder.patch(body ?: ByteArray(0).toRequestBody())
-                "MKCOL" -> requestBuilder.method("MKCOL", null)
-                "PROPFIND" -> requestBuilder.method("PROPFIND", null)
-                else -> requestBuilder.get()
+                // WebDAV 的 PROPFIND/MKCOL 也必须带上调用方请求体：
+                // 旧实现固定传 null，插件传的 XML 被静默吞掉，请求照发而服务端只看到
+                // Content-Length: 0（标准 PROPFIND 用法直接失效，且没有任何错误提示）。
+                "MKCOL" -> requestBuilder.method("MKCOL", body)
+                "PROPFIND" -> requestBuilder.method("PROPFIND", body)
+                // 其余方法（WebDAV 的 COPY/MOVE/LOCK/UNLOCK/OPTIONS 等）原样透传。
+                // 旧实现把未知方法静默降级成 GET：请求方法变了、鉴权头照发，
+                // 插件拿到语义完全不同的响应却不报错（备份/同步会静默失败或误判）。
+                // 非法方法由 OkHttp 抛异常，走下方 catch 报错，不再静默改语义。
+                else -> requestBuilder.method(method.uppercase(), body)
             }
             val call = effectiveClient(timeoutMillis).newCall(requestBuilder.build())
             if (timeoutMillis != null && timeoutMillis > 0) {

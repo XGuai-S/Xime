@@ -24,6 +24,14 @@ keystore-base64.txt
 # 签名配置含明文密码，绝不入库
 keystore.properties
 app/keystore.properties
+# PKCS#12 签名密钥库（XGuai.pk12 曾在工作区出现但未被忽略）
+*.pk12
+*.p12
+# 凭据/令牌类文本文件，绝不入库
+*[Tt]oken*.txt
+*[Cc]redential*.txt
+*[Ss]ecret*.txt
+app/GitHub.txt
 PROGRESS.md
 DECISIONS.md
 # librime and its dependencies
@@ -75,3 +83,12 @@ app/src/main/jni/third_party/
 /release
 # 本地发布产物（APK 与设备配置备份，不入库）
 /dist/
+
+# 构建产物回传目录（构建目录已重定向到 /root/xime-build，见 init.d 脚本）
+build-outputs/
+
+# 调试截图（键盘立体感/符号栏/真机与模拟器验证的临时产物，不入库）
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp

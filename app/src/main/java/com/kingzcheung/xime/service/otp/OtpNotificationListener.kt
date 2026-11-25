@@ -123,15 +123,15 @@ class OtpNotificationListener : NotificationListenerService() {
             val isNew = OtpCollector.offer(candidate, source = "notif:${sbn.packageName}")
             if (!isNew) return@runCatching
 
-            // 1) 应用内剪贴板历史（键盘剪贴板面板可查看/粘贴）
+            // 验证码在面板短期保留，不进入普通历史或同步变更事件。
             runCatching {
-                ClipboardManager.getInstance(this).addItem(candidate.primary)
+                ClipboardManager.getInstance(this).addOtp(candidate.primary, candidate.capturedAt)
             }.onFailure {
                 FileLogger.w(TAG, "write otp to app clipboard history failed", it)
             }
             // 2) 不再写系统剪贴板：原来会**静默替换**用户手头的剪贴板内容
             //    （任何前台应用都能读到），属于越权副作用。验证码现在只进应用内
-            //    剪贴板历史（键盘剪贴板面板可粘贴），候选栏也能直接点选上屏。
+            //    临时条目（键盘剪贴板面板可粘贴），候选栏也能直接点选上屏。
         }.onFailure {
             FileLogger.e(TAG, "handle notification otp failed", it)
         }

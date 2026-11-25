@@ -60,12 +60,19 @@ class SmartPredictionSettingsViewModel(application: Application) : AndroidViewMo
         }
     }
     
-    private fun checkModelState() {
+    private fun modelFiles(): Pair<File, List<File>> {
         val modelId = SettingsPreferences.getPredictionSelectedModel(context)
-        val modelDir = ModelStorage.getModelDir(context, modelId)
-        val vocabFile = modelDir.resolve("vocab.json")
-        val modelFile = modelDir.resolve("model_int8_dynamic.onnx")
-        val hasModel = vocabFile.exists() && modelFile.exists()
+        val directory = ModelStorage.getModelDir(context, modelId)
+        val files = listOf("vocab.json", "model_int8_dynamic.onnx").map { name ->
+            com.kingzcheung.xime.model.ModelPaths.child(directory, name).also {
+                require(!it.exists() || it.isFile) { "模型目标不是普通文件" }
+            }
+        }
+        return directory to files
+    }
+
+    private fun checkModelState() {
+        val hasModel = runCatching { modelFiles().second.all { it.isFile && it.length() > 0 } }.getOrDefault(false)
         _uiState.update { it.copy(hasModel = hasModel) }
     }
     
@@ -167,16 +174,11 @@ class SmartPredictionSettingsViewModel(application: Application) : AndroidViewMo
             try {
                 val baseUrl = _uiState.value.modelRepo.trimEnd('/')
                 val modelId = SettingsPreferences.getPredictionSelectedModel(context)
-
-                val modelDir = ModelStorage.getModelDir(context, modelId)
-                modelDir.mkdirs()
+                val (modelDir, targets) = modelFiles()
+                check(modelDir.isDirectory || modelDir.mkdirs()) { "无法创建模型目录" }
                 // 兼容旧版：下载前先把旧路径模型迁移到统一目录
                 ModelStorage.migrateLegacyForModel(context, modelId)
-
-                val filesToDownload = listOf(
-                    "vocab.json" to File(modelDir, "vocab.json"),
-                    "model_int8_dynamic.onnx" to File(modelDir, "model_int8_dynamic.onnx")
-                )
+                val filesToDownload = targets.map { it.name to it }
                 
                 val totalFiles = filesToDownload.size
                 
@@ -186,6 +188,9 @@ class SmartPredictionSettingsViewModel(application: Application) : AndroidViewMo
                     )}
                     
                     withContext(Dispatchers.IO) {
+                        val currentDir = ModelStorage.getModelDir(context, modelId)
+                        require(currentDir == modelDir)
+                        require(com.kingzcheung.xime.model.ModelPaths.child(currentDir, fileName) == targetFile)
                         val downloadUrl = when {
                             baseUrl.contains("modelscope.cn") -> {
                                 val cleanUrl = baseUrl.trimEnd('/')
@@ -238,12 +243,14 @@ class SmartPredictionSettingsViewModel(application: Application) : AndroidViewMo
     }
     
     fun deleteModel() {
-        val modelId = SettingsPreferences.getPredictionSelectedModel(context)
-        val modelDir = ModelStorage.getModelDir(context, modelId)
-        val vocabFile = modelDir.resolve("vocab.json")
-        val modelFile = modelDir.resolve("model_int8_dynamic.onnx")
-        vocabFile.delete()
-        modelFile.delete()
+        val files = runCatching { modelFiles().second }.getOrElse {
+            _uiState.update { it.copy(toastMessage = "模型路径不安全，未删除") }
+            return
+        }
+        if (files.any { it.exists() && !it.delete() }) {
+            _uiState.update { it.copy(toastMessage = "模型删除未完成") }
+            return
+        }
         
         SettingsPreferences.setSmartPredictionEnabled(context, false)
         
