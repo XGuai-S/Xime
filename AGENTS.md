@@ -60,6 +60,30 @@
 2. 跑 `./gradlew assembleDebug --quiet` 确认一致状态
 3. 提交所有已完成的工作
 
+## 跟进上游（XGuai-S/Xime）
+
+上游 remote 已配置为 `upstream`。**只读检查**用：
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/upstream-check.ps1
+# 离线快速查看（跳过网络）：加 -NoFetch
+```
+
+脚本会报告四件事：提交差（本地领先/落后几个）、未提交改动数、冲突面预判
+（上游改过且本地也改过的文件）、版本号对照。**它只读，不改工作区、不合并。**
+
+固定流程（不要跳步）：
+
+1. `fetch` —— 用上面的脚本，或 `git fetch upstream --prune`
+2. **报告** —— 把上游新提交、冲突面、版本差异讲清楚
+3. **等确认** —— 涉及合并/变基必须用户点头
+4. `merge` —— 确认后再合；冲突时先看第 2 步的冲突面清单
+
+⚠️ 合并前工作区必须是干净的。有未提交改动时**先提交**再跟进——否则冲突
+无法回退（本项目曾因一次 `git checkout --` 覆盖掉 234 行未提交改动，无法恢复）。
+
+⚠️ 发布打 tag：`git tag -a vX.Y.Z -m "..."`，tag 与 `versionName` 严格一一对应。
+
 ## 性能测量（打字帧率）
 
 改动键盘 UI / 候选栏 / 按键热路径后，应在真机上复测打字帧率，避免引入卡顿回归。
