@@ -43,10 +43,7 @@ import com.kingzcheung.xime.ui.isTablet
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
@@ -407,21 +404,22 @@ private fun T9KeyboardContent(
     }
 
     val density = LocalDensity.current
-    val candidateShadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, keyBackgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(keyBackgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    // 左栏立体感与数字键盘一致：阴影层（clip 前外扩）+ 高光/压暗层（background 后叠加）。
+    // 旧的 crispShadowColor().drawBehind() 只有 1dp 淡阴影、无高光层，视觉上显得扁平。
+    val candidateShadow = rememberKeyShadowModifier(
+        backgroundColor = keyBackgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
+    val candidateBevel = rememberKeyBevelModifier(
+        backgroundColor = keyBackgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
 
     // 布局由 xime.yaml keyboard.t9.layout 驱动（configVersion 感知热重载）；
     // 未配置时为内置默认，与历史硬编码布局一致（三列：左列/主区/右列）。
@@ -454,9 +452,11 @@ private fun T9KeyboardContent(
                 .fillMaxWidth()
                 .fillMaxHeight()
                 .padding(LocalKeyVisualPadding.current)
-                .then(candidateShadowModifier)
+                // 阴影层在 clip 之前（向外扩）；高光/压暗层在 background 之后（才可见）。
+                .then(candidateShadow)
                 .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
                 .background(keyBackgroundColor)
+                .then(candidateBevel)
         ) {
             val showCandidates = controller.leftPanelState != T9InputController.LeftPanelState.IDLE
             val currentFirstOptions = controller.firstOptions
@@ -1058,22 +1058,21 @@ private fun T9SpaceKey(
     val currentOnKeyPress by rememberUpdatedState(onKeyPress)
     val currentOnVoiceModeChange by rememberUpdatedState(onVoiceModeChange)
     val currentOnSwipeUp by rememberUpdatedState(onSwipeUp)
-    val density = LocalDensity.current
-    val spaceShadowModifier = remember(shadowEnabled, shadowElevation, shadowShapeRadius, density, backgroundColor) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val cornerPx = with(density) { shadowShapeRadius.toPx() }
-            val color = crispShadowColor(backgroundColor)
-            Modifier.drawBehind {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(0f, offsetPx),
-                    size = size,
-                    cornerRadius = CornerRadius(cornerPx)
-                )
-            }
-        } else Modifier
-    }
+    // 空格立体感与数字键一致：阴影层（clip 前）+ 高光/压暗层（background 后）。
+    val spaceShadow = rememberKeyShadowModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
+    val spaceBevel = rememberKeyBevelModifier(
+        backgroundColor = backgroundColor,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = shadowShapeRadius,
+        pressed = false,
+        strengthPercent = 100,
+    )
 
     Box(
         modifier = modifier
@@ -1135,9 +1134,10 @@ private fun T9SpaceKey(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(spaceShadowModifier)
+                .then(spaceShadow)
                 .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
                 .background(backgroundColor)
+                .then(spaceBevel)
         )
         if (voiceSticky) {
             Text(

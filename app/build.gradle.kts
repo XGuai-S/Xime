@@ -89,8 +89,8 @@ android {
         applicationId = "com.kingzcheung.xime"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20261393
-        versionName = "3.4.49"
+        versionCode = 20261394
+        versionName = "3.4.50"
 
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -176,7 +176,7 @@ android {
         externalNativeBuild {
             cmake {
                 path = file("src/main/jni/CMakeLists.txt")
-                version = "3.22.1"
+                version = "4.0.2"
             }
         }
     }

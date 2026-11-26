@@ -338,8 +338,10 @@ object KeysConfigHelper {
         "candidates", "symbol", "number", "space", "earth", "delete", "clear", "enter"
     )
 
-    /** 九键左侧快捷符号栏内置默认值（T9KeyboardLayout 硬编码的历史行为）。 */
-    val DEFAULT_T9_SIDE_SYMBOLS: List<String> = listOf("，", "。", "？", "！")
+    /** 九键左侧快捷符号栏内置默认值（超过 4 个时左栏可上下滑动取用）。 */
+    val DEFAULT_T9_SIDE_SYMBOLS: List<String> = listOf(
+        "，", "。", "？", "！", "、", "；", "：", "“", "”", "（", "）", "…"
+    )
 
     /**
      * 当前设备是否为平板/大屏（smallestWidth ≥ 600dp，与 ui.isTablet() 的 sw600dp 档一致，
