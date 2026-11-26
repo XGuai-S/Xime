@@ -289,10 +289,19 @@ fun HandwritingKeyboardLayout(
         ) {
             listOf("，", "。", "？", "！", "删除").forEachIndexed { i, text ->
                 val pressed = pressedButton == i
+                val symbolShadow = rememberKeyShadowModifier(
+                    backgroundColor = keyBackgroundColor, shadowEnabled = true,
+                    shadowShapeRadius = keyCornerRadius, pressed = pressed, strengthPercent = 100)
+                val symbolBevel = rememberKeyBevelModifier(
+                    backgroundColor = keyBackgroundColor, shadowEnabled = true,
+                    shadowShapeRadius = keyCornerRadius, pressed = pressed, strengthPercent = 100)
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth().padding(keyPadding)
+                        .keyPressScale(pressed)
+                        .then(symbolShadow)
                         .clip(RoundedCornerShape(keyCornerRadius))
-                        .background(if (pressed) Color(0x80000000) else Color(0x12000000)),
+                        .background(if (pressed) Color(0x80000000) else Color(0x12000000))
+                        .then(symbolBevel),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(text, color = keyTextColor, fontSize = buttonFontSize,
@@ -322,10 +331,20 @@ fun HandwritingKeyboardLayout(
                     "123", "ABC" -> 0.7f
                     else -> 1f
                 }
+                val barPressed = pressedButton == idx
+                val barShadow = rememberKeyShadowModifier(
+                    backgroundColor = bg, shadowEnabled = true,
+                    shadowShapeRadius = keyCornerRadius, pressed = barPressed, strengthPercent = 100)
+                val barBevel = rememberKeyBevelModifier(
+                    backgroundColor = bg, shadowEnabled = true,
+                    shadowShapeRadius = keyCornerRadius, pressed = barPressed, strengthPercent = 100)
                 Box(
                     modifier = Modifier.weight(w).fillMaxSize().padding(keyPadding)
+                        .keyPressScale(barPressed)
+                        .then(barShadow)
                         .clip(RoundedCornerShape(keyCornerRadius))
-                        .background(if (pressedButton == idx) Color(0x40000000) else bg),
+                        .background(if (barPressed) Color(0x40000000) else bg)
+                        .then(barBevel),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(text, color = txtColor, fontSize = buttonFontSize,
