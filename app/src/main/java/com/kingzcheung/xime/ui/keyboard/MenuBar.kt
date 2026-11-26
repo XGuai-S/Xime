@@ -314,6 +314,21 @@ fun MenuItemButton(
     isLandscape: Boolean = false,
     isFloating: Boolean = false
 ) {
+    // 功能卡片立体感：与其它按键一致（阴影 clip 前 + 高光 background 后）。
+    val cardShadow = rememberKeyShadowModifier(
+        backgroundColor = bgColor,
+        shadowEnabled = true,
+        shadowShapeRadius = 12.dp,
+        pressed = false,
+        strengthPercent = 100,
+    )
+    val cardBevel = rememberKeyBevelModifier(
+        backgroundColor = bgColor,
+        shadowEnabled = true,
+        shadowShapeRadius = 12.dp,
+        pressed = false,
+        strengthPercent = 100,
+    )
     Column(
         modifier = modifier
             // 悬浮卡片：方块固定高，避免 aspectRatio 与 weight/容器高度协商被拉长。
@@ -327,8 +342,10 @@ fun MenuItemButton(
                     else -> Modifier.aspectRatio(1f)
                 }
             )
+            .then(cardShadow)
             .clip(RoundedCornerShape(12.dp))
             .background(bgColor)
+            .then(cardBevel)
             .clickable { item.action() }
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

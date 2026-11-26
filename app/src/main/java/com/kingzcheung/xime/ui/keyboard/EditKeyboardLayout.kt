@@ -217,19 +217,20 @@ private fun CircularDPad(
 
     var pressedAction by remember { mutableStateOf<String?>(null) }
     val density = LocalDensity.current
-    // 方向圆盘立体感与其他按键一致：阴影层（clip 前）+ 高光/压暗层（background 后）。
+    // 大圆盘只要立体感（阴影层 clip 前 + 高光层 background 后），不随按压变化——
+    // 按压反馈只交给中心的「选择」小圆，避免整个方向盘跟着一起沉下去。
     val dpadShadow = rememberKeyShadowModifier(
         backgroundColor = keyBg,
         shadowEnabled = shadowEnabled,
         shadowShapeRadius = 999.dp,
-        pressed = pressedAction != null,
+        pressed = false,
         strengthPercent = 100,
     )
     val dpadBevel = rememberKeyBevelModifier(
         backgroundColor = keyBg,
         shadowEnabled = shadowEnabled,
         shadowShapeRadius = 999.dp,
-        pressed = pressedAction != null,
+        pressed = false,
         strengthPercent = 100,
     )
     Box(
@@ -329,11 +330,8 @@ private fun CircularDPad(
             drawCircle(color = backgroundColor, radius = innerR)
 
             val centerR = innerR * 0.82f
-            if (isSelecting) {
-                drawCircle(color = accentColor.copy(alpha = 0.25f), radius = centerR)
-            }
-            // 中心「选择」圆立体感：底部投影 + 顶部高光弧（与大圆盘同一套 crisp 风格）。
-            // 按下该圆时 pressedAction=="center"：投影内缩、圆面压暗，给出明确按压反馈。
+            // 中心「选择」圆立体感：底部投影 + 顶部高光弧。
+            // 按压反馈只作用在这个小圆：按下时投影内缩、圆面变为按压色；松开（取消按压）恢复常态。
             val centerPressed = pressedAction == "center"
             val centerShadowOffset = if (centerPressed) 0.dp.toPx() else 1.dp.toPx()
             drawCircle(
@@ -341,10 +339,14 @@ private fun CircularDPad(
                 radius = centerR,
                 center = Offset(cx, cy + centerShadowOffset)
             )
-            drawCircle(
-                color = if (centerPressed) keyBg.copy(alpha = 0.8f) else keyBg,
-                radius = centerR
-            )
+            // 圆面底色：按下=按压色（accent 淡色），未按下=常态 keyBg；
+            // 取消态（isSelecting）未按下时叠加淡色高亮，表示当前处于"取消选择"。
+            val faceColor = when {
+                centerPressed -> accentColor.copy(alpha = 0.28f)
+                isSelecting -> accentColor.copy(alpha = 0.18f)
+                else -> keyBg
+            }
+            drawCircle(color = faceColor, radius = centerR)
             drawArc(
                 color = Color.White.copy(alpha = 0.35f),
                 startAngle = 200f,
@@ -360,7 +362,8 @@ private fun CircularDPad(
                 style = Stroke(width = 1.dp.toPx())
             )
 
-            // 按下效果：外圆向内圆方向渐变
+            // 大圆盘只在按下的箭头象限块显示按压高亮（按中心圆时 pressedAction=="center"，
+            // 不属于任何象限，因此中心圆按压时大圈不会跟着高亮）。
             val pressedIdx = quadrants.indexOfFirst { it.actionBase == pressedAction }
             if (pressedIdx >= 0) {
                 val q = quadrants[pressedIdx]
