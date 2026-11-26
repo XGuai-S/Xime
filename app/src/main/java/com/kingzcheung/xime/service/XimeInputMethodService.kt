@@ -1233,6 +1233,20 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 // 必须在主线程执行：函数内部直接读写 viewModel / uiState（抽取时漏了这层，
                 // 原来紧跟着的那段内联 withContext(Main) 代码才是真正干活的地方，两者重复执行两遍）。
                 withContext(Dispatchers.Main) { applyInitialSchemaAfterInit() }
+
+                // 备份恢复时若引擎未就绪，afterRestore 会留下 pending 标记；引擎就绪后在此补做
+                // 词库快照合并（mergePendingSnapshots 是备份恢复的 pending 补偿入口）。
+                if (com.kingzcheung.xime.settings.SettingsPreferences.isPendingDictMerge(this@XimeInputMethodService)) {
+                    serviceScope.launch(Dispatchers.IO) {
+                        val merged = com.kingzcheung.xime.settings.SyncManager.mergePendingSnapshots(applicationContext)
+                        if (merged.isSuccess) {
+                            com.kingzcheung.xime.settings.SettingsPreferences.setPendingDictMerge(applicationContext, false)
+                            Log.i(TAG, "initRimeEngine: pending 词库快照补偿合并完成")
+                        } else {
+                            FileLogger.w(TAG, "initRimeEngine: pending 词库快照合并仍失败，下次引擎就绪重试")
+                        }
+                    }
+                }
                 // 引擎可用后加载用户词库词集合，供组合生词查重（异步，失败静默）
                 refreshSchemeDictWords()
                 // 迁移：清理旧版注入到快捷短语的自动造词（造词已改候选合并通道）

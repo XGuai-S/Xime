@@ -463,94 +463,52 @@ private fun T9KeyboardContent(
             // 空闲态符号列表来自 xime.yaml keyboard.t9.side_symbols（可自定义，>4 滚动）
             val configVersion by KeysConfigHelper.configVersion.collectAsState()
             val t9SideSymbols = remember(configVersion) { KeysConfigHelper.getT9SideSymbols() }
-            val displayItems: List<String> = if (showCandidates) {
-                currentFirstOptions.map { it.pinyin }
-            } else {
-                t9SideSymbols
-            }
-            if (displayItems.size <= 4) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(0.dp)
-                ) {
-                    displayItems.forEachIndexed { index, item ->
-                        if (showCandidates) {
-                            val option = currentFirstOptions[index]
-                            val isSelected = controller.leftPanelState == T9InputController.LeftPanelState.SELECTION &&
-                                    controller.selectedOption == option &&
-                                    controller.isSelectedOptionInCurrentCandidates()
-                            CandidateItem(
-                                text = option.pinyin,
-                                onClick = { controller.onChoiceSelected(option) },
-                                onPress = { onKeyPressDown?.invoke(option.pinyin) },
-                                textColor = keyTextColor,
-                                backgroundColor = keyBackgroundColor,
-                                accentColor = accentColor,
-                                fontSize = candidateFontSize,
-                                isSelected = isSelected,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                            )
-                        } else {
-                            CandidateItem(
-                                text = item,
-                                onClick = { onKeyPress(item) },
-                                onPress = { onKeyPressDown?.invoke(item) },
-                                textColor = keyTextColor,
-                                backgroundColor = keyBackgroundColor,
-                                accentColor = accentColor,
-                                fontSize = candidateFontSize,
-                                isSelected = false,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                            )
+                if (showCandidates) {
+                    // 候选态：音节少（通常 ≤4），weight 均分整列高度，避免挤在顶部留白。
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(0.dp)
+                    ) {
+                        currentFirstOptions.forEach { option ->
+                                val isSelected = controller.leftPanelState == T9InputController.LeftPanelState.SELECTION &&
+                                        controller.selectedOption == option &&
+                                        controller.isSelectedOptionInCurrentCandidates()
+                                CandidateItem(
+                                    text = option.pinyin,
+                                    onClick = { controller.onChoiceSelected(option) },
+                                    onPress = { onKeyPressDown?.invoke(option.pinyin) },
+                                    textColor = keyTextColor,
+                                    backgroundColor = keyBackgroundColor,
+                                    accentColor = accentColor,
+                                    fontSize = candidateFontSize,
+                                    isSelected = isSelected,
+                                    modifier = Modifier.fillMaxWidth().weight(1f)
+                                )
+                        }
+                    }
+                } else {
+                    // 空闲态：常用符号可上下滑动；定高条目，LazyColumn 只组合可见项。
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(0.dp)
+                    ) {
+                        itemsIndexed(t9SideSymbols) { _, item ->
+                                CandidateItem(
+                                    text = item,
+                                    onClick = { onKeyPress(item) },
+                                    onPress = { onKeyPressDown?.invoke(item) },
+                                    textColor = keyTextColor,
+                                    backgroundColor = keyBackgroundColor,
+                                    accentColor = accentColor,
+                                    fontSize = candidateFontSize,
+                                    isSelected = false,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(if (compactMode) 26.dp else 32.dp)
+                                )
                         }
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(0.dp)
-                ) {
-                    itemsIndexed(displayItems) { index, item ->
-                        if (showCandidates) {
-                            val option = currentFirstOptions[index]
-                            val isSelected = controller.leftPanelState == T9InputController.LeftPanelState.SELECTION &&
-                                    controller.selectedOption == option &&
-                                    controller.isSelectedOptionInCurrentCandidates()
-                            CandidateItem(
-                                text = option.pinyin,
-                                onClick = { controller.onChoiceSelected(option) },
-                                onPress = { onKeyPressDown?.invoke(option.pinyin) },
-                                textColor = keyTextColor,
-                                backgroundColor = keyBackgroundColor,
-                                accentColor = accentColor,
-                                fontSize = candidateFontSize,
-                                isSelected = isSelected,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(if (compactMode) 26.dp else 32.dp)
-                            )
-                        } else {
-                            CandidateItem(
-                                text = item,
-                                onClick = { onKeyPress(item) },
-                                onPress = { onKeyPressDown?.invoke(item) },
-                                textColor = keyTextColor,
-                                backgroundColor = keyBackgroundColor,
-                                accentColor = accentColor,
-                                fontSize = candidateFontSize,
-                                isSelected = false,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(if (compactMode) 26.dp else 32.dp)
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1058,19 +1016,22 @@ private fun T9SpaceKey(
     val currentOnKeyPress by rememberUpdatedState(onKeyPress)
     val currentOnVoiceModeChange by rememberUpdatedState(onVoiceModeChange)
     val currentOnSwipeUp by rememberUpdatedState(onSwipeUp)
-    // 空格立体感与数字键一致：阴影层（clip 前）+ 高光/压暗层（background 后）。
+    // 按压态：空格按下时给视觉反馈（与数字键 KeyButton 的 pressed 行为一致）。
+    var isPressed by remember { mutableStateOf(false) }
+    val depthColor = if (isPressed) backgroundColor.copy(alpha = 0.8f) else backgroundColor
+    // 空格立体感与数字键一致：阴影层（clip 前）+ 高光/压暗层（background 后），按下时随 pressed 态变化。
     val spaceShadow = rememberKeyShadowModifier(
-        backgroundColor = backgroundColor,
+        backgroundColor = depthColor,
         shadowEnabled = shadowEnabled,
         shadowShapeRadius = shadowShapeRadius,
-        pressed = false,
+        pressed = isPressed,
         strengthPercent = 100,
     )
     val spaceBevel = rememberKeyBevelModifier(
-        backgroundColor = backgroundColor,
+        backgroundColor = depthColor,
         shadowEnabled = shadowEnabled,
         shadowShapeRadius = shadowShapeRadius,
-        pressed = false,
+        pressed = isPressed,
         strengthPercent = 100,
     )
 
@@ -1081,12 +1042,14 @@ private fun T9SpaceKey(
             .pointerInput(voiceSticky, isSttEnabled) {
                 detectTapGestures(
                     onPress = {
+                        isPressed = true
                         if (voiceSticky) {
                             tryAwaitRelease()
                         } else {
                             onKeyPressDown?.invoke("space")
                             tryAwaitRelease()
                         }
+                        isPressed = false
                     },
                     onTap = {
                         if (voiceSticky) {
@@ -1134,9 +1097,10 @@ private fun T9SpaceKey(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .keyPressScale(isPressed)
                 .then(spaceShadow)
                 .clip(RoundedCornerShape(LocalKeyCornerRadius.current))
-                .background(backgroundColor)
+                .background(depthColor)
                 .then(spaceBevel)
         )
         if (voiceSticky) {

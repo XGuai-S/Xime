@@ -2173,9 +2173,24 @@ object KeysConfigHelper {
     /** 获取手势灵敏度配置（从 xime.yaml keyboard.gestures 加载）。 */
     fun getKeyboardGestures(): KeyboardGesturesConfig = keyboardGesturesConfig
 
-    /** 获取九键左侧快捷符号栏配置（xime.custom.yaml → xime.yaml → 内置默认值）。 */
-    fun getT9SideSymbols(): List<String> =
-        keyboardT9Config.sideSymbols ?: DEFAULT_T9_SIDE_SYMBOLS
+    /**
+     * 获取九键左侧快捷符号栏配置（xime.custom.yaml → xime.yaml → 内置默认值）。
+     *
+     * 升级兼容：老设备的统一配置目录里残留早期版本只有 4 个符号（，。？！）的
+     * xime.yaml 完整快照，升级后仍优先读它，导致左栏只有 4 个、无法体现「常用符号 + 滑动」。
+     * 仅当配置恰好是这 4 个旧默认符号时才补齐到内置默认（12 个），不干扰用户在
+     * xime.custom.yaml 里显式自定义的任意数量列表（尊重整表覆盖语义）。
+     */
+    fun getT9SideSymbols(): List<String> {
+        val configured = keyboardT9Config.sideSymbols
+        val legacyFour = listOf("，", "。", "？", "！")
+        // 过滤解析可能带入的空串再比较，兼容旧配置里混入空项的情况。
+        val cleaned = configured?.filter { it.isNotEmpty() }
+        if (cleaned == legacyFour || cleaned.isNullOrEmpty()) {
+            return DEFAULT_T9_SIDE_SYMBOLS
+        }
+        return configured
+    }
 
     /** 获取九键布局配置（keyboard.t9.layout，custom → builtIn → 内置默认，字段级 fallback）。 */
     fun getT9Layout(): KeyboardT9LayoutConfig = keyboardT9Config.layout

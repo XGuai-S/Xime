@@ -52,6 +52,12 @@ class XimeApplication : Application(), ImageLoaderFactory {
     
     companion object {
         private const val TAG = "XimeApplication"
+
+        /** 仅主进程（IME 所在进程）执行 Rime 预初始化与自动备份；
+         *  :asr / :inference 子进程加载 librime 并部署词库既浪费内存/电量，
+         *  还会让多个进程争写同一个 native_crash.log 导致崩溃日志丢失。 */
+        private fun isMainProcess(context: android.content.Context): Boolean =
+            context.packageName == android.os.Process.myProcessName()
     }
     
     // 必须带 SupervisorJob：此 scope 承载引擎预初始化、配置预热、自动备份，
@@ -202,11 +208,16 @@ class XimeApplication : Application(), ImageLoaderFactory {
         // 初始化模型运行时（内存管理 + 生命周期）
         ModelRuntime.attach(this)
 
-        // 自动备份调度：每 12h 检查距上次备份是否超时，超时且备份插件已配置则自动上传。
-        // 放在插件初始化（PluginManager.initialize）之后，确保能拿到已启用的备份插件实例。
-        com.kingzcheung.xime.settings.AutoBackup.start(applicationScope, this)
+        // IME 主进程专属重初始化：子进程(:asr/:inference)跳过，避免多进程各自加载
+        // librime、部署词库、启动备份轮询带来的内存与耗电浪费，并规避多进程争写
+        // 同一个 native_crash.log 导致崩溃日志丢失。
+        if (isMainProcess(this)) {
+                // 自动备份调度：每 12h 检查距上次备份是否超时，超时且备份插件已配置则自动上传。
+                // 放在插件初始化（PluginManager.initialize）之后，确保能拿到已启用的备份插件实例。
+                com.kingzcheung.xime.settings.AutoBackup.start(applicationScope, this)
 
-        preInitializeRimeEngine()
+                preInitializeRimeEngine()
+        }
     }
     
     private fun preInitializeRimeEngine() {
