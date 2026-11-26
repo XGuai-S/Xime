@@ -217,26 +217,28 @@ private fun CircularDPad(
 
     var pressedAction by remember { mutableStateOf<String?>(null) }
     val density = LocalDensity.current
-    val shadowModifier = remember(shadowEnabled, shadowElevation, density, keyBg) {
-        if (shadowEnabled) {
-            val offsetPx = with(density) { shadowElevation.toPx() }
-            val color = crispShadowColor(keyBg)
-            Modifier.drawBehind {
-                // 底部投影：与各键盘按键的 crisp 阴影同风格（圆形）
-                drawCircle(
-                    color = color,
-                    radius = size.minDimension / 2f,
-                    center = Offset(size.width / 2f, size.height / 2f + offsetPx)
-                )
-            }
-        } else Modifier
-    }
+    // 方向圆盘立体感与其他按键一致：阴影层（clip 前）+ 高光/压暗层（background 后）。
+    val dpadShadow = rememberKeyShadowModifier(
+        backgroundColor = keyBg,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = 999.dp,
+        pressed = pressedAction != null,
+        strengthPercent = 100,
+    )
+    val dpadBevel = rememberKeyBevelModifier(
+        backgroundColor = keyBg,
+        shadowEnabled = shadowEnabled,
+        shadowShapeRadius = 999.dp,
+        pressed = pressedAction != null,
+        strengthPercent = 100,
+    )
     Box(
         modifier = modifier
             .aspectRatio(1f)
-            .then(shadowModifier)
+            .then(dpadShadow)
             .clip(CircleShape)
             .background(keyBg)
+            .then(dpadBevel)
             .pointerInput(isSelecting) {
                 detectTapGestures(
                     onPress = { offset ->
@@ -330,7 +332,28 @@ private fun CircularDPad(
             if (isSelecting) {
                 drawCircle(color = accentColor.copy(alpha = 0.25f), radius = centerR)
             }
-            drawCircle(color = keyBg, radius = centerR)
+            // 中心「选择」圆立体感：底部投影 + 顶部高光弧（与大圆盘同一套 crisp 风格）。
+            // 按下该圆时 pressedAction=="center"：投影内缩、圆面压暗，给出明确按压反馈。
+            val centerPressed = pressedAction == "center"
+            val centerShadowOffset = if (centerPressed) 0.dp.toPx() else 1.dp.toPx()
+            drawCircle(
+                color = crispShadowColor(keyBg),
+                radius = centerR,
+                center = Offset(cx, cy + centerShadowOffset)
+            )
+            drawCircle(
+                color = if (centerPressed) keyBg.copy(alpha = 0.8f) else keyBg,
+                radius = centerR
+            )
+            drawArc(
+                color = Color.White.copy(alpha = 0.35f),
+                startAngle = 200f,
+                sweepAngle = 140f,
+                useCenter = false,
+                topLeft = Offset(cx - centerR, cy - centerR),
+                size = androidx.compose.ui.geometry.Size(centerR * 2, centerR * 2),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
             drawCircle(
                 color = textColor.copy(alpha = 0.15f),
                 radius = centerR,
@@ -438,5 +461,3 @@ private fun SideButtonGrid(
         }
     }
 }
-
-
