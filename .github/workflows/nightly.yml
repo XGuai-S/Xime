@@ -111,6 +111,11 @@ jobs:
 
       - name: Download native deps (ONNX Runtime)
         run: ./gradlew downloadOnnx --no-daemon --refresh-dependencies
+      - name: Set single ABI for CI
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "xime.abi=arm64-v8a" >> local.properties
+          cat local.properties
       - name: Prepare Boost source (serialized for all ABI)
         run: |
           BOOST_VER=1.89.0
