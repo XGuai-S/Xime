@@ -159,10 +159,23 @@ jobs:
             echo "::warning::No plugin XIPKs found!"
           fi
 
+      - name: Generate release notes from CHANGELOG
+        id: release_body
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          awk -v ver="$VERSION" '
+            $0 == "## " ver { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md | sed '/^---$/d' | sed '/./,$!d' > /tmp/release-body.md
+          echo "BODY_FILE=/tmp/release-body.md" >> $GITHUB_OUTPUT
+          echo "Generated release notes from CHANGELOG for $VERSION"
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
+          body_path: ${{ steps.release_body.outputs.BODY_FILE }}
           name: Xime ${{ steps.get_version.outputs.VERSION }}
           generate_release_notes: false
           files: |

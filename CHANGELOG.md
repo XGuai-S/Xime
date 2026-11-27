@@ -59,8 +59,15 @@ release 打包的一大半。
 - 签名密钥不入库：4 个签名值以 GitHub Actions Secrets 加密保存，CI 构建时临时
   生成 `keystore.properties`，构建结束即销毁。
 - 打 tag 由 `release.yml` 自动完成：recursive checkout → JDK17/SDK/NDK29 →
-  downloadOnnx → 插件打包 → assembleRelease → apksigner 验签 → 创建 Release。
+  downloadOnnx → Boost/lua 串行预准备 → 插件打包 → assembleRelease → apksigner
+  验签 → 创建 Release 并上传 APK 与 xipk。
+- 为使 Linux CI 从源码全量编译可复现，修复了一系列仅在 CI 首次构建暴露的问题：
+  gradlew 可执行位、Actions 激活、ONNX 头文件下载失败、Boost 缓存与 4 ABI
+  并发解压冲突、librime-lua 插件并发拷贝、CMake 缓存损坏；CI 最终固定为
+  arm64 单 ABI 编译，消除并发竞态。
+- CI 仅发布 arm64-v8a APK（与本地预编译库架构一致）；其余 ABI 需本地按原方式构建。
 - 本版功能与 3.4.68 相同（耗电审计三项修复），仅发布工程改造。
+- 首个完全由 CI 从源码自动构建、签名、发布的版本：CI 产物签名证书与 3.4.68 一致。
 
 ---
 
