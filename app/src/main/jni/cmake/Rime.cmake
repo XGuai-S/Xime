@@ -106,8 +106,10 @@ rime_link_plugin(librime-correction)
 # 覆盖该插件的接入，故不合并上游这段。
 
 # librime-lua 需要特殊命名 lua
-file(COPY "${CMAKE_SOURCE_DIR}/librime-lua/"
-     DESTINATION "${CMAKE_SOURCE_DIR}/librime/plugins/lua")
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/librime/plugins/lua")
+  file(COPY "${CMAKE_SOURCE_DIR}/librime-lua/"
+  DESTINATION "${CMAKE_SOURCE_DIR}/librime/plugins/lua")
+endif()
 
 # librime-lua thirdparty 依赖（Lua 5.4 源码）
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/librime/plugins/lua/thirdparty")
