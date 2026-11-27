@@ -1499,6 +1499,9 @@ private fun MenuCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = maxCardHeight),
+            // 长按弹出菜单立体感：Material3 阴影 + crisp 高光层。
+            tonalElevation = 2.dp,
+            shadowElevation = 8.dp,
             shape = RoundedCornerShape(12.dp),
             color = cardBgColor
         ) {
