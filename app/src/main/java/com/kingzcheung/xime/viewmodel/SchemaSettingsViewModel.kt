@@ -226,11 +226,17 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
                 KeysConfigHelper.loadConfig(context)
                 KeyboardThemes.reload(context)
                 val engine = RimeEngine.getInstance()
+                val currentSchemaId = engine.getCurrentSchema()
                 val deployed = engine.deploy()
                 if (deployed) {
                     // hash 与 done 必须一起落：只写 hash 不写 done，ensureDeployment 会判成
                     // 「hash 一致但未完成」而多跑一轮无谓的部署检查。
                     RimeConfigHelper.storeDeploymentHash(context)
+                    // 部署重建了编译产物，重建 session 并恢复方案，避免「部署成功但打不了字」。
+                    engine.endSession()
+                    if (engine.ensureSession(60_000L) && currentSchemaId.isNotEmpty()) {
+                        engine.switchSchema(currentSchemaId)
+                    }
                     com.kingzcheung.xime.settings.SettingsPreferences.setDeploymentDone(context, true)
                 }
                 deployed

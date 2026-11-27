@@ -405,11 +405,19 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
             // 表现为「改了没生效」，比不能改更让人困惑。
             RimeUserFileSync.sync(service)
 
+            // 部署前记录当前方案，重建 session 后恢复（部署会重建编译产物，旧 session 持有旧数据）。
+            val currentSchemaId = service.rimeEngine.getCurrentSchema()
             val success = service.rimeEngine.deploy()
             if (success) {
                 // 与其余部署入口一致：成功才落 hash + done。原先漏了这一步，导致
                 // ensureDeployment 下次必然 hash 失配、再白跑一轮部署。
                 RimeConfigHelper.storeDeploymentHash(service)
+                // 部署重建了词库编译产物（prism/table），必须重建 session 并恢复方案，
+                // 否则旧 session 仍指向旧数据，表现为「部署成功但打不了字」。
+                service.rimeEngine.endSession()
+                if (service.rimeEngine.ensureSession(60_000L) && currentSchemaId.isNotEmpty()) {
+                    service.rimeEngine.switchSchema(currentSchemaId)
+                }
                 com.kingzcheung.xime.settings.SettingsPreferences.setDeploymentDone(service, true)
             }
             

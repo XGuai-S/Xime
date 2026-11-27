@@ -1,5 +1,7 @@
 package com.kingzcheung.xime.ui.menubar
 
+import com.kingzcheung.xime.ui.keyboard.rememberKeyShadowModifier
+import com.kingzcheung.xime.ui.keyboard.rememberKeyBevelModifier
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -1155,9 +1157,11 @@ fun ClipboardImageCard(
     val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Box(
         modifier = modifier
+                .then(rememberKeyShadowModifier(bg, true, 8.dp, false, 100))
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
             .clip(shape)
             .background(bg)
+                .then(rememberKeyBevelModifier(bg, true, 8.dp, false, 100))
             // 长按/拖拽由 clipboardLongPressDrag 处理（长按未拖 → onLongClick 弹菜单）。
             // 用 tolerantClick 而非 combinedClickable：卡片位于 LazyVerticalGrid + HorizontalPager 内，
             // 轻点的小位移会被父级手势判定吃掉（部分 ROM/高采样屏幕表现为“点了没反应”）。
