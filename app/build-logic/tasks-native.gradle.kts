@@ -128,7 +128,8 @@ val downloadOnnx by tasks.registering {
                 }
                 // 失败后清空残留半成品，避免续传污染下一源
                 target.delete()
-                if (attempt < 4) Thread.sleep(3000)
+                if (attempt < 4) {
+                  val backoffMs = 3000L * (1L shl attempt)                   System.err.println("Retry $desc in ${backoffMs}ms (attempt ${attempt + 1}/5)")                   Thread.sleep(backoffMs)                 }
             }
             return false
         }

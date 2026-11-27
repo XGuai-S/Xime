@@ -56,7 +56,7 @@ jobs:
           path: |
             app/src/main/jni/onnxruntime
             app/src/main/jniLibs/**/libonnxruntime.so
-          key: native-${{ runner.os }}-${{ hashFiles('app/build-logic/tasks-native.gradle.kts') }}
+          key: native-${{ runner.os }}-onnx-1.28.0
           restore-keys: |
             native-${{ runner.os }}-
 
