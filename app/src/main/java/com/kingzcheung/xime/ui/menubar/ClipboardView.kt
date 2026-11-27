@@ -65,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -1157,6 +1158,7 @@ fun ClipboardImageCard(
     val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Box(
         modifier = modifier
+                .shadow(6.dp, RoundedCornerShape(12.dp), clip = true)
                 .then(rememberKeyShadowModifier(bg, true, 8.dp, false, 100))
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
             .clip(shape)
@@ -1255,6 +1257,7 @@ fun GridItemCard(
     val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Column(
         modifier = modifier
+            .shadow(6.dp, RoundedCornerShape(12.dp), clip = true)
             .then(rememberKeyShadowModifier(bg, true, 8.dp, false, 100))
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
             .clip(shape)
@@ -1518,7 +1521,6 @@ private fun MenuCard(
                         )
                     }
                     LongPressMenuItem(
-                        bgColor = cardBgColor,
                         icon = entry.icon,
                         label = entry.label,
                         tint = entry.tint ?: MaterialTheme.colorScheme.onSurface,
@@ -1538,16 +1540,11 @@ fun LongPressMenuItem(
     icon: ImageVector,
     label: String,
     tint: Color = MaterialTheme.colorScheme.onSurface,
-    bgColor: Color = Color.White,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(rememberKeyShadowModifier(bgColor, true, 10.dp, false, 100))
-            .clip(RoundedCornerShape(10.dp))
-            .background(bgColor)
-            .then(rememberKeyBevelModifier(bgColor, true, 10.dp, false, 100))
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
