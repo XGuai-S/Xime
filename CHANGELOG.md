@@ -49,6 +49,21 @@ release 打包的一大半。
 
 ---
 
+## 3.4.69（versionCode 20261413）
+
+**发布流程切换为 GitHub Actions CI 自动构建，源码结构改为完整 submodule。**
+
+- 全部依赖（librime、snappy、librime-lua、librime-lua-deps、librime-octagram、
+  librime-predict、rime 配置词库）恢复为真正的 git submodule；`clone --recursive`
+  即可拿到完整可编译源码树。
+- 签名密钥不入库：4 个签名值以 GitHub Actions Secrets 加密保存，CI 构建时临时
+  生成 `keystore.properties`，构建结束即销毁。
+- 打 tag 由 `release.yml` 自动完成：recursive checkout → JDK17/SDK/NDK29 →
+  downloadOnnx → 插件打包 → assembleRelease → apksigner 验签 → 创建 Release。
+- 本版功能与 3.4.68 相同（耗电审计三项修复），仅发布工程改造。
+
+---
+
 ## 3.4.68（versionCode 20261412）
 
 **耗电审计后的三项收尾：异常录音自清理、ONNX 共享线程池真正生效、AI 面板静置不跑动画。**
