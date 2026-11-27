@@ -778,6 +778,9 @@ class AiPipelineEngine(
                 )
             }
         }
+        // 通用 fallback：任意 AI 服务商配了 Key，语音转文本直接复用其密钥与接口，
+        // 避免在「语音转文本」里重复填一份 STT 凭证。
+        UnifiedProviderCatalog.resolveSttFromVault(settings)?.let { return it }
         return primary
     }
 

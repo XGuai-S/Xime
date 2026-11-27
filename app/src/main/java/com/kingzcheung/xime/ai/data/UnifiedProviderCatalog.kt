@@ -239,6 +239,34 @@ object UnifiedProviderCatalog {
         return stt.protocol == SttProtocol.OPENAI_HTTP && isLocalUrl(stt.baseUrl)
     }
 
+    /**
+     * 从已保存的 AI 服务商凭证构造可直接用于语音转文本的 SttConfig。
+     *
+     * 场景：用户只在「AI 服务商」里配了某个供应商的 Key，未在「语音转文本」里
+     * 单独填 STT 密钥时，直接复用该服务商的密钥与接口做 STT，避免重复配置。
+     * 语音专用 sttApiKey 优先于通用 apiKey；服务商按 STT 支持与凭证就绪排序。
+     */
+    fun resolveSttFromVault(settings: AppSettings): SttConfig? {
+        val vault = hydrateVaultFromSettings(settings)
+        val providerId = resolveFallbackSttProviderFromVault(vault) ?: return null
+        val cred = vault[providerId] ?: return null
+        val spec = specFor(providerId)
+        if (!spec.supportsStt) return null
+        val baseUrl = if (spec.supportsCustomBaseUrl && cred.customBaseUrl.isNotBlank()) {
+            cred.customBaseUrl
+        } else {
+            spec.defaultBaseUrl
+        }
+        val stt = settings.sttConfig.copy(
+            presetId = providerId,
+            protocol = spec.defaultSttProtocol,
+            baseUrl = baseUrl.ifBlank { settings.sttConfig.baseUrl },
+            model = spec.defaultSttModel.ifBlank { settings.sttConfig.model }
+        )
+        val resolved = syncSttWithVault(stt, providerId, cred)
+        return if (resolved.apiKey.isNotBlank() || isLocalUrl(resolved.baseUrl)) resolved else null
+    }
+
     fun resolveFallbackSttProviderFromVault(
         vault: Map<String, ProviderCredential>,
         excludeProviderId: String? = null

@@ -825,6 +825,11 @@ class StreamingComposer(
             settings: AppSettings,
             intentMode: VoiceIntentMode
         ): Boolean {
+            // 文本润色开关关闭时，口述净写走纯 STT 直出，无需 Stage-2 LLM 替换。
+            if (!settings.llmConfig.enabled) {
+                return settings.pipelineMode == PipelineMode.DUAL_STAGE &&
+                    intentMode == VoiceIntentMode.DICTATE
+            }
             return settings.pipelineMode == PipelineMode.DUAL_STAGE &&
                 settings.sttConfig.protocol == SttProtocol.GEMINI_LIVE_WS &&
                 !settings.llmConfig.enabled &&

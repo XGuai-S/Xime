@@ -211,6 +211,37 @@ fun AiSettingsScreen(
                 model = llmModel, onModel = { llmModel = it },
             )
 
+            // ---- 文本润色开关：关闭后口述净写走纯 STT 直出 ----
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("文本润色（LLM）", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "关闭后「口述净写」只做语音转文本直接上屏，不调用 LLM 润色；" +
+                                "语音编辑 / 帮我写 / 翻译等仍按各自意图处理。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = settings?.llmConfig?.enabled == true,
+                        onCheckedChange = { on ->
+                            repo?.updateSettings { it.copy(llmConfig = it.llmConfig.copy(enabled = on)) }
+                        }
+                    )
+                }
+            }
+
             Spacer(Modifier.height(4.dp))
 
             // ---- 权限与系统能力 ----
