@@ -68,9 +68,7 @@ jobs:
         with:
           path: |
             app/.cxx
-            app/src/main/jni/boost
-            app/src/main/jni/boost-*.tar.xz
-          key: cmake-${{ runner.os }}-${{ hashFiles('app/src/main/jni/CMakeLists.txt') }}-v2
+          key: cmake-${{ runner.os }}-${{ hashFiles('app/src/main/jni/CMakeLists.txt') }}-v3
             
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
