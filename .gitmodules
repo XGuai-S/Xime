@@ -10,7 +10,7 @@
 	url = https://github.com/hchunhui/librime-lua.git
 [submodule "app/src/main/jni/librime-lua-deps"]
 	path = app/src/main/jni/librime-lua-deps
-	url = https://github.com/hchunhui/librime-lua.git
+	url = https://github.com/XGuai-S/librime-lua.git
 	branch = thirdparty
 [submodule "app/src/main/jni/librime-octagram"]
 	path = app/src/main/jni/librime-octagram
@@ -20,4 +20,4 @@
 	url = https://github.com/rime/librime-predict.git
 [submodule "app/src/main/assets/rime"]
 	path = app/src/main/assets/rime
-	url = https://github.com/kingzcheung/rime-wubi.git
+	url = https://github.com/XGuai-S/rime-wubi.git

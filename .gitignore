@@ -35,11 +35,6 @@ app/GitHub.txt
 PROGRESS.md
 DECISIONS.md
 # librime and its dependencies
-app/src/main/jni/snappy/
-app/src/main/jni/librime-lua/
-app/src/main/jni/librime-lua-deps/
-app/src/main/jni/librime-octagram/
-app/src/main/jni/librime-predict/
 app/src/main/jni/boost*
 app/src/main/jni/onnxruntime/
 app/src/main/jniLibs/
