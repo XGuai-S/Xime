@@ -49,6 +49,17 @@ release 打包的一大半。
 
 ---
 
+## 3.4.66（versionCode 20261410）
+
+**修复 librime 1.18.0 user_dict 缓存缺陷（9777cb2）。**
+
+- `user_dictionary.cc` 删除缓存分支外多余的 `DfsLookup`：此前缓存命中仍跑全表扫描，
+  使 1.18.0 的用户词典内存缓存收益归零（且未命中时重复扫描）。现缓存真正生效。
+- native 交叉编译重编 `librime_jni.so`（NDK 29 / CMake 4.0.2），JNI 64 方法齐全、librime 1.18.0 确认。
+- 含 3.4.65 的第三轮审计 7 项 Kotlin 修复。
+
+---
+
 ## 3.4.65（versionCode 20261409）
 
 **第三轮审计 7 项修复（只明显 bug + 过度设计清理）。**
