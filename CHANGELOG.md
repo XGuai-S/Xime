@@ -49,6 +49,21 @@ release 打包的一大半。
 
 ---
 
+## 3.4.67（versionCode 20261411）
+
+**统一三个部署入口 + 修复增量部署后 session 未重建。**
+
+- 设置页"输入方案→部署方案"改走 `ensureDeployment`（增量优先），与 oiz 命令、
+  功能菜单"部署方案"一致——三入口都享受 librime 1.18.0 的并行/增量编译。
+- 修复 oiz 命令 / 功能菜单共用的 `reloadConfig`：增量部署（full=false）后 native
+  startMaintenance 不重建 session，旧 session 持有旧 prism/table 引用会导致
+  "部署成功但候选旧/打不了字"；现部署成功后显式 endSession+ensureSession 再切方案
+  （与设置页口径一致）。
+- 契约测试清单同步（直接 .deploy() 从 5 处减为 4 处，设置页改走 ensureDeployment）。
+- 验证：全量单测 2553 通过；修改前后 native gtest 192/195、端到端候选一致。
+
+---
+
 ## 3.4.66（versionCode 20261410）
 
 **修复 librime 1.18.0 user_dict 缓存缺陷（9777cb2）。**

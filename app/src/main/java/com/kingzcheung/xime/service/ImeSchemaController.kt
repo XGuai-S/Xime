@@ -94,6 +94,13 @@ internal class ImeSchemaController(private val service: XimeInputMethodService) 
                 KeysConfigHelper.loadConfig(service)
                 KeyboardThemes.reload(service)
                 
+                // 增量部署（full=false）时 native startMaintenance 不销毁 session，旧 session 仍持有
+                // 旧 prism/table 引用，会"部署成功但候选是旧的/打不了字"。与设置页部署统一：
+                // 部署成功后显式重建 session 再切方案。
+                if (deployed) {
+                    service.rimeEngine.endSession()
+                    service.rimeEngine.ensureSession(60_000L)
+                }
                 val availableSchemas = service.rimeEngine.getAvailableSchemas()
                 
                 val savedSchema = SettingsPreferences.getCurrentSchema(service)

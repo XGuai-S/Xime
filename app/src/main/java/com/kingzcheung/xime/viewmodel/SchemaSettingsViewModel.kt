@@ -227,7 +227,9 @@ class SchemaSettingsViewModel(application: Application) : AndroidViewModel(appli
                 KeyboardThemes.reload(context)
                 val engine = RimeEngine.getInstance()
                 val currentSchemaId = engine.getCurrentSchema()
-                val deployed = engine.deploy()
+                // 与其它两个部署入口（oiz 命令 / 功能菜单，均走 reloadConfig → ensureDeployment）
+                // 统一：增量优先，用上 librime 1.18.0 的并行/增量编译，避免每次全量重编 60MB 词库。
+                val deployed = RimeConfigHelper.ensureDeployment(context)
                 if (deployed) {
                     // hash 与 done 必须一起落：只写 hash 不写 done，ensureDeployment 会判成
                     // 「hash 一致但未完成」而多跑一轮无谓的部署检查。

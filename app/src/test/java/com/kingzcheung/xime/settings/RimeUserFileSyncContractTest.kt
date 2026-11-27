@@ -85,10 +85,11 @@ class RimeUserFileSyncContractTest {
                 }
             }
         }
-        // 当前 5 处：ImeSchemaController 1 + SchemaSettingsViewModel 1 +
-        // RimeConfigHelper 2（增量失败回退全量）+ SetupWizardScreen 1。
-        // 少于 5 处说明某个入口被删/重命名，测试清单需要同步更新。
-        assertTrue("应至少检查到 5 处部署调用，实际 $deploySites", deploySites >= 5)
+        // 当前 4 处：ImeSchemaController 1 + RimeConfigHelper 2（增量失败回退全量）+
+        // SetupWizardScreen 1。SchemaSettingsViewModel 已改走 ensureDeployment(context)
+        // （内部自带同步 + 增量优先），不再直接调 .deploy()，故不计入此清单。
+        // 少于 4 处说明某个入口被删/重命名，测试清单需要同步更新。
+        assertTrue("应至少检查到 4 处部署调用，实际 $deploySites", deploySites >= 4)
     }
 
     @Test
