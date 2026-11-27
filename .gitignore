@@ -36,7 +36,7 @@ PROGRESS.md
 DECISIONS.md
 # librime and its dependencies
 app/src/main/jni/boost*
-app/src/main/jni/onnxruntime/
+app/src/main/jni/onnxruntime/lib/
 app/src/main/jniLibs/
 app/src/main/jni/librime-t9/build_test/
 app/release

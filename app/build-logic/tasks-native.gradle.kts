@@ -205,11 +205,6 @@ val downloadOnnx by tasks.registering {
             "core/session/onnxruntime_run_options_config_keys.h",
             "core/session/onnxruntime_session_options_config_keys.h",
         )
-        // 旧源码编译残留的 v1.28 头文件会与官方 v1.27 .so 不匹配（ORT_API_VERSION 不同），
-        // 导致 GetApi(28) 失败。部署前清理 include 目录，确保头文件与 AAR 版本一致。
-        dstHeaders.listFiles()?.forEach { old ->
-            if (old.isFile) old.delete()
-        }
         for (rel in headersToFetch) {
             val target = java.io.File(dstHeaders, rel.substringAfterLast("/"))
             val url = "$taskHeadersBase/$rel"
