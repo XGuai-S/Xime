@@ -4,6 +4,15 @@
 
 set(BOOST_VERSION 1.89.0)
 
+  # CI 可能缓存了损坏的 tar.xz（Truncated tar archive）；解压前校验哈希，损坏则清掉重下。
+  if(EXISTS ${CMAKE_SOURCE_DIR}/boost-1.89.0-cmake.tar.xz)
+    file(SHA256 ${CMAKE_SOURCE_DIR}/boost-1.89.0-cmake.tar.xz _cached_sha)
+    if(NOT _cached_sha STREQUAL "67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74")
+      message(STATUS "Cached Boost archive corrupt, removing")
+      file(REMOVE ${CMAKE_SOURCE_DIR}/boost-1.89.0-cmake.tar.xz)
+    endif()
+  endif()
+
 if(NOT EXISTS "boost-${BOOST_VERSION}.tar.xz" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/boost")
   set(BOOST_SHA256 "67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74")
   set(BOOST_URL "https://github.com/boostorg/boost/releases/download/boost-${BOOST_VERSION}/boost-${BOOST_VERSION}-cmake.tar.xz")
