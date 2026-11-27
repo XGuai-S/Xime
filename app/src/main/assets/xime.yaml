@@ -1182,12 +1182,12 @@ auto_word:
   # 默认 true；false = 不干预（造词词与方案词撞码时看不到）
   avoid_auto_select: true
   # 候选排序开关：
-  # sort_by_freq：⚠️ 已停用（保留仅兼容旧配置）。候选顺序不再按词频重排，
+  # sort_by_freq：按上屏词频重排候选（auto_word 开启时生效）。
   #               word_freq.txt 仅作上屏记录，并双写一份 word_freq.yaml 到 rime 根目录供外部读取。
-  #               与代码默认 false 保持一致，故此处为 false。
+  #               与代码默认 true 保持一致。
   # sort_by_manual：候选是否应用手动排序表（candidate_order.txt 拖拽排定的全序）。默认 true；
   #               false = 忽略手动排序，完全退回 rime 引擎原生排序。
-  sort_by_freq: false
+  sort_by_freq: true
   sort_by_manual: true
   # 不参与自动造词的词典名（去掉 .dict.yaml 后缀）：这些词典的词条上屏时不进
   # 临时/固定词库、不参与组合生词，但仍是方案词典正常候选（能打出来、能手动排序）。

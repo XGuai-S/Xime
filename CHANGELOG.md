@@ -49,6 +49,18 @@ release 打包的一大半。
 
 ---
 
+## 3.4.61（versionCode 20261405）
+
+**菜单条目立体感 + 恢复词频重排 + 构建提速。**
+
+- 长按弹出菜单的每个条目行补齐立体感（阴影 + 高光/压暗双层），不再只有卡片浮起而条目平整。
+- 恢复词频重排：内置配置 `sort_by_freq` 与 `AutoWordConfig.sortByFreq` 默认值改回 true，
+  候选顺序随上屏词频刷新（口径与注释统一）。
+- 构建提速：打包命令不再强制 `--no-configuration-cache`，启用 gradle.properties 已有的
+  configuration-cache（省配置阶段约 40 秒）；R8 单线程/4GB 堆的 OOM 防护配置保持不变。
+
+---
+
 ## 3.4.60（versionCode 20261404）
 
 **长按弹出的上下文菜单补齐立体感。**

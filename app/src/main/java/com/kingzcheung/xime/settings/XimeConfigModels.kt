@@ -467,7 +467,7 @@ data class AutoWordConfig(
      * 编排的（同码多词谁先谁后是有意为之），默认尊重它；想要动态调频再显式开启。
      */
     @SerialName("sort_by_freq")
-    val sortByFreq: Boolean = false,
+    val sortByFreq: Boolean = true,
     /**
      * 候选排序是否应用手动排序表（candidate_order.txt 用户拖拽排定的全序）。
      *
@@ -594,4 +594,3 @@ data class KeysConfig(
     val swipeUp: Map<String, String> = emptyMap(),
     val swipeDownEnglish: Map<String, String> = emptyMap()
 )
-

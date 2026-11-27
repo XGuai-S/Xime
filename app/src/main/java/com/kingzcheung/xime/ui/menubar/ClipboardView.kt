@@ -1518,6 +1518,7 @@ private fun MenuCard(
                         )
                     }
                     LongPressMenuItem(
+                        bgColor = cardBgColor,
                         icon = entry.icon,
                         label = entry.label,
                         tint = entry.tint ?: MaterialTheme.colorScheme.onSurface,
@@ -1537,11 +1538,16 @@ fun LongPressMenuItem(
     icon: ImageVector,
     label: String,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    bgColor: Color = Color.White,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(rememberKeyShadowModifier(bgColor, true, 10.dp, false, 100))
+            .clip(RoundedCornerShape(10.dp))
+            .background(bgColor)
+            .then(rememberKeyBevelModifier(bgColor, true, 10.dp, false, 100))
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
