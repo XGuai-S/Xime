@@ -89,7 +89,7 @@ jobs:
           mkdir -p app/src/main/jni/librime/plugins
           cp -r "$LUA_SRC" "$LUA_DST"
           DEPS_SRC=app/src/main/jni/librime-lua-deps/lua5.4
-          DEPS_DST=app/src/main/jni/librime/plugins/lua/thirdparty
+          DEPS_DST=app/src/main/jni/librime/plugins/lua/thirdparty/lua5.4
           mkdir -p "$DEPS_DST"
           cp -r "$DEPS_SRC/." "$DEPS_DST/"
           echo "librime-lua plugin prepared"
