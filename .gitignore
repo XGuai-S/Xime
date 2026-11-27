@@ -35,7 +35,6 @@ app/GitHub.txt
 PROGRESS.md
 DECISIONS.md
 # librime and its dependencies
-app/src/main/jni/librime/
 app/src/main/jni/snappy/
 app/src/main/jni/librime-lua/
 app/src/main/jni/librime-lua-deps/
