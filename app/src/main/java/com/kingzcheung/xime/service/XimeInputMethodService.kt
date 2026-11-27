@@ -109,6 +109,7 @@ import com.kingzcheung.xime.keyboard.ToolbarButtonItem
 import com.kingzcheung.xime.plugin.core.api.PluginResultItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
@@ -230,7 +231,11 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     
     internal lateinit var keyboardContainer: VoiceKeyboardContainer
     
-    internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main +
+        CoroutineExceptionHandler { _, t ->
+            // 兜底：任何子协程未捕获异常都不得冒泡到默认处理器杀死输入法进程。
+            com.kingzcheung.xime.util.FileLogger.e("XimeService", "Uncaught coroutine exception", t)
+        })
     internal val keyProcessingDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "key-process").also { it.isDaemon = true }
     }.asCoroutineDispatcher()

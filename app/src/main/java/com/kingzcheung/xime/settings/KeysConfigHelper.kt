@@ -706,7 +706,7 @@ object KeysConfigHelper {
     // 纠错绑定列表及其缓存戳（correction.schemas，独立于全量解析——该查询在按键
     // 热路径调用，只解析顶层一个列表，开销远小于 loadXimeConfig 全量解析）。
     private var _correctionSchemas: Set<String> = emptySet()
-    private var _correctionSchemasStamp: Pair<Long, Long>? = null
+    private var _correctionSchemasStamp: Long? = null
 
     /** 上次真正去 stat custom 文件的时刻（elapsedRealtime）。见 [correctionSchemas]。 */
     @Volatile
@@ -729,12 +729,11 @@ object KeysConfigHelper {
             return _correctionSchemas
         }
         _correctionSchemasCheckedAt = now
-        val customFile = File(context.filesDir, "rime/$XIME_CUSTOM_CONFIG_FILE")
-        val stamp = if (customFile.exists()) {
-            customFile.lastModified() to customFile.length()
-        } else {
-            0L to 0L
-        }
+        // 缓存戳改用「实际生效的配置文本」而非私有旧文件 mtime：
+        // 用户可见目录 xime.yaml 是唯一配置入口，迁移后 filesDir/xime.custom.yaml 已删除，
+        // 旧戳恒为 (0,0) 导致配置修改永不生效。
+        val effectiveCustomText = readCustomText(context)
+        val stamp = effectiveCustomText?.hashCode()?.toLong() ?: 0L
         if (_correctionSchemasStamp == stamp) return _correctionSchemas
         _correctionSchemasStamp = stamp
         val builtIn = readAssetText(context, XIME_CONFIG_FILE)
@@ -1123,7 +1122,7 @@ object KeysConfigHelper {
         if (builtIn == null) return custom
         val result = LinkedHashMap<String, KeyboardSpacingConfig>(custom)
         for ((key, builtInValue) in builtIn) {
-            val customValue = result[key]
+            val customValue = custom[key]
             result[key] = if (customValue == null) {
                 builtInValue
             } else {
@@ -1133,6 +1132,10 @@ object KeysConfigHelper {
                     cornerRadius = customValue.cornerRadius ?: builtInValue.cornerRadius,
                 )
             }
+        }
+        // custom 中 builtIn 没有的键也要保留
+        for ((key, customValue) in custom) {
+            if (key !in result) result[key] = customValue
         }
         return result
     }
@@ -2366,4 +2369,3 @@ object KeysConfigHelper {
     
 
 }
-

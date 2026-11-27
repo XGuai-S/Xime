@@ -49,6 +49,24 @@ release 打包的一大半。
 
 ---
 
+## 3.4.56（versionCode 20261400）
+
+**全维度审计 11 项问题修复（4 high / 6 medium / 1 low）。**
+
+- 修复 H1：`mergeSpacingOverrides` 从空 result 取值导致 custom 按键间距/圆角覆盖完全失效。
+- 修复 H2/H3/H4：`serviceScope` 加 `CoroutineExceptionHandler` 兜底，插件/IO/ASR 协程异常不再
+  冒泡杀死输入法进程（统一根因修复，覆盖工具面板轮询/词库落盘/流式转写）。
+- 修复 M1：语音转写文本不再明文写 logcat，改为仅输出长度元数据。
+- 修复 M2：无障碍后台启动麦克风前台服务失败改为记录日志，不再静默吞掉。
+- 修复 M3：重新录音前关闭上一轮遗留 RandomAccessFile，避免 fd 泄漏。
+- 修复 M4：`correction.schemas` 热重载戳改用实际生效配置文本，可见 xime.yaml 修改即时生效。
+- 修复 M5/M6/L1：统一 `sort_by_freq` 配置为 false（与注释/代码默认一致）；阴影 elevation
+  配置改为整数 1（与 Int 解析一致）；修正多处默认值注释。
+- 验证：全量单测通过（274 项）；修复前后 native gtest 192/195 与端到端候选完全一致，无功能回归。
+- 详见 `docs/XIME-AUDIT-REPORT.md`。
+
+---
+
 ## 3.4.55（versionCode 20261399）
 
 **手写键盘按键补齐立体感与按压效果。**

@@ -408,7 +408,7 @@ data class AutoWordConfig(
     /** 是否启用自动造词（上屏词收录与词频统计）。默认 true。 */
     @SerialName("enabled")
     val enabled: Boolean = true,
-    /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 7。 */
+    /** 晋升窗口（天）：该窗口内同词上屏满 [promoteCount] 次晋升固定词库。默认 3。 */
     @SerialName("promote_days")
     val promoteDays: Int = 3,
     /** 窗口内需达到的上屏次数。默认 2。 */
@@ -564,7 +564,7 @@ data class BackupConfig(
     @SerialName("blacklist")
     val blacklist: Boolean = true,
     /**
-     * 自动备份间隔（小时）。默认 12：每 12 小时自动向云端备份一次（含配置/词库/方案）。
+     * 自动备份间隔（小时）。默认 24：每 12 小时自动向云端备份一次（含配置/词库/方案）。
      *
      * - 仅对**云端自动备份**生效（本地导出 / 手动备份不受影响）；
      * - 设为 0 或负数 = 关闭自动备份；
@@ -594,5 +594,4 @@ data class KeysConfig(
     val swipeUp: Map<String, String> = emptyMap(),
     val swipeDownEnglish: Map<String, String> = emptyMap()
 )
-
 

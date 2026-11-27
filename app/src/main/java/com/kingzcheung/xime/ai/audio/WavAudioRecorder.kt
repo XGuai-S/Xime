@@ -259,6 +259,9 @@ class WavAudioRecorder(private val context: Context) {
         }
 
         synchronized(sessionLock) {
+            // 覆盖前先关闭上一轮异常退出遗留的句柄，避免 fd 泄漏
+            runCatching { activeDiskFile?.close() }
+            activeDiskFile = null
             activeDiskFile = raf
             totalPcmBytesWritten = 0
             resetRequested = false

@@ -190,7 +190,9 @@ object XimeBubbleController {
                 } else {
                     appContext.startService(intent)
                 }
-            } catch (_: Exception) {
+            } catch (t: Exception) {
+                // API 31+ 后台启动 microphone 前台服务会被拒绝；记录以便诊断（用户可回设置页手动开启）。
+                com.kingzcheung.xime.util.FileLogger.w("XimeBubbleController", "start bubble service failed", t)
             }
         } else {
             try {

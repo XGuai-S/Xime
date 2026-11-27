@@ -245,7 +245,7 @@ class VoiceRecognitionHandler(
         if (sessionAbandoned) return
         val ic = getInputConnection()
         val partial = lastPartialText
-        Log.d(TAG, "commitPendingOnRelease: ic=${ic != null}, partial='$partial', suppress=$suppressDuplicateFinal")
+        Log.d(TAG, "commitPendingOnRelease partialLen=${partial.length}")
         if (ic == null) return
         if (partial.isEmpty()) return
         // 对账用"上一次写入对应的引擎文本"，必须在清空 lastPartialText 之前做
@@ -304,7 +304,7 @@ class VoiceRecognitionHandler(
     }
 
     private fun handleSpeechResult(text: String) {
-        Log.d(TAG, "Speech result (final): $text")
+        Log.d(TAG, "Speech result (final) len=${text.length}")
 
         val wasFinishing = finishing
         if (finishing) {
@@ -372,7 +372,7 @@ class VoiceRecognitionHandler(
         } else {
             textWrittenByVoiceInput = ""
         }
-        Log.d(TAG, "commitFinal: final='$finalText', partial='$partial'")
+        Log.d(TAG, "commitFinal finalLen=${finalText.length} partialLen=${partial.length}")
     }
 
     /** 会话切换/提交结束时清理与输入框的记账。 */
@@ -432,7 +432,7 @@ class VoiceRecognitionHandler(
         textWrittenByVoiceInput = ""
         voiceInputPrefixAnchor = runCatching { ic.getTextBeforeCursor(32, 0)?.toString() }.getOrNull().orEmpty()
         lastWrittenText = ""
-        Log.d(TAG, "输入框已被外部清空/取走内容，本会话已识别文本记为已消费: '$consumedEnginePrefix'")
+        Log.d(TAG, "已消费引擎前缀(内容已脱敏, len=${consumedEnginePrefix.length})")
     }
 
     /**
@@ -445,7 +445,7 @@ class VoiceRecognitionHandler(
             engineText.substring(consumedEnginePrefix.length)
         } else {
             // 引擎改写了已消费部分，无法可靠切分：整段写入以免丢内容（记日志便于真机排查）
-            Log.d(TAG, "引擎结果不再以已消费前缀开头，按整段写入: '$engineText'")
+            Log.d(TAG, "引擎文本(内容已脱敏, len=${engineText.length})")
             engineText
         }
         return visible.trimStart('，', '。', '、', ',', '.', '！', '？', '；', '：', ' ', '\n')
@@ -478,7 +478,7 @@ class VoiceRecognitionHandler(
         if (ic != null) reconcileWithInputBox(ic)
 
         lastPartialText = text
-        Log.d(TAG, "Speech result (partial): $text")
+        Log.d(TAG, "Speech result (partial) len=${text.length}")
         
         // 过滤掉空格，避免显示空白；已被外部消费的前缀（如已发送内容）不再回写
         val cleanText = visibleEngineText(text.replace(" ", ""))
