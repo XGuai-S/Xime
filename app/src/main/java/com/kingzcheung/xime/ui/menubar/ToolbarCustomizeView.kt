@@ -1,5 +1,7 @@
 package com.kingzcheung.xime.ui.menubar
 
+import com.kingzcheung.xime.ui.keyboard.rememberKeyShadowModifier
+import com.kingzcheung.xime.ui.keyboard.rememberKeyBevelModifier
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -263,8 +265,10 @@ fun ToolbarCustomizeView(
                 .fillMaxWidth()
                 .weight(1f)
                 .padding(horizontal = 16.dp)
+                .then(rememberKeyShadowModifier(keyBgColor, true, 16.dp, false, 100))
                 .clip(RoundedCornerShape(16.dp))
                 .background(keyBgColor)
+                .then(rememberKeyBevelModifier(keyBgColor, true, 16.dp, false, 100))
                 .padding(16.dp,10.dp)
         ) {
             if (reorderMode) {

@@ -1,5 +1,7 @@
 package com.kingzcheung.xime.ui.menubar
 
+import com.kingzcheung.xime.ui.keyboard.rememberKeyShadowModifier
+import com.kingzcheung.xime.ui.keyboard.rememberKeyBevelModifier
 import com.kingzcheung.xime.ui.keyboard.WIDE_CONTAINER_WIDTH
 import com.kingzcheung.xime.ui.keyboard.isHandwritingSchema
 import com.kingzcheung.xime.ui.keyboard.isT9Schema
@@ -221,8 +223,10 @@ private fun SchemaGridItem(
     Column(
         modifier = modifier
             .then(if (isLandscape) Modifier.height(72.dp) else Modifier.aspectRatio(1f))
+            .then(rememberKeyShadowModifier(bgColor, true, 12.dp, false, 100))
             .clip(RoundedCornerShape(12.dp))
             .background(bgColor)
+            .then(rememberKeyBevelModifier(bgColor, true, 12.dp, false, 100))
             .clickable { onSelect() }
             .padding(if (isLandscape) 4.dp else 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
