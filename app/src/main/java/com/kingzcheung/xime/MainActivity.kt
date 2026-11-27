@@ -111,6 +111,11 @@ class MainActivity : ComponentActivity() {
         finish()
     }
     
+    // Android 13+ 通知权限：悬浮胶囊前台服务通知需要，用户拒绝不影响其它功能。
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* 结果无需处理：拒绝时仅通知不显示，胶囊本身仍可用 */ }
+    
     private val prewarmScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** 配置目录释放专用作用域：与预热分开，便于各自取消。 */
@@ -134,6 +139,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         
         prewarmRimeEngine()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         handleSharedIntent(intent)
         

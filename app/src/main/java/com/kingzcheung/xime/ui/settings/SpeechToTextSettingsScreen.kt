@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.ui.settings
 
+import com.kingzcheung.xime.speech.AsrSupport
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,7 +53,6 @@ import com.kingzcheung.xime.plugin.core.api.PluginIcon
 import com.kingzcheung.xime.plugin.core.model.PluginCategory
 import com.kingzcheung.xime.plugin.core.api.AsrPlugin
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
-import com.kingzcheung.xime.speech.AsrBackendFactory
 import com.kingzcheung.xime.settings.SettingsPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -160,12 +160,12 @@ fun SpeechToTextSettingsContent(
                         if (it) {
                             // 打开本地识别：预热模型并常驻，避免语音时加载延迟丢开头音频
                             scope.launch(Dispatchers.IO) {
-                                AsrBackendFactory.warmup(context)
+                                AsrSupport.warmup(context)
                             }
                         } else {
                             // 关闭本地识别：卸载常驻模型
                             scope.launch(Dispatchers.IO) {
-                                AsrBackendFactory.releaseModel()
+                                AsrSupport.releaseModel()
                             }
                         }
                     }

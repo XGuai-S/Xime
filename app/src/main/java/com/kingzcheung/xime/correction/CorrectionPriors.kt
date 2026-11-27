@@ -248,14 +248,17 @@ object CorrectionPriors {
 
     /** 全部键滑窗样本合并后的中位数 (x, y)；样本不足返回 NaN。 */
     private fun pooledMedians(): Pair<Float, Float> {
-        if (ringTotal < MIN_N_GLOBAL) return Float.NaN to Float.NaN
-        val allX = FloatArray(ringTotal)
-        val allY = FloatArray(ringTotal)
+        // 修复：ringTotal 单调自增，而每个 ring 上限 RING_CAP，累计次数会超过实际留存样本数。
+        // 按实际样本数分配，避免数组尾部 0 污染中位数。
+        val n = ringX.indices.sumOf { ringX[it].size }
+        if (n < MIN_N_GLOBAL) return Float.NaN to Float.NaN
+        val allX = FloatArray(n)
+        val allY = FloatArray(n)
         var kx = 0
         for (i in 0..25) for (v in ringX[i]) allX[kx++] = v
         var ky = 0
         for (i in 0..25) for (v in ringY[i]) allY[ky++] = v
-        return medianOf(allX) to medianOf(allY)
+        return medianOf(allX.copyOf(kx)) to medianOf(allY.copyOf(ky))
     }
 
     private fun medianOf(values: FloatArray): Float {

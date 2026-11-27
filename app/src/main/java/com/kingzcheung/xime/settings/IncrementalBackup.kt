@@ -293,7 +293,7 @@ object IncrementalBackup {
                         // 文件级恢复不能反而更弱）。清单本身无哈希时保守放行。
                         val expected = manifest[path]
                         if (!expected.isNullOrBlank()) {
-                            val actual = sha256Of(dl.file.inputStream())
+                            val actual = dl.file.inputStream().use { sha256Of(it) }
                             if (!actual.equals(expected.trim(), ignoreCase = true)) {
                                 return@withContext Result.failure(
                                     Exception("文件校验失败（sha256 不匹配）: $path")

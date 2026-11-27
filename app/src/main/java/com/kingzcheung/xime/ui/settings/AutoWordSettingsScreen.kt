@@ -117,6 +117,10 @@ private fun setAutoWordEnabled(context: android.content.Context, enabled: Boolea
     }
     // xime.yaml 里还没有 auto_word 块：按默认值新建一份（现有参数取自代码默认）。
     val current = KeysConfigHelper.getAutoWordConfig()
+    val dictsNoAuto = current.noAutoWordDicts.joinToString(", ", "[", "]") { "\"$it\"" }
+    val dictsNoFreq = current.noFreqDicts.joinToString(", ", "[", "]") { "\"$it\"" }
+    val charDictLines = if (current.charDictBySchema.isEmpty()) "          {}" else
+        current.charDictBySchema.entries.joinToString("\n") { "          ${it.key}: \"${it.value}\"" }
     val fresh = """
         auto_word:
           # 自动造词：上屏词进临时词库，被选中上屏满 promote_count 次晋升固定词库；
@@ -125,8 +129,18 @@ private fun setAutoWordEnabled(context: android.content.Context, enabled: Boolea
           promote_days: ${current.promoteDays}
           promote_count: ${current.promoteCount}
           combo_enabled: ${current.comboEnabled}
+          combo_dict_filter: ${current.comboDictFilter}
           combo_min_chars: ${current.comboMinChars}
           combo_max_chars: ${current.comboMaxChars}
+          prefix_match: ${current.prefixMatch}
+          avoid_auto_select: ${current.avoidAutoSelect}
+          sort_by_freq: ${current.sortByFreq}
+          sort_by_manual: ${current.sortByManual}
+          no_auto_word_dicts: $dictsNoAuto
+          no_freq_dicts: $dictsNoFreq
+          char_dict: "${current.charDict}"
+          char_dict_by_schema:
+$charDictLines
     """.trimIndent()
     if (!UnifiedConfigFile.updateTopLevelBlock(context, "auto_word", fresh)) return
     KeysConfigHelper.loadConfig(context)

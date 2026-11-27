@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.ui.settings
 
+import com.kingzcheung.xime.speech.AsrSupport
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,7 +34,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kingzcheung.xime.model.ModelManager
-import com.kingzcheung.xime.speech.AsrBackendFactory
 import com.kingzcheung.xime.speech.AsrModelManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -209,7 +209,7 @@ internal fun OfflineModelCard(
                         if (id != model?.id) {
                             modelManager.setModel(id)
                             scope.launch(Dispatchers.IO) {
-                                AsrBackendFactory.releaseModel()
+                                AsrSupport.releaseModel()
                             }
                         }
                     },

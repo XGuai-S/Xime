@@ -49,6 +49,22 @@ release 打包的一大半。
 
 ---
 
+## 3.4.65（versionCode 20261409）
+
+**第三轮审计 7 项修复（只明显 bug + 过度设计清理）。**
+
+- M1：`pooledMedians` 按实际样本数分配数组，修复尾部 0 污染中位数（邻键纠错自校准失真）。
+- M2：Android 13+ 请求 POST_NOTIFICATIONS 权限，悬浮胶囊前台服务通知可显示。
+- M3：增量恢复 SHA 校验的文件流用 `.use{}` 关闭，修复常驻进程 fd 泄漏。
+- M4：服务初始化协程透传 CancellationException，消除"Job was cancelled"假故障日志。
+- L1：auto_word 缺失块时写回补齐全部字段，避免词典排除列表被静默重置。
+- L2/L3：删除零逻辑转发空壳 AsrBackendFactory（8 处调用直连 AsrSupport）、
+  删除从未调用的 ModelManager.initialize() 死代码。
+- 验证：全量单测通过（2553 项）；修复前后 native gtest 192/195、端到端候选一致，无功能回归。
+- 另附 librime 1.18.0 特性核查报告 `docs/librime-1.18.0-feature-audit.md`。
+
+---
+
 ## 3.4.64（versionCode 20261408）
 
 **长按展开后的条目内容卡片补齐立体感。**

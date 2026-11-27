@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.service
 
+import com.kingzcheung.xime.speech.AsrSupport
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -7,7 +8,6 @@ import android.util.Log
 import android.view.inputmethod.InputConnection
 import android.widget.Toast
 import com.kingzcheung.xime.plugin.ExtensionManager
-import com.kingzcheung.xime.speech.AsrBackendFactory
 import com.kingzcheung.xime.speech.RecognitionState
 import com.kingzcheung.xime.speech.SpeechRecognitionManager
 import com.kingzcheung.xime.settings.SettingsPreferences
@@ -90,10 +90,10 @@ class VoiceRecognitionHandler(
         // 不要再走 manager.preload——那会经 AsrSupport.create 造一个临时后端，
         // 与本 warmup 并发时双重绑定 :asr、双重加载模型（日志曾见两次 initialize）
         if (SettingsPreferences.isSttUseLocal(context) &&
-            AsrBackendFactory.getLocalName(context) != null
+            AsrSupport.getLocalName(context) != null
         ) {
             Thread {
-                AsrBackendFactory.warmup(context)
+                AsrSupport.warmup(context)
             }.start()
         }
     }
@@ -170,7 +170,7 @@ class VoiceRecognitionHandler(
         // 用户开启"本地识别"且当前构建支持离线语音时，优先显示本地引擎名
         if (SettingsPreferences.isSttUseLocal(context)) {
             // 本地引擎显示当前生效模型名；未下载任何模型时用通用名（不默认指定某个模型）
-            return AsrBackendFactory.getLocalName(context) ?: "本地离线识别"
+            return AsrSupport.getLocalName(context) ?: "本地离线识别"
         }
         val enabledPlugins = ExtensionManager.getEnabledAsrPlugins(context)
         if (enabledPlugins.isNotEmpty()) {

@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.speech
 
+import com.kingzcheung.xime.speech.AsrSupport
 import android.Manifest
 import android.content.Context
 import android.media.AudioFormat
@@ -407,7 +408,7 @@ class SpeechRecognitionManager(
         // 用户开启"本地识别"时才使用离线后端，否则走在线插件（严格互斥，不自动切换）
         val useLocal = SettingsPreferences.isSttUseLocal(context)
         return if (useLocal) {
-            AsrBackendFactory.create(context) ?: createOnlineAsrBackend()
+            AsrSupport.create(context) ?: createOnlineAsrBackend()
         } else {
             createOnlineAsrBackend()
         }

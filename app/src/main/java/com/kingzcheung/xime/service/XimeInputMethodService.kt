@@ -1,5 +1,6 @@
 package com.kingzcheung.xime.service
 
+import com.kingzcheung.xime.speech.AsrSupport
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Handler
@@ -73,7 +74,6 @@ import com.kingzcheung.xime.plugin.core.api.ToolPlugin
 import com.kingzcheung.xime.plugin.core.api.ToolResult
 import com.kingzcheung.xime.plugin.core.js.PluginEvent
 import com.kingzcheung.xime.plugin.core.runtime.PluginManager
-import com.kingzcheung.xime.speech.AsrBackendFactory
 import com.kingzcheung.xime.speech.RecognitionState
 import com.kingzcheung.xime.rime.RimeConfigHelper
 import com.kingzcheung.xime.rime.RimeEngine
@@ -978,7 +978,7 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                     // 关闭时不主动销毁，:asr 服务端按同步到的设置恢复空闲回收，
                     // 且下一会话开始时 OfflineAsrBackend 会重新同步设置
                     if (SettingsPreferences.isSttKeepEngineAlive(this@XimeInputMethodService)) {
-                        Thread { AsrBackendFactory.warmup(this@XimeInputMethodService) }.start()
+                        Thread { AsrSupport.warmup(this@XimeInputMethodService) }.start()
                     }
                 }
                 key == SettingsPreferences.KEY_SMART_PREDICTION_ENABLED -> onPredictionSettingChanged()
@@ -1123,6 +1123,10 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                 withContext(Dispatchers.Main) {
                     FileLogger.i(TAG, "Service initialization completed")
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 服务重建/切方案/收尾取消时透传，避免"Job was cancelled"被记成假故障。
+                FileLogger.d(TAG, "Service init canceled: ${e.message}")
+                throw e
             } catch (e: Exception) {
                 FileLogger.e(TAG, "Initialization failed: ${e.message}")
             }

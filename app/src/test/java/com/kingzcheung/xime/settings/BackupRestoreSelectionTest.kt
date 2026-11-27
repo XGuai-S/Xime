@@ -36,11 +36,11 @@ class BackupRestoreSelectionTest {
         val body = incremental.substring(
             incremental.indexOf("suspend fun restore("),
         ).substringBefore("\n    // ---")
-        assertTrue("下载后必须计算实际 sha256", "sha256Of(dl.file.inputStream())" in body)
+        assertTrue("下载后必须计算实际 sha256", "val actual = " in body && "sha256Of(it)" in body)
         assertTrue("必须与清单哈希比对", "actual.equals(expected.trim(), ignoreCase = true)" in body)
         assertTrue("不匹配必须失败而非继续写入", "文件校验失败（sha256 不匹配）" in body)
         // putNextEntry 必须在校验通过之后
-        val check = body.indexOf("sha256Of(dl.file.inputStream())")
+        val check = body.indexOf("val actual = ")
         val write = body.indexOf("zos.putNextEntry(ZipEntry(path))")
         assertTrue("必须先校验再写入 zip", check >= 0 && write > check)
     }
