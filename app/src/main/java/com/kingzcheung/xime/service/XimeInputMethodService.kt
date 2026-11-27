@@ -588,17 +588,12 @@ class XimeInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             }
             return
         }
-        val perfT0 = android.os.SystemClock.elapsedRealtime()
         // 纠错候选由 librime 插件（correction_translator）直接产出并参与引擎排序，
         // 展开页只需拉取引擎的跨页全量候选，不再在 Kotlin 侧合成候选。
         val all = rimeEngine.getAllCandidates().toList()
         candidateState.value = candidateState.value.copy(
             expandedCandidates = all,
             expandedActions = emptyList()
-        )
-        android.util.Log.d(
-            "CandidatePerf",
-            "refreshExpandedCandidates: count=${all.size} cost=${android.os.SystemClock.elapsedRealtime() - perfT0}ms"
         )
     }
 

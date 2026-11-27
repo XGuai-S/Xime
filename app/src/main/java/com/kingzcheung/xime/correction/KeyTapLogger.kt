@@ -200,8 +200,20 @@ object KeyTapLogger {
         file.parentFile?.mkdirs()
         file.appendText(line + "\n")
         if (file.length() > MAX_BYTES) {
-            val kept = file.readLines().takeLast(KEEP_LINES_ON_TRIM)
-            file.writeText(kept.joinToString("\n") + "\n")
+            // 修复：按字节从尾部裁剪到上限 80%，避免 readLines() 全量载入超大文件。
+            val budget = (MAX_BYTES * 0.8).toLong()
+            val kept = ArrayList<String>()
+            var used = 0L
+            file.useLines { seq ->
+                val all = seq.toList()
+                for (k in all.indices.reversed()) {
+                    val cost = all[k].toByteArray().size + 1L
+                    if (used + cost > budget) break
+                    kept.add(all[k]); used += cost
+                }
+            }
+            kept.reverse()
+            file.writeText(if (kept.isEmpty()) "" else kept.joinToString("\n") + "\n")
         }
     }
 }

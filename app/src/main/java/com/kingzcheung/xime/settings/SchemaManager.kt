@@ -1833,8 +1833,10 @@ object SchemaManager {
                         return@withContext ImportResult(false)
                     }
                     val body = response.body
+                    if (body.contentLength() > 256L * 1024 * 1024) { Log.e(TAG, "Download too large: $url"); return@withContext ImportResult(false) }
                     val totalBytes = body.contentLength()
                     var downloadedBytes = 0L
+                    val maxDownloadBytes = 256L * 1024 * 1024 // 防止超大响应写满 cacheDir
                     val md = MessageDigest.getInstance("SHA-256")
                     body.byteStream().use { input ->
                         FileOutputStream(tmpFile).use { output ->
@@ -1844,6 +1846,7 @@ object SchemaManager {
                                 output.write(buf, 0, n)
                                 md.update(buf, 0, n)
                                 downloadedBytes += n
+                                if (downloadedBytes > 256L * 1024 * 1024) throw java.io.IOException("download exceeds size limit")
                                 if (totalBytes > 0) onProgress(downloadedBytes, totalBytes)
                                 n = input.read(buf)
                             }

@@ -6,6 +6,7 @@ import com.google.gson.JsonParser
 import com.kingzcheung.xime.ai.data.SttConfig
 import com.kingzcheung.xime.ai.network.AiPipelineEngine
 import com.kingzcheung.xime.ai.network.EndpointResolver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -607,6 +608,10 @@ class GeminiLiveTranscribeClient(
                 }
                 @Suppress("UNREACHABLE_CODE")
                 Result.failure(IOException("Unreachable"))
+            } catch (e: CancellationException) {
+                // 用户取消/切框必须透传，不能把残句当成功结果继续处理。
+                closeSocketGracefully()
+                throw e
             } catch (e: Exception) {
                 val bestEffort = synchronized(lock) { buildCombinedTranscript() }
                 closeSocketGracefully()

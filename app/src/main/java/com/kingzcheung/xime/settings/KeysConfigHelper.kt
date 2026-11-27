@@ -2096,6 +2096,17 @@ object KeysConfigHelper {
             UserConfigDir.readText(context, UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE)?.let { return it }
             UserConfigDir.readText(context, fileName)?.let { return it }
         }
+        // 修复：私有目录回退也要与可见目录同构——writeCustomConfig 在无存储权限时
+        // 把统一配置写到 files/rime/xime.yaml，但 fileName 恒为 xime.custom.yaml，
+        // 旧实现只读 rime/xime.custom.yaml → 配置写完即被忽略。
+        if (fileName == XIME_CUSTOM_CONFIG_FILE) {
+            File(context.filesDir, "rime/${UserConfigDir.UNIFIED_CONFIG_FILE}").takeIf { it.isFile }?.let {
+                runCatching { it.readText() }.getOrNull()?.let { return it }
+            }
+            File(context.filesDir, "rime/${UserConfigDir.LEGACY_UNIFIED_CONFIG_FILE}").takeIf { it.isFile }?.let {
+                runCatching { it.readText() }.getOrNull()?.let { return it }
+            }
+        }
         val file = File(context.filesDir, "rime/$fileName")
         if (!file.exists()) return null
         return try {

@@ -597,7 +597,9 @@ class RimeEngine {
     fun selectCandidateByGlobalIndex(index: Int): Boolean {
         return tryLocked(false) {
             if (!nativeHasSession()) return@tryLocked false
-            nativeSelectCandidateByGlobalIndex(index)
+            val ok = nativeSelectCandidateByGlobalIndex(index)
+            if (ok) invalidateSnapshotCaches()
+            ok
         }
     }
 
@@ -610,7 +612,9 @@ class RimeEngine {
     fun deleteCandidateOnCurrentPage(index: Int): Boolean {
         return tryLocked(false) {
             if (!nativeHasSession()) return@tryLocked false
-            nativeDeleteCandidateOnCurrentPage(index)
+            val ok = nativeDeleteCandidateOnCurrentPage(index)
+            if (ok) invalidateSnapshotCaches()
+            ok
         }
     }
 
@@ -621,7 +625,9 @@ class RimeEngine {
     fun deleteCandidateByGlobalIndex(index: Int): Boolean {
         return tryLocked(false) {
             if (!nativeHasSession()) return@tryLocked false
-            nativeDeleteCandidateByGlobalIndex(index)
+            val ok = nativeDeleteCandidateByGlobalIndex(index)
+            if (ok) invalidateSnapshotCaches()
+            ok
         }
     }
 
@@ -784,6 +790,9 @@ class RimeEngine {
                 // 常见于方案未部署（不在 schema_list，如老版本升级残留）：
                 // 留证便于反馈日志定位（用户症状：键盘已切换但按键无候选）
                 FileLogger.w(TAG, "switchSchema($schemaId) failed: schema not available, current=${getCurrentSchema()}")
+            } else {
+                // 方案切换重置引擎组合态，必须作废快照缓存，否则下一键用旧编码拼码。
+                invalidateSnapshotCaches()
             }
             return switched
         }

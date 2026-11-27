@@ -208,6 +208,7 @@ object XimeIndexSource {
                     java.security.MessageDigest.getInstance("SHA-256")
                 } else null
                 var downloadedBytes = 0L
+                val maxBytes = 512L * 1024 * 1024 // 防止超大响应写满 cacheDir
                 body.byteStream().use { input ->
                     tmpFile.outputStream().use { output ->
                         val buf = ByteArray(8192)
@@ -216,6 +217,7 @@ object XimeIndexSource {
                             output.write(buf, 0, n)
                             md?.update(buf, 0, n)
                             downloadedBytes += n
+                            if (downloadedBytes > 512L * 1024 * 1024) throw java.io.IOException("download exceeds size limit")
                             if (totalBytes > 0) onDownloadProgress(downloadedBytes, totalBytes)
                             n = input.read(buf)
                         }
@@ -422,6 +424,7 @@ object XimeIndexSource {
                 val md = java.security.MessageDigest.getInstance("SHA-256")
                 val totalBytes = body.contentLength()
                 var downloadedBytes = 0L
+                val maxBytes = 512L * 1024 * 1024 // 防止超大响应写满 cacheDir
                 body.byteStream().use { input ->
                     dest.outputStream().use { output ->
                         val buf = ByteArray(8192)
@@ -430,6 +433,7 @@ object XimeIndexSource {
                             output.write(buf, 0, n)
                             md.update(buf, 0, n)
                             downloadedBytes += n
+                            if (downloadedBytes > 512L * 1024 * 1024) throw java.io.IOException("download exceeds size limit")
                             if (totalBytes > 0) onProgress(downloadedBytes, totalBytes)
                             n = input.read(buf)
                         }

@@ -3,6 +3,7 @@ package com.kingzcheung.xime.ai.network.asr
 import android.content.Context
 import com.kingzcheung.xime.service.AsrInferenceClient
 import com.kingzcheung.xime.speech.AsrModelManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -70,7 +71,15 @@ class LocalZipformerStreamingSession(
             }
             started = true
             true
-        } catch (_: Throwable) {
+        } catch (e: CancellationException) {
+            // 取消信号透传，让上层收尾逻辑命中；不静默变成 false。
+            runCatching { client.unbind() }
+            throw e
+        } catch (e: Exception) {
+            // 记录失败原因，避免"本地识别不可用"静默回退且无任何线索。
+            com.kingzcheung.xime.util.FileLogger.w(
+                "LocalZipformer", "prepare failed: ${e.javaClass.simpleName}: ${e.message}"
+            )
             runCatching { client.unbind() }
             false
         }
@@ -109,7 +118,10 @@ class LocalZipformerStreamingSession(
             val clean = if (text.isNotBlank()) text else _partialText.value
             if (clean.isBlank()) Result.failure(IOException("未识别到语音内容"))
             else Result.success(clean)
-        } catch (e: Throwable) {
+        } catch (e: CancellationException) {
+            // 主动取消/切框必须透传，不能被包装成识别失败。
+            throw e
+        } catch (e: Exception) {
             Result.failure(if (e is IOException) e else IOException(e.message ?: "本地识别失败", e))
         } finally {
             runCatching { client.unbind() }

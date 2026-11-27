@@ -7,6 +7,8 @@ import com.kingzcheung.xime.ai.audio.WavAudioRecorder
 import com.kingzcheung.xime.ai.data.SttConfig
 import com.kingzcheung.xime.ai.network.AiPipelineEngine
 import com.kingzcheung.xime.ai.network.EndpointResolver
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -247,17 +249,24 @@ class DashScopeStreamingAsrClient(
                     finalDeferred.await()
                 }
                 Result.success(text)
-            } catch (e: Throwable) {
-                // If server took slightly longer on `task-finished` after last sentence arrived, salvage partial!
+            } catch (e: TimeoutCancellationException) {
+                // 仅超时（服务端 task-finished 稍晚）才 salvage 部分文本，保留原有兜底语义。
                 val salvaged = _partialText.value.trim()
                 cancel()
-                if (salvaged.isNotEmpty() && e !is IOException) {
+                if (salvaged.isNotEmpty()) {
                     Result.success(salvaged)
                 } else {
-                    Result.failure(
-                        if (e is IOException) e else IOException("百炼流式尾包等待超时，已自动切换兜底", e)
-                    )
+                    Result.failure(IOException("百炼流式尾包等待超时，已自动切换兜底", e))
                 }
+            } catch (e: CancellationException) {
+                // 用户主动取消/切框：必须透传，不能改写成成功或失败（否则取消的残句会被当成功上屏）。
+                cancel()
+                throw e
+            } catch (e: Exception) {
+                cancel()
+                Result.failure(
+                    if (e is IOException) e else IOException("百炼流式尾包等待失败", e)
+                )
             }
         }
 

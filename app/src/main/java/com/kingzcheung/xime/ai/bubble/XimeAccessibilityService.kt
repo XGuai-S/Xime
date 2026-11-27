@@ -528,7 +528,7 @@ class XimeAccessibilityService : AccessibilityService() {
         forJevCopilot: Boolean,
         isFullScreenPeek: Boolean
     ): ViewportCaptureOutcome? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
 
         // ── H3：用户同意与总开关必须与 a11y 路径同口径 ──
         // 这个函数是「门控软失败」的回退入口（活动窗口是 IME 自己 / 归属校验没通过），
@@ -707,7 +707,7 @@ class XimeAccessibilityService : AccessibilityService() {
         redactionSession: RedactionSession? = null,
         isFullScreenPeek: Boolean = false
     ): ViewportCaptureOutcome? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
         val root = try {
             rootInActiveWindow
         } catch (_: Exception) {

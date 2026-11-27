@@ -941,7 +941,10 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             "space" -> {
                 if (hasComposing && candState.candidates.isNotEmpty()) {
                     // 组合态：空格选第一个候选（keyJobs 保序）
-                    postRimeJob { selectCandidateAsync(0) }
+                    // 修复：绑定编辑器代次，切框后旧任务不再向新框选词/清组合。
+                    postEditorRimeJobWithSession { ticket ->
+                        if (isEditorSessionCurrent(ticket)) selectCandidateAsync(0)
+                    }
                 } else {
                     ToolPanelEditTextHolder.editText?.let { et ->
                         val start = et.selectionStart.coerceAtLeast(0)
@@ -2574,9 +2577,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
             .ifEmpty { service.candidateState.value.preeditText }
         postEditorRimeJobWithSession { ticket ->
             if (!isEditorSessionCurrent(ticket)) return@postEditorRimeJobWithSession
-            val engineIndex = resolveRimeCandidateIndex(
-                displayIndex, text, service.rimeEngine.getCandidates().toList()
-            )
+            // 修复：按点击时快照的 text 在当前实时候选里定位，避免队列积压后 displayIndex
+            // 指向别的词（连打字时常见），导致删错词 + 错拉黑。找不到则放弃引擎删除。
+            val currentCandidates = service.rimeEngine.getCandidates().toList()
+            val engineIndex = currentCandidates.indexOfFirst { it == text }
+            if (engineIndex < 0) {
+                FileLogger.w("ImeKeyRouter", "deleteCandidate: 目标词已不在当前候选，跳过引擎删除")
+                return@postEditorRimeJobWithSession
+            }
             val ok = service.rimeEngine.deleteCandidateOnCurrentPage(engineIndex)
             // 引擎删不动的词（方案词典里的固定词条）也要进黑名单：显示层统一屏蔽，
             // 保证用户「长按删除」之后它不再出现在候选栏。带当前输入编码记录，
@@ -2684,7 +2692,14 @@ internal class ImeKeyRouter(private val service: XimeInputMethodService) {
         val code = service.candidateState.value.inputText
             .ifEmpty { service.candidateState.value.preeditText }
         postEditorRimeJobWithSession { ticket ->
-            val ok = service.rimeEngine.deleteCandidateByGlobalIndex(globalIndex)
+            // 修复：队列积压后全局索引可能已失效，用点击时快照的 text 重新定位当前全局索引。
+            val currentAll = service.rimeEngine.getAllCandidates().toList()
+            val currentIndex = currentAll.indexOfFirst { it.text == text }
+            if (currentIndex < 0) {
+                FileLogger.w("ImeKeyRouter", "deleteCandidateGlobal: 目标词已不在候选，跳过")
+                return@postEditorRimeJobWithSession
+            }
+            val ok = service.rimeEngine.deleteCandidateByGlobalIndex(currentIndex)
             // 与候选栏同口径：引擎删不动的词也进黑名单（带当前编码），保证删了就不再出现
             service.addWordBlacklist(text, code)
             FileLogger.i(

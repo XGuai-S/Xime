@@ -2,6 +2,7 @@ package com.kingzcheung.xime.ai.network.asr
 
 import com.kingzcheung.xime.ai.audio.WavAudioRecorder
 import com.kingzcheung.xime.ai.data.SttConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.StateFlow
@@ -118,9 +119,16 @@ interface StreamingAsrClient {
                 offset = end
             }
             session.finishAndAwaitFinal(timeoutMs = timeoutMs).getOrThrow()
-        } catch (e: Throwable) {
+        } catch (e: CancellationException) {
+            // 取消信号原样透传，不能改写成 IOException（否则上层误判为识别失败并重试）。
             session.cancel()
-            throw if (e is IOException) e else IOException(e.message ?: "流式语音识别失败", e)
+            throw e
+        } catch (e: IOException) {
+            session.cancel()
+            throw e
+        } catch (e: Exception) {
+            session.cancel()
+            throw IOException(e.message ?: "流式语音识别失败", e)
         }
     }
 }
