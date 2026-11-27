@@ -49,6 +49,16 @@ release 打包的一大半。
 
 ---
 
+## 3.4.62（versionCode 20261406）
+
+**构建提速：R8 线程数实测调优。**
+
+- 重新实测 R8 线程数（Ryzen 7 4800H，不看历史机器数据）：
+  threads=1 → 205s，threads=2 → 167s，threads=4 → 172s；2 线程最快且内存安全（最低 1.6GB 空闲）。
+  将 `systemProp.com.android.tools.r8.threads` 从 1 改为 2，R8 阶段省约 38s（18%）。
+
+---
+
 ## 3.4.61（versionCode 20261405）
 
 **菜单条目立体感 + 恢复词频重排 + 构建提速。**
