@@ -414,7 +414,20 @@ class XimeBubbleService :
                 null
             },
             pauseMediaPlayback = settingsSnap.pauseMediaWhileRecording,
-            whisperMode = settingsSnap.whisperModeEnabled
+            whisperMode = settingsSnap.whisperModeEnabled,
+            onCaptureFailure = { err ->
+                // 采集异常退出已由录音器自清理，这里同步胶囊状态并退出前台麦克风权限。
+                serviceScope.launch {
+                    activeStreamingSession?.cancel()
+                    activeStreamingSession = null
+                    demoteFromForeground()
+                    vibrate(strong = true)
+                    showTemporaryFeedback(
+                        (err.message ?: "录音采集中断").take(18),
+                        isError = true
+                    )
+                }
+            }
         )
         res.fold(
             onSuccess = {

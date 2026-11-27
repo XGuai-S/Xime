@@ -3,6 +3,7 @@
 #include <mutex>
 #include <dlfcn.h>
 #include <sys/system_properties.h>
+#include <onnxruntime_session_options_config_keys.h>
 
 static OrtEnv* g_shared_env = nullptr;
 static std::mutex g_env_mutex;
@@ -72,6 +73,35 @@ void OnnxReleaseSharedEnv() {
         if (api) api->ReleaseThreadingOptions(g_threading_options);
         g_threading_options = nullptr;
     }
+}
+
+bool OnnxApplySharedThreadPoolOptions(OrtSessionOptions* options) {
+    const OrtApi* api = OnnxGetApi();
+    if (!api || !options) return false;
+    bool ok = true;
+    OrtStatus* status = api->DisablePerSessionThreads(options);
+    if (status) {
+        LOGW("DisablePerSessionThreads failed: %s", api->GetErrorMessage(status));
+        api->ReleaseStatus(status);
+        ok = false;
+    }
+    // 移动端省电：空闲时直接阻塞，不自旋等待任务。
+    status = api->AddSessionConfigEntry(
+        options, kOrtSessionOptionsConfigAllowIntraOpSpinning, "0");
+    if (status) {
+        LOGW("disable intra-op spinning failed: %s", api->GetErrorMessage(status));
+        api->ReleaseStatus(status);
+        ok = false;
+    }
+    status = api->AddSessionConfigEntry(
+        options, kOrtSessionOptionsConfigAllowInterOpSpinning, "0");
+    if (status) {
+        LOGW("disable inter-op spinning failed: %s", api->GetErrorMessage(status));
+        api->ReleaseStatus(status);
+        ok = false;
+    }
+    LOGD("Session options configured: shared thread pool, spinning disabled");
+    return ok;
 }
 
 bool OnnxTryEnableNnapi(OrtSessionOptions* options) {

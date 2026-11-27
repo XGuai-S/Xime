@@ -152,6 +152,7 @@ Java_com_kingzcheung_xime_handwriting_HandwritingNativeEngine_nativeInitialize(
 
     OrtSessionOptions* session_options = nullptr;
     status = api->CreateSessionOptions(&session_options);
+    OnnxApplySharedThreadPoolOptions(session_options);
     if (status) {
         LOGE("Failed to create session options: %s", api->GetErrorMessage(status));
         api->ReleaseStatus(status);

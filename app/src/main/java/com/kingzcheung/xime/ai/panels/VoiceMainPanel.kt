@@ -1,11 +1,7 @@
 package com.kingzcheung.xime.ai.panels
 
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -63,6 +59,7 @@ import com.kingzcheung.xime.ai.ime.chrome.BottomCornerUtilityIcons
 import com.kingzcheung.xime.ai.ime.chrome.CircleFloatingKey
 import com.kingzcheung.xime.ai.ime.chrome.RepeatingCircleBackspaceKey
 import com.kingzcheung.xime.ai.ime.chrome.SymmetricalSevenBarWaveform
+import com.kingzcheung.xime.ai.ime.chrome.rememberActivePulse
 import com.kingzcheung.xime.ai.ui.components.TypeFreeIcons
 import com.kingzcheung.xime.ai.ui.theme.LocalTypeFreeKeyboardPalette
 import com.kingzcheung.xime.ai.ui.theme.TypeFreeEmerald
@@ -231,15 +228,12 @@ fun VoiceMainPanel(
             label = "micCorner"
         )
 
-        val infiniteTransition = rememberInfiniteTransition(label = "haloPulse")
-        val haloScale by infiniteTransition.animateFloat(
+        val haloScale = rememberActivePulse(
+            active = isRecording,
+            label = "haloPulse",
             initialValue = 1.0f,
             targetValue = 1.18f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 920, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "haloScale"
+            durationMillis = 920,
         )
 
         Box(

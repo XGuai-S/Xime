@@ -1102,7 +1102,28 @@ class VoiceController(
                 }
             },
             pauseMediaPlayback = settingsSnap.pauseMediaWhileRecording,
-            whisperMode = settingsSnap.whisperModeEnabled
+            whisperMode = settingsSnap.whisperModeEnabled,
+            onCaptureFailure = { err ->
+                // 采集协程异常退出后录音器已自清理；这里同步上层状态，避免语音面板悬挂。
+                abortActiveStreamingSession()
+                handsFreeSilenceJob?.cancel()
+                handsFreeSilenceJob = null
+                activeComposer = null
+                micPressDownTimeMs = 0L
+                host.performHaptic(strong = true)
+                val errorPhase = ImeLogic.classifyErrorFlags(
+                    errorMessage = err.message ?: "录音采集中断",
+                    hasCachedAudio = host.hasRetryWavFile(),
+                    hasMicPermission = recorder.hasRecordPermission()
+                )
+                host.stateFlow.update {
+                    it.copy(
+                        voicePhase = errorPhase,
+                        streamingPartialPreview = "",
+                        liveWriteStatus = LiveWriteUiStatus.INACTIVE
+                    )
+                }
+            }
         )
         startRes.fold(
             onSuccess = {

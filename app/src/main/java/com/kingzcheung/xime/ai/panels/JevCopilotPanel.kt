@@ -1,11 +1,5 @@
 package com.kingzcheung.xime.ai.panels
 
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -69,6 +63,7 @@ import com.kingzcheung.xime.ai.ime.VoicePhase
 import com.kingzcheung.xime.ai.ime.chrome.ErrorContextBanner
 import com.kingzcheung.xime.ai.ime.chrome.SubPanelHeaderBridgeBar
 import com.kingzcheung.xime.ai.ime.chrome.SubPanelModeSwitchTrack
+import com.kingzcheung.xime.ai.ime.chrome.rememberActivePulse
 import com.kingzcheung.xime.ai.jev.JevCopilotResult
 import com.kingzcheung.xime.ai.jev.JevStrategyOption
 import com.kingzcheung.xime.ai.jev.JevTensionTier
@@ -387,15 +382,13 @@ private fun JevSubtextRadarBar(
     domainBadge: String
 ) {
     val palette = LocalTypeFreeKeyboardPalette.current
-    val infiniteTransition = rememberInfiniteTransition(label = "jevRadarPulse")
-    val dotAlpha by infiniteTransition.animateFloat(
+    // 只有推演中才让语义点闪烁；空闲/完成/错误态不创建动画时钟。
+    val dotAlpha = rememberActivePulse(
+        active = isLoading,
+        label = "jevRadarPulse",
         initialValue = 1.0f,
         targetValue = 0.42f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "jevDotAlpha"
+        durationMillis = 1100,
     )
 
     val hasError = !isLoading && result == null && !errorMessage.isNullOrBlank()
@@ -1029,15 +1022,13 @@ private fun JevBottomControlRow(
     val currentOnRelease by rememberUpdatedState(onReleaseRecording)
     val currentOnFinish by rememberUpdatedState(onFinishHandsFree)
 
-    val infiniteTransition = rememberInfiniteTransition(label = "jevVoicePulse")
-    val pulseScale by infiniteTransition.animateFloat(
+    // 按住说话才需要脉冲反馈；空闲胶囊保持静态，避免面板静置时持续重绘。
+    val pulseScale = rememberActivePulse(
+        active = isRecording,
+        label = "jevVoicePulse",
         initialValue = 1.0f,
         targetValue = 1.10f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "jevPulseScale"
+        durationMillis = 900,
     )
 
     val bottomStatusText = when {

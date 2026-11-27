@@ -15,8 +15,10 @@ import androidx.core.content.ContextCompat
 import com.kingzcheung.xime.ai.data.HistoryRetention
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -173,7 +175,8 @@ class WavAudioRecorder(private val context: Context) {
         onStreamChunk: ((ByteArray) -> Unit)? = null,
         onSilencePrefixCleared: (() -> Unit)? = null,
         pauseMediaPlayback: Boolean = false,
-        whisperMode: Boolean = false
+        whisperMode: Boolean = false,
+        onCaptureFailure: ((Throwable) -> Unit)? = null,
     ): Result<Unit> {
         if (!hasRecordPermission()) {
             return Result.failure(SecurityException("尚未授予麦克风录音权限"))
@@ -302,6 +305,8 @@ class WavAudioRecorder(private val context: Context) {
         val waveformDivisor = if (whisperMode) 950.0 else 2400.0
 
         recordingJob = scope.launch(Dispatchers.IO) {
+            val thisJob = coroutineContext[Job]
+            var abnormalReason: Throwable? = null
             val shortBuf = ShortArray(CHUNK_SAMPLES)
             val byteBuf = ByteBuffer.allocate(CHUNK_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
             val streamAccumulator = ByteArrayOutputStream(STREAM_CHUNK_BYTES * 2)
@@ -318,10 +323,17 @@ class WavAudioRecorder(private val context: Context) {
                     // 旧实现只判 >0，负值/零值直接进入下一轮 → 单核 100% 占用并持续耗电，
                     // 同时波形与计时冻结，用户完全看不出出错。
                     if (readCount < 0) {
-                        com.kingzcheung.xime.util.FileLogger.e(
-                            "WavAudioRecorder",
-                            "AudioRecord.read 返回 $readCount（录音设备失效），中止本次录音"
-                        )
+                        // stop/cancel 会先把 recordingJob 置空：那是有序收尾，不算异常。
+                        // 只有本 job 仍是当前 job 时才按设备故障走自清理。
+                        if (recordingJob === thisJob) {
+                            abnormalReason = IllegalStateException(
+                                RecorderExitPolicy.readFailureReason(readCount) ?: "录音设备失效"
+                            )
+                            com.kingzcheung.xime.util.FileLogger.e(
+                                "WavAudioRecorder",
+                                "AudioRecord.read 返回 $readCount（录音设备失效），中止本次录音并自动释放"
+                            )
+                        }
                         break
                     }
                     if (readCount == 0) {
@@ -413,6 +425,14 @@ class WavAudioRecorder(private val context: Context) {
                         _elapsedMs.value = elapsedNow.coerceAtLeast(0L)
                     }
                 }
+            } catch (e: CancellationException) {
+                // 外部（scope）取消：stop/cancel 已把 recordingJob 置空，其余是真异常退出。
+                if (recordingJob === thisJob) abnormalReason = e
+            } catch (t: Throwable) {
+                if (recordingJob === thisJob) {
+                    abnormalReason = t
+                    FileLogger.e("WavAudioRecorder", "录音采集异常，自动释放录音资源", t)
+                }
             } finally {
                 // Flush remaining <200ms tail PCM chunk right as recording stops so WebSocket ASR gets 100% of audio
                 if (onStreamChunk != null) {
@@ -428,10 +448,37 @@ class WavAudioRecorder(private val context: Context) {
                         runCatching { onStreamChunk.invoke(finalTail) }
                     }
                 }
+                if (RecorderExitPolicy.shouldSelfRelease(
+                        abnormalReason != null,
+                        recordingJob === thisJob
+                    )
+                ) {
+                    releaseCaptureResources(record)
+                    _amplitudes.value = List(BAR_COUNT) { 0.08f }
+                    _elapsedMs.value = 0L
+                    abnormalReason?.let { onCaptureFailure?.invoke(it) }
+                }
             }
         }
 
         return Result.success(Unit)
+    }
+
+    /** 采集异常或外部取消时的兜底释放：设备、文件、音频焦点、闸门一并收尾。 */
+    private fun releaseCaptureResources(record: AudioRecord?) {
+        runCatching {
+            if (record?.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
+        }
+        runCatching { record?.release() }
+        if (audioRecord === record) audioRecord = null
+        recordingJob = null
+        abandonTransientAudioFocus()
+        MicCaptureGate.release(MIC_OWNER)
+        synchronized(sessionLock) {
+            runCatching { activeDiskFile?.close() }
+            activeDiskFile = null
+            totalPcmBytesWritten = 0
+        }
     }
 
     suspend fun stopRecording(): Result<RecordedAudioResult> = withContext(Dispatchers.IO) {
@@ -817,6 +864,16 @@ class WavAudioRecorder(private val context: Context) {
             return out
         }
     }
+}
+
+/** 采集退出分类：正常 stop/cancel 由调用方收尾，异常退出才自清理并通知上层。 */
+internal object RecorderExitPolicy {
+    fun readFailureReason(readCount: Int): String? =
+        if (readCount < 0) "AudioRecord.read 返回 $readCount（录音设备失效）" else null
+
+    /** jobStillCurrent = finally 时 recordingJob 仍指向本 job（外部取消/异常退出）。 */
+    fun shouldSelfRelease(abnormal: Boolean, jobStillCurrent: Boolean): Boolean =
+        abnormal || jobStillCurrent
 }
 
 internal suspend fun stopCaptureThenJoin(

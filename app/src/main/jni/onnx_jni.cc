@@ -82,6 +82,7 @@ static OrtSession* OnnxEnsureCpuFallbackSession(const OrtApi* api) {
 
     OrtSessionOptions* options = nullptr;
     OrtStatus* status = api->CreateSessionOptions(&options);
+    OnnxApplySharedThreadPoolOptions(options);
     if (status) {
         LOGE("Failed to create CPU fallback session options: %s", api->GetErrorMessage(status));
         api->ReleaseStatus(status);
@@ -252,6 +253,7 @@ Java_com_kingzcheung_xime_association_NativeOnnxEngine_nativeInitialize(
 
     OrtSessionOptions* session_options = nullptr;
     status = api->CreateSessionOptions(&session_options);
+    OnnxApplySharedThreadPoolOptions(session_options);
     if (status) {
         LOGE("Failed to create session options: %s", api->GetErrorMessage(status));
         api->ReleaseStatus(status);
@@ -259,7 +261,7 @@ Java_com_kingzcheung_xime_association_NativeOnnxEngine_nativeInitialize(
         return JNI_FALSE;
     }
 
-    // 线程池由共享 env 的全局线程池提供（见 onnx_env.cc），session 不再各自建线程。
+    // 线程池接入共享全局池并关闭空闲自旋（见 onnx_env.cc），不再各自建线程。
 
     // 关闭 CPU 内存 arena，避免分配器缓存保留大量闲置内存。
     status = api->DisableCpuMemArena(session_options);
@@ -289,6 +291,7 @@ Java_com_kingzcheung_xime_association_NativeOnnxEngine_nativeInitialize(
         OrtSessionOptions* cpu_options = nullptr;
         status = api->CreateSessionOptions(&cpu_options);
         if (!status) {
+            OnnxApplySharedThreadPoolOptions(cpu_options);
             OnnxTryEnableCpuFallback(cpu_options);
             status = api->CreateSession(ort_env, modelPathStr, cpu_options, &g_session);
             api->ReleaseSessionOptions(cpu_options);

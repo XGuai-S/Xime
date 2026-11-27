@@ -63,6 +63,33 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.sin
 
+/**
+ * 只在需要反馈时才创建无限动画时钟。
+ *
+ * 空闲面板若常驻 rememberInfiniteTransition，即使动画值没有被使用，Compose 仍会
+ * 持续推进时钟并触发重绘；这里 inactive 时直接返回静态值，不创建动画节点。
+ */
+@Composable
+internal fun rememberActivePulse(
+    active: Boolean,
+    label: String,
+    initialValue: Float = 1f,
+    targetValue: Float,
+    durationMillis: Int,
+): Float {
+    if (!active) return initialValue
+    val transition = rememberInfiniteTransition(label = label)
+    return transition.animateFloat(
+        initialValue = initialValue,
+        targetValue = targetValue,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = durationMillis, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = label,
+    ).value
+}
+
 @Composable
 fun SubPanelHeaderBridgeBar(
     isFlypyChineseMode: Boolean,
@@ -276,15 +303,12 @@ fun SubPanelVoiceTriggerRow(
     val currentOnRelease by rememberUpdatedState(onReleaseRecording)
     val currentOnFinish by rememberUpdatedState(onFinishHandsFree)
 
-    val infiniteTransition = rememberInfiniteTransition(label = "subPanelPulse")
-    val haloScale by infiniteTransition.animateFloat(
+    val haloScale = rememberActivePulse(
+        active = isRecording,
+        label = "subPanelPulse",
         initialValue = 1.0f,
         targetValue = 1.16f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "subHaloScale"
+        durationMillis = 1000,
     )
 
     Row(

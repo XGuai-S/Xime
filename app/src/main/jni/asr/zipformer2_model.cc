@@ -136,6 +136,7 @@ Zipformer2Model::Zipformer2Model(const AsrModelPaths &paths) : allocator_{} {
   // ORT_ENABLE_ALL 可显著缩短 CreateSession 耗时（模型被空闲释放后重新
   // 加载时，加载延迟直接决定语音开头是否丢失）。
   auto configure = [](Ort::SessionOptions &opts) {
+    OnnxApplySharedThreadPoolOptions(opts.GetUnowned());
     OnnxTryEnableCpuFallback(opts);
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
   };
