@@ -65,7 +65,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -1158,7 +1157,6 @@ fun ClipboardImageCard(
     val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Box(
         modifier = modifier
-                .shadow(6.dp, RoundedCornerShape(12.dp), clip = true)
                 .then(rememberKeyShadowModifier(bg, true, 8.dp, false, 100))
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
             .clip(shape)
@@ -1257,7 +1255,6 @@ fun GridItemCard(
     val noOpLongClick: (() -> Unit)? = if (isMultiSelect) onLongClick else noOpCallback
     Column(
         modifier = modifier
-            .shadow(6.dp, RoundedCornerShape(12.dp), clip = true)
             .then(rememberKeyShadowModifier(bg, true, 8.dp, false, 100))
             .border(1.5.dp, if (highlighted) accentColor else Color.Transparent, shape)
             .clip(shape)
@@ -1472,6 +1469,7 @@ private fun ContentCard(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
+        shadowElevation = 8.dp,
         shape = RoundedCornerShape(8.dp),
         color = bgColor
     ) {
