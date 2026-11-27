@@ -72,9 +72,9 @@ jobs:
             app/.cxx
             app/src/main/jni/boost
             app/src/main/jni/boost-*.tar.xz
-          key: cmake-${{ runner.os }}-${{ hashFiles('app/src/main/jni/CMakeLists.txt') }}
+          key: cmake-${{ runner.os }}-${{ hashFiles('app/src/main/jni/CMakeLists.txt') }}-v2
           restore-keys: |
-            cmake-${{ runner.os }}-
+            cmake-${{ runner.os }}-v2
 
       - name: Setup signing keystore
         run: |
