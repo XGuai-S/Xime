@@ -112,6 +112,21 @@ jobs:
       - name: Download native deps (ONNX Runtime)
         run: ./gradlew downloadOnnx --no-daemon --refresh-dependencies
       - name: Prepare Boost source (serialized for all ABI)
+        run: |
+          BOOST_VER=1.89.0
+          BOOST_DIR=app/src/main/jni/boost
+          if [ -d "$BOOST_DIR" ] && [ -f "$BOOST_DIR/CMakeLists.txt" ]; then
+            echo "Boost already prepared"
+            exit 0
+          fi
+          URL="https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}-cmake.tar.xz"
+          curl -fL --retry 5 --retry-delay 3 -o /tmp/boost.tar.xz "$URL" || curl -fL --retry 5 -o /tmp/boost.tar.xz "https://ghproxy.net/$URL"
+          echo "67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74  /tmp/boost.tar.xz" | sha256sum -c -
+          rm -rf "$BOOST_DIR" app/src/main/jni/boost-1.89.0
+          tar -xf /tmp/boost.tar.xz -C app/src/main/jni
+          mv app/src/main/jni/boost-1.89.0 "$BOOST_DIR"
+          echo "Boost prepared at $BOOST_DIR"
+
       - name: Prepare librime-lua plugin (serialized for all ABI)
         run: |
           LUA_SRC=app/src/main/jni/librime-lua
@@ -127,21 +142,6 @@ jobs:
           mkdir -p "$DEPS_DST"
           cp -r "$DEPS_SRC/." "$DEPS_DST/"
           echo "librime-lua plugin prepared"
-        run: |
-          BOOST_VER=1.89.0
-          BOOST_DIR=app/src/main/jni/boost
-          if [ -d "$BOOST_DIR" ] && [ -f "$BOOST_DIR/CMakeLists.txt" ]; then
-            echo "Boost already prepared"
-            exit 0
-          fi
-          URL="https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}-cmake.tar.xz"
-          curl -fL --retry 5 --retry-delay 3 -o /tmp/boost.tar.xz "$URL" || curl -fL --retry 5 -o /tmp/boost.tar.xz "https://ghproxy.net/$URL"
-          echo "checking sha256"
-          echo "67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74  /tmp/boost.tar.xz" | sha256sum -c -
-          rm -rf "$BOOST_DIR" app/src/main/jni/boost-1.89.0
-          tar -xf /tmp/boost.tar.xz -C app/src/main/jni
-          mv app/src/main/jni/boost-1.89.0 "$BOOST_DIR"
-          echo "Boost prepared at $BOOST_DIR"
 
       - name: Cache CMake build
         uses: actions/cache@v6
