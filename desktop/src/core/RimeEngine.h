@@ -86,6 +86,17 @@ public:
         std::function<std::vector<std::string>(const std::vector<std::string>&)>;
     void SetPluginTransform(PluginTransform fn);
 
+    // 完整契约回调：可新增候选（engineIndex<0）或保留引擎候选（engineIndex>=0）。
+    // 引擎在回调后按 engineIndex 重建候选列表；回调可读写 candidates。
+    struct PluginTransformContext {
+        std::string inputText;
+        std::string preedit;
+        bool asciiMode = false;
+        std::vector<Candidate> candidates;
+    };
+    using PluginTransformFull = std::function<void(PluginTransformContext&)>;
+    void SetPluginTransformFull(PluginTransformFull fn);
+
 private:
     RimeEngine() = default;
 
@@ -107,6 +118,7 @@ private:
     std::vector<std::string> autoTempWords_;
     // 插件候选变换回调（可为空）。
     PluginTransform pluginTransform_;
+    PluginTransformFull pluginTransformFull_;
 };
 
 } // namespace core

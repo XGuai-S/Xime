@@ -51,6 +51,23 @@ std::vector<std::string> PluginManager::TransformCandidates(
     return cur;
 }
 
+TransformResponse PluginManager::Transform(const TransformRequest& request) {
+    TransformResponse result;
+    result.changed = false;
+    TransformRequest cur = request;
+    for (auto& host : hosts_) {
+        TransformResponse one = host->Transform(cur);
+        if (one.changed) {
+            result.changed = true;
+            cur.candidates = one.candidates;
+        }
+    }
+    if (result.changed) {
+        result.candidates = std::move(cur.candidates);
+    }
+    return result;
+}
+
 std::vector<std::string> PluginManager::Names() const {
     std::vector<std::string> out;
     out.reserve(hosts_.size());

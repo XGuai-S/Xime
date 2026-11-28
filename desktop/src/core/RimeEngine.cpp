@@ -154,8 +154,46 @@ void RimeEngine::SetPluginTransform(PluginTransform fn) {
     pluginTransform_ = std::move(fn);
 }
 
+void RimeEngine::SetPluginTransformFull(PluginTransformFull fn) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    pluginTransformFull_ = std::move(fn);
+}
+
 void RimeEngine::ApplyPluginTransform(ProcessResult& result) {
-    if (!pluginTransform_ || result.isAsciiMode || result.candidates.empty()) {
+    if (result.isAsciiMode || result.candidates.empty()) {
+        return;
+    }
+    // 完整契约优先：支持新增候选与 engineIndex 重映射。
+    if (pluginTransformFull_) {
+        PluginTransformContext ctx;
+        ctx.inputText = result.inputText;
+        ctx.preedit = result.preeditText;
+        ctx.asciiMode = result.isAsciiMode;
+        ctx.candidates = result.candidates;
+        pluginTransformFull_(ctx);
+        std::vector<Candidate> rebuilt;
+        rebuilt.reserve(ctx.candidates.size());
+        for (const auto& c : ctx.candidates) {
+            Candidate out;
+            if (c.engineIndex >= 0 &&
+                c.engineIndex < static_cast<int>(result.candidates.size())) {
+                // 引擎候选：保留原候选的 comment/engineIndex，仅用插件可能的 text 覆盖。
+                out = result.candidates[c.engineIndex];
+                if (!c.text.empty()) {
+                    out.text = c.text;
+                }
+            } else {
+                // 新增文本候选。
+                out.text = c.text;
+                out.comment = c.comment;
+                out.engineIndex = -1;
+            }
+            rebuilt.push_back(std::move(out));
+        }
+        result.candidates.swap(rebuilt);
+        return;
+    }
+    if (!pluginTransform_) {
         return;
     }
     std::vector<std::string> texts;

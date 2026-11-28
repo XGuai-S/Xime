@@ -12,6 +12,25 @@ struct JSContext;
 namespace xime {
 namespace plugins {
 
+// 与安卓 XimeTransformRequest/Response 对齐的候选项。
+struct TransformCandidate {
+    std::string text;
+    std::string comment;
+    int engineIndex = -1; // >=0 指回引擎原下标；<0 表示新增文本候选
+};
+
+struct TransformRequest {
+    std::string inputText;
+    std::string preedit;
+    bool asciiMode = false;
+    std::vector<TransformCandidate> candidates;
+};
+
+struct TransformResponse {
+    bool changed = false; // 插件是否返回了非 null 结果
+    std::vector<TransformCandidate> candidates;
+};
+
 class PluginHost {
 public:
     PluginHost() = default;
@@ -27,9 +46,13 @@ public:
     // 插件 manifest.name（无则空）。
     std::string Name() const;
 
-    // 同步变换候选；无 transform.candidates 或出错时返回原列表。
+    // 【兼容接口】同步变换候选文本（无 transform 或出错时返回原列表）。
     std::vector<std::string> TransformCandidates(
         const std::vector<std::string>& input);
+
+    // 【完整契约】对齐安卓 XimeTransformRequest/Response，支持 engineIndex
+    // 指向引擎原候选、或 text/comment 新增候选。返回 changed=false 表示未干预。
+    TransformResponse Transform(const TransformRequest& request);
 
     bool transformAvailable() const { return transformAvailable_; }
 

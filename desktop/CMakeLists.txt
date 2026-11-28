@@ -300,6 +300,24 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-plugincand-smoke PRIVATE ole32 uuid xime-quickjs)
   add_dependencies(xime-plugincand-smoke xime-tsf)
 
+  # 插件完整契约（engineIndex + 新增候选）端到端。
+  add_executable(xime-pluginfull-smoke tests/PluginFullCandSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
+    src/plugins/PluginHost.cpp)
+  target_include_directories(xime-pluginfull-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include" "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src" "${CMAKE_BINARY_DIR}/librime/src")
+  if(MSVC)
+    target_link_options(xime-pluginfull-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-pluginfull-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-pluginfull-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-pluginfull-smoke PRIVATE ole32 uuid xime-quickjs)
+  add_dependencies(xime-pluginfull-smoke xime-tsf)
+
   # 语音链路：WAV 编码 + AI STT 回环上传（合成音频）。
   add_executable(xime-voice-test tests/VoiceTest.cpp
     src/voice/Wav.cpp src/voice/VoiceService.cpp

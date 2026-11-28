@@ -154,6 +154,92 @@ std::string PluginHost::Name() const {
     return name_;
 }
 
+TransformResponse PluginHost::Transform(const TransformRequest& request) {
+    TransformResponse response;
+    if (!loaded_ || !transformAvailable_) {
+        return response;
+    }
+    JSValue global = JS_GetGlobalObject(ctx_);
+    JSValue plugin = JS_GetPropertyStr(ctx_, global, "plugin");
+    JS_FreeValue(ctx_, global);
+    JSValue transform = JS_GetPropertyStr(ctx_, plugin, "transform");
+    JSValue fn = JS_GetPropertyStr(ctx_, transform, "candidates");
+    JS_FreeValue(ctx_, transform);
+
+    // 构造 request 对象：{ inputText, preedit, asciiMode, candidates:[{text,comment}] }
+    JSValue req = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, req, "inputText",
+                      JS_NewString(ctx_, request.inputText.c_str()));
+    JS_SetPropertyStr(ctx_, req, "preedit",
+                      JS_NewString(ctx_, request.preedit.c_str()));
+    JS_SetPropertyStr(ctx_, req, "asciiMode", JS_NewBool(ctx_, request.asciiMode));
+    JSValue cands = JS_NewArray(ctx_);
+    for (uint32_t i = 0; i < request.candidates.size(); ++i) {
+        JSValue c = JS_NewObject(ctx_);
+        JS_SetPropertyStr(ctx_, c, "text",
+                          JS_NewString(ctx_, request.candidates[i].text.c_str()));
+        JS_SetPropertyStr(ctx_, c, "comment",
+                          JS_NewString(ctx_, request.candidates[i].comment.c_str()));
+        JS_SetPropertyUint32(ctx_, cands, i, c);
+    }
+    JS_SetPropertyStr(ctx_, req, "candidates", cands);
+
+    JSValue ret = JS_Call(ctx_, fn, plugin, 1, &req);
+    JS_FreeValue(ctx_, req);
+    JS_FreeValue(ctx_, fn);
+    JS_FreeValue(ctx_, plugin);
+
+    if (JS_IsException(ret) || JS_IsNull(ret) || JS_IsUndefined(ret)) {
+        JS_FreeValue(ctx_, ret);
+        return response; // null = 不干预
+    }
+    JSValue outCands = JS_GetPropertyStr(ctx_, ret, "candidates");
+    if (!JS_IsArray(ctx_, outCands)) {
+        JS_FreeValue(ctx_, outCands);
+        JS_FreeValue(ctx_, ret);
+        return response;
+    }
+    response.changed = true;
+    JSValue lenv = JS_GetPropertyStr(ctx_, outCands, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx_, &len, lenv);
+    JS_FreeValue(ctx_, lenv);
+    for (uint32_t i = 0; i < len; ++i) {
+        JSValue item = JS_GetPropertyUint32(ctx_, outCands, i);
+        TransformCandidate out;
+        JSValue ei = JS_GetPropertyStr(ctx_, item, "engineIndex");
+        if (JS_IsNumber(ei)) {
+            double d = 0;
+            JS_ToFloat64(ctx_, &d, ei);
+            out.engineIndex = static_cast<int>(d);
+        }
+        JS_FreeValue(ctx_, ei);
+        JSValue tx = JS_GetPropertyStr(ctx_, item, "text");
+        if (JS_IsString(tx)) {
+            const char* s = JS_ToCString(ctx_, tx);
+            if (s) {
+                out.text = s;
+                JS_FreeCString(ctx_, s);
+            }
+        }
+        JS_FreeValue(ctx_, tx);
+        JSValue cm = JS_GetPropertyStr(ctx_, item, "comment");
+        if (JS_IsString(cm)) {
+            const char* s = JS_ToCString(ctx_, cm);
+            if (s) {
+                out.comment = s;
+                JS_FreeCString(ctx_, s);
+            }
+        }
+        JS_FreeValue(ctx_, cm);
+        response.candidates.push_back(std::move(out));
+        JS_FreeValue(ctx_, item);
+    }
+    JS_FreeValue(ctx_, outCands);
+    JS_FreeValue(ctx_, ret);
+    return response;
+}
+
 std::vector<std::string> PluginHost::TransformCandidates(
     const std::vector<std::string>& input) {
     if (!loaded_ || !transformAvailable_) {
