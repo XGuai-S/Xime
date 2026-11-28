@@ -40,7 +40,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-schemadeploy-smoke` | 写 schema_list→部署→选中 t9_pinyin |
 | 逻辑 | `xime-autoword-test` / `sc_test` | 造词算法与编码生成（对齐安卓用例） |
 | 逻辑 | `keymap_test` / `xime-schemalist-test` / `xime-settings-test` | 键位、方案列表、设置往返 |
-| 备份 | `xime-backup-test` | ZIP `PK`、往返字节一致（含 settings.json）、防路径穿越 |
+| 备份 | `xime-backup-test` | ZIP `PK`、往返字节一致（含 settings.json）、防路径穿越、**合并恢复同键取大/保留本地** |
 | AI | `xime-ai-test` / `aiprotocol-test` / `aiservice-test` | STT 复用密钥/润色开关、JSON/协议、帮写+9 场景决策 |
 | AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` / `voicechain-smoke` | Winsock/WinHTTP 回环真实收发、multipart/语音、**真机录音全链路（→STT→直出）** |
 | 剪贴板 | `xime-clipboard-test` / `xime-winclip-test` | 文本+图片 DIB、OTP 隔离、真实 OS 剪贴板 |
@@ -55,7 +55,7 @@ cmake --build desktop/build --config Release
 | 每页候选数（5..50）、方案切换/管理持久化、候选翻页 | ✅ |
 | 上屏词频 + 候选重排（engineIndex 保选词正确） | ✅ |
 | 自动造词（组合算法 + 编码生成 + 候选接入 + 上屏） | ✅ |
-| 备份/恢复（本地 ZIP 白名单、防穿越） | ✅ |
+| 备份/恢复（本地 ZIP 白名单、防穿越、按内容合并保留本地） | ✅ |
 | 统一设置存储（settings.json 原子写） | ✅ |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
