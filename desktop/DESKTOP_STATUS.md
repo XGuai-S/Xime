@@ -59,7 +59,7 @@ cmake --build desktop/build --config Release
 | 统一设置存储（settings.json 原子写） | ✅ |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
-| 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、目录管理、链式变换、TSF 启动加载 | ✅ |
+| 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、onLoad/onUnload 生命周期、host.quickSend 服务、目录管理、链式变换、TSF 启动加载 | ✅ |
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
 | AI 帮写面板 UI / 插件 panel·onAction·speech 扩展点 / 实时同步 | ⬜ 待做 |
 | 真实麦克风采集（WinMM waveIn PCM16） / 语音全链路（真机录音→STT→直出） | ✅ 实测 |
