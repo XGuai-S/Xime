@@ -51,6 +51,7 @@ cmake --build desktop/build --config Release
 | AI | `xime-ai-test` / `aiprotocol-test` / `aiservice-test` | STT 复用密钥/润色开关、JSON/协议、帮写+9 场景决策 |
 | AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` / `voicechain-smoke` | Winsock/WinHTTP 回环真实收发、multipart/语音、**真机录音全链路（→STT→直出）** |
 | 剪贴板 | `xime-clipboard-test` / `xime-winclip-test` | 文本+图片 DIB、OTP 隔离、真实 OS 剪贴板 |
+| 剪贴板 | `xime-clipwatch-test` | 自动捕获：写入→入历史、同内容不重复、换内容捕获 |
 | 插件 | `xime-plugin-test` / `pluginmgr-test` / `plugincand-smoke` / `pluginfull-smoke` | 加载 main.js、目录链式、简单改★仍选中正确词、**完整契约 engineIndex+新增候选** |
 
 ## 三、已实现功能（对照安卓）
@@ -65,7 +66,7 @@ cmake --build desktop/build --config Release
 | 备份/恢复（本地 ZIP 白名单、防穿越、按内容合并保留本地） | ✅ |
 | 统一设置存储（settings.json 原子写）**并在 TSF 启动时真正生效（pageSize + schemeList）** | ✅ 实测 |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
-| 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
+| 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写、自动捕获（轮询） | ✅ |
 | 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、onLoad/onUnload 生命周期、host.quickSend 服务、目录管理、链式变换、TSF 启动加载 | ✅ |
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
 | AI 帮写面板 UI / 插件 panel·onAction·speech 扩展点 / 实时同步 | ⬜ 待做 |
