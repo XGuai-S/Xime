@@ -2,11 +2,14 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <winhttp.h>
 
 #include <cstdlib>
 #include <cstring>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 namespace xime {
 namespace ai {
@@ -51,6 +54,9 @@ struct WinsockGuard {
 HttpPostResult HttpPost(const std::string& url,
                         const std::map<std::string, std::string>& headers,
                         const std::string& body, int timeoutMs) {
+    if (url.rfind("https://", 0) == 0) {
+        return HttpPostWinHttp(url, headers, body, timeoutMs);
+    }
     HttpPostResult result;
     std::string host;
     int port = 80;
@@ -145,6 +151,146 @@ HttpPostResult HttpPost(const std::string& url,
     result.body = raw.substr(headerEnd + 4);
 
     // 去掉可能的 chunked（简单场景不处理，回环夹具用 Content-Length 或 close）。
+    result.ok = result.status >= 200 && result.status < 300;
+    return result;
+}
+
+namespace {
+
+std::wstring AiUtf8ToWide(const std::string& s) {
+    if (s.empty()) {
+        return L"";
+    }
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                      static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+    if (n > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                            &out[0], n);
+    }
+    return out;
+}
+
+bool ParseUrlSecure(const std::string& url, std::wstring& host, int& port,
+                    bool& secure, std::wstring& path, std::string& error) {
+    secure = false;
+    std::string rest;
+    if (url.rfind("https://", 0) == 0) {
+        secure = true;
+        rest = url.substr(8);
+        port = 443;
+    } else if (url.rfind("http://", 0) == 0) {
+        rest = url.substr(7);
+        port = 80;
+    } else {
+        error = "不支持的协议";
+        return false;
+    }
+    const size_t slash = rest.find('/');
+    const std::string hostPort =
+        slash == std::string::npos ? rest : rest.substr(0, slash);
+    const std::string pathStr = slash == std::string::npos ? "/" : rest.substr(slash);
+    std::string hostStr = hostPort;
+    const size_t colon = hostPort.find(':');
+    if (colon != std::string::npos) {
+        hostStr = hostPort.substr(0, colon);
+        port = std::atoi(hostPort.substr(colon + 1).c_str());
+        if (port <= 0) {
+            port = secure ? 443 : 80;
+        }
+    }
+    if (hostStr.empty()) {
+        error = "空主机";
+        return false;
+    }
+    host = AiUtf8ToWide(hostStr);
+    path = AiUtf8ToWide(pathStr);
+    return true;
+}
+
+} // namespace
+
+HttpPostResult HttpPostWinHttp(const std::string& url,
+                               const std::map<std::string, std::string>& headers,
+                               const std::string& body, int timeoutMs) {
+    HttpPostResult result;
+    std::wstring host;
+    std::wstring path;
+    int port = 0;
+    bool secure = false;
+    if (!ParseUrlSecure(url, host, port, secure, path, result.error)) {
+        return result;
+    }
+
+    HINTERNET session = WinHttpOpen(
+        L"XimeAI/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        result.error = "WinHttpOpen 失败";
+        return result;
+    }
+    WinHttpSetTimeouts(session, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    HINTERNET conn = WinHttpConnect(session, host.c_str(),
+                                    static_cast<INTERNET_PORT>(port), 0);
+    if (!conn) {
+        result.error = "WinHttpConnect 失败";
+        WinHttpCloseHandle(session);
+        return result;
+    }
+    const DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET req = WinHttpOpenRequest(conn, L"POST", path.c_str(), nullptr,
+                                       WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!req) {
+        result.error = "WinHttpOpenRequest 失败";
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    std::wstring hdr;
+    for (const auto& kv : headers) {
+        hdr += AiUtf8ToWide(kv.first + ": " + kv.second + "\r\n");
+    }
+
+    BOOL ok = WinHttpSendRequest(
+        req, hdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdr.c_str(),
+        static_cast<DWORD>(hdr.empty() ? 0 : hdr.size()),
+        body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
+        static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
+    if (!ok || !WinHttpReceiveResponse(req, nullptr)) {
+        result.error = "发送/接收失败";
+        WinHttpCloseHandle(req);
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    DWORD statusCode = 0;
+    DWORD len = sizeof(statusCode);
+    WinHttpQueryHeaders(req,
+                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &len,
+                        WINHTTP_NO_HEADER_INDEX);
+    result.status = static_cast<int>(statusCode);
+
+    DWORD avail = 0;
+    do {
+        if (!WinHttpQueryDataAvailable(req, &avail) || avail == 0) {
+            break;
+        }
+        std::string chunk(avail, '\0');
+        DWORD read = 0;
+        if (!WinHttpReadData(req, &chunk[0], avail, &read) || read == 0) {
+            break;
+        }
+        result.body.append(chunk.data(), read);
+    } while (avail > 0);
+
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
     result.ok = result.status >= 200 && result.status < 300;
     return result;
 }

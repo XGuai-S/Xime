@@ -81,7 +81,7 @@ else()
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
 endif()
 target_link_libraries(xime-tsf PRIVATE
-  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 xime-quickjs)
+  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp xime-quickjs)
 if(MSVC)
   # msctf 是 MSVC/Windows SDK 的导入库（TSF 接口 IID 与 msctf.dll）；
   # MinGW 无同名导入库，其 TSF IID 由 libuuid.a 提供，故仅 MSVC 追加。
@@ -303,4 +303,10 @@ if(XIME_BUILD_SMOKE)
     src/ai/AiProtocol.cpp src/ai/Json.cpp src/ai/AiHttp.cpp)
   target_include_directories(xime-voice-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-voice-test PRIVATE ws2_32)
+
+  # WinHTTP 传输回环测试（https 走此路径；本机用 http 回环验证链路）。
+  add_executable(xime-aihttp-winhttp-test tests/AiHttpWinhttpTest.cpp
+    src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
+  target_include_directories(xime-aihttp-winhttp-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-aihttp-winhttp-test PRIVATE ws2_32 winhttp)
 endif()
