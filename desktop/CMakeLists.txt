@@ -237,13 +237,13 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-aihttp-test tests/AiHttpLoopbackTest.cpp
     src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
   target_include_directories(xime-aihttp-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(xime-aihttp-test PRIVATE ws2_32 Threads::Threads)
+  target_link_libraries(xime-aihttp-test PRIVATE ws2_32 winhttp Threads::Threads)
 
   # STT multipart 上传测试（构造 + 回环真实发送 + 解析 text）。
   add_executable(xime-stt-test tests/AiSttTest.cpp
     src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
   target_include_directories(xime-stt-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(xime-stt-test PRIVATE ws2_32 Threads::Threads)
+  target_link_libraries(xime-stt-test PRIVATE ws2_32 winhttp Threads::Threads)
 
   # 方案管理端到端：写 schema_list → 部署 → 选中。
   add_executable(xime-schemadeploy-smoke tests/SchemaDeploySmoke.cpp
@@ -305,7 +305,7 @@ if(XIME_BUILD_SMOKE)
     src/voice/Wav.cpp src/voice/VoiceService.cpp
     src/ai/AiProtocol.cpp src/ai/Json.cpp src/ai/AiHttp.cpp)
   target_include_directories(xime-voice-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(xime-voice-test PRIVATE ws2_32)
+  target_link_libraries(xime-voice-test PRIVATE ws2_32 winhttp)
 
   # WinHTTP 传输回环测试（https 走此路径；本机用 http 回环验证链路）。
   add_executable(xime-aihttp-winhttp-test tests/AiHttpWinhttpTest.cpp

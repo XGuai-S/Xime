@@ -51,7 +51,10 @@ int main(int argc, char** argv) {
     }
     std::printf("PLUGCAND_PLUGIN=%s transform=%d\n", host->Name().c_str(),
                 host->transformAvailable() ? 1 : 0);
-    engine.SetPluginHost(host);
+    engine.SetPluginTransform(
+        [host](const std::vector<std::string>& in) {
+            return host->TransformCandidates(in);
+        });
 
     core::ProcessResult last;
     for (const char* p = "nihao"; *p; ++p) {

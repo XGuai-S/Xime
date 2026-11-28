@@ -86,9 +86,9 @@ int main() {
 
     // 图片：去重 + 容量淘汰
     ClipboardStore img;
-    std::vector<uint8_t> a = {1, 2, 3, 4};
-    img.AddImage(a, 2, 2, 1);
-    img.AddImage(a, 2, 2, 2); // 同内容去重
+    std::vector<uint8_t> imgBytes = {1, 2, 3, 4};
+    img.AddImage(imgBytes, 2, 2, 1);
+    img.AddImage(imgBytes, 2, 2, 2); // 同内容去重
     Check(img.Images().size() == 1, "image dedup");
     for (size_t i = 0; i < ClipboardStore::kImageCapacity + 5; ++i) {
         std::vector<uint8_t> b = {static_cast<uint8_t>(i), 9, 9, 9, 9};

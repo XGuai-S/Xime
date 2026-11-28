@@ -149,15 +149,13 @@ ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
     return result;
 }
 
-void RimeEngine::SetPluginHost(
-    const std::shared_ptr<plugins::PluginHost>& host) {
+void RimeEngine::SetPluginTransform(PluginTransform fn) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    pluginHost_ = host;
+    pluginTransform_ = std::move(fn);
 }
 
 void RimeEngine::ApplyPluginTransform(ProcessResult& result) {
-    if (!pluginHost_ || !pluginHost_->transformAvailable() ||
-        result.isAsciiMode || result.candidates.empty()) {
+    if (!pluginTransform_ || result.isAsciiMode || result.candidates.empty()) {
         return;
     }
     std::vector<std::string> texts;
@@ -165,7 +163,7 @@ void RimeEngine::ApplyPluginTransform(ProcessResult& result) {
     for (const auto& c : result.candidates) {
         texts.push_back(c.text);
     }
-    const std::vector<std::string> out = pluginHost_->TransformCandidates(texts);
+    const std::vector<std::string> out = pluginTransform_(texts);
     if (out.size() == result.candidates.size()) {
         // 就位变换：保留每个候选原有的引擎下标，选词仍落回正确引擎词。
         for (size_t i = 0; i < out.size(); ++i) {
