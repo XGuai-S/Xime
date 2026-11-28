@@ -1,15 +1,34 @@
 # Xime 桌面版（Windows）状态报告
 生成时间：2026-11-28　｜　分支：`desktop`　｜　基线：Android 3.4.70（`baseline-android-3.4.70` / `51eaf367`，保持不变）
 
-## 〇、在本机安装为系统输入法（2026-11-28 已完成注册）
+## 〇、在本机安装为系统输入法（2026-11-28）
 
-已在本机（DESKTOP-M8FQP52）**注册为系统 TSF 输入法**并通过验证：
-- DLL 静态链接 MinGW 运行时（自包含，仅依赖系统 DLL），去除 lib 前缀为 `xime-tsf.dll`，显式导出 `DllGetClassObject/DllCanUnloadNow`。
-- 注册工具改用 `ITfInputProcessorProfiles::Register` + `ITfInputProcessorProfileMgr::RegisterProfile`（zh-CN 0x0804，`bEnabledByDefault=TRUE`）+ `ITfCategoryMgr::RegisterCategory`（键盘 / immersive / UI 元素三类）。
-- 验证：COM `DllGetClassObject→CreateInstance` 均 `S_OK`；系统 `GetLanguageProfileDescription` 返回「Xime 输入法」`RECOGNIZED=YES`。
-- 注册命令（需管理员）：`xime-register.exe install`；卸载：`xime-register.exe uninstall`。
-- DLL 当前位于 `desktop/build/xime-tsf.dll`（数据在同目录 `data/`）；用户数据在 `%LOCALAPPDATA%\Xime`。
-- 仅 64 位；32 位应用需另编 32 位 DLL。
+已在本机注册为系统 TSF 输入法并通过端到端验证。安装位置 `%LOCALAPPDATA%\Xime\ime`。
+
+**一键安装**：`powershell -ExecutionPolicy Bypass -File desktop\tools\install.ps1`
+
+**踩过的两个致命坑（已修，勿回退）**：
+
+1. **COM 回调异常逃逸** → 宿主进程崩溃。15 个 TSF 回调原先都没有 `try/catch`，
+   librime / 文件 IO / QuickJS 任一抛异常就跨越 COM 边界直接终止宿主，
+   事件日志为 `TextInputFramework.dll` + `0xC000041D`。曾把 DeepSeek Harness
+   和资源管理器打崩。现在每个回调都有异常边界，`xime-exsafe-test` 锁定回归。
+2. **`pfEaten` 空指针** → 访问违例 `0xC0000005`（try/catch 兜不住）。
+   `OnTestKeyDown/OnKeyUp/OnKeyDown/OnPreservedKey` 入口统一判空。
+
+**部署误判**：`IsDeployed()` 原只看 `build/` 目录是否存在，而 rime 会提前创建
+空目录 → 误判"已部署"后永不重试 → 永远没有候选。现改为必须存在 `*.bin` 产物，
+并在 `EnsureSession` 兜底补部署。`xime-deploy.exe` 可离线预热部署。
+
+**注册**：`xime-register.exe install|uninstall`（需管理员）。
+`ITfInputProcessorProfiles::Register` + `ITfInputProcessorProfileMgr::RegisterProfile`
+（zh-CN 0x0804）+ `ITfCategoryMgr::RegisterCategory`（键盘/immersive/UI 元素）。
+
+**验证结果**：COM `DllGetClassObject→CreateInstance` 均 `S_OK`；系统
+`GetLanguageProfileDescription` 返回「Xime 输入法」；部署产物 6 个 bin / 14.7MB；
+真实用户目录 `nihao` → 候选「你好」并成功上屏。
+
+**限制**：仅 64 位；DLL 只依赖系统 DLL（自包含）。
 
 ## 一、构建与产物
 
