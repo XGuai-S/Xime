@@ -43,7 +43,7 @@ cmake --build desktop/build --config Release
 | AI | `xime-ai-test` / `aiprotocol-test` / `aiservice-test` | STT 复用密钥/润色开关、JSON/协议、帮写+9 场景决策 |
 | AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` | Winsock/WinHTTP 回环真实收发、multipart/语音 |
 | 剪贴板 | `xime-clipboard-test` / `xime-winclip-test` | 文本+图片 DIB、OTP 隔离、真实 OS 剪贴板 |
-| 插件 | `xime-plugin-test` / `pluginmgr-test` / `plugincand-smoke` | 加载 main.js、目录链式、候选改★仍选中正确词 |
+| 插件 | `xime-plugin-test` / `pluginmgr-test` / `plugincand-smoke` / `pluginfull-smoke` | 加载 main.js、目录链式、简单改★仍选中正确词、**完整契约 engineIndex+新增候选** |
 
 ## 三、已实现功能（对照安卓）
 
@@ -58,7 +58,7 @@ cmake --build desktop/build --config Release
 | 统一设置存储（settings.json 原子写） | ✅ |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
-| 插件：内嵌 QuickJS、加载 main.js、transform.candidates、目录管理、链式变换 | ✅ |
+| 插件：内嵌 QuickJS、加载 main.js、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、目录管理、链式变换 | ✅ |
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
 | AI 帮写面板 UI / 插件完整扩展点 / 实时同步 | ⬜ 待做 |
 
