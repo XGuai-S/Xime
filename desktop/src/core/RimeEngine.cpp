@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 
@@ -86,6 +87,15 @@ bool RimeEngine::StartMaintenance(bool full) {
 
 bool RimeEngine::IsMaintaining() const {
     return rime_ ? rime_->is_maintenance_mode() != 0 : false;
+}
+
+bool RimeEngine::IsDeployed() const {
+    if (userDataDir_.empty()) {
+        return false;
+    }
+    // librime 部署产物落在 <user>/build/；存在即视为已部署。
+    std::error_code ec;
+    return std::filesystem::is_directory(userDataDir_ + "/build", ec);
 }
 
 bool RimeEngine::CreateSession() {

@@ -208,6 +208,11 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
 
     core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
                                             wideToUtf8(dataDir));
+    // 首启部署：用户目录尚无编译产物时触发一次完整部署，否则无候选可用。
+    // 非阻塞：部署在后台线程，Enter 时由 EnsureSession 等待完成。
+    if (!core::RimeEngine::Instance().IsDeployed()) {
+        core::RimeEngine::Instance().StartMaintenance(true);
+    }
     // 载入用户设置并应用（每页候选数、方案列表），使设置真正生效。
     {
         settings::DesktopSettings ds;
@@ -469,6 +474,10 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
 bool XimeTextService::EnsureSession() {
     if (hasSession_ && core::RimeEngine::Instance().HasSession()) {
         return true;
+    }
+    // 首启部署可能仍在进行：等待其完成再建会话（有上限，避免永久阻塞）。
+    for (int i = 0; i < 900 && core::RimeEngine::Instance().IsMaintaining(); ++i) {
+        Sleep(100);
     }
     hasSession_ = core::RimeEngine::Instance().CreateSession();
     return hasSession_;

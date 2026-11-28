@@ -461,4 +461,25 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-settingapply-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-settingapply-smoke xime-tsf)
+
+  # 首启部署端到端：全新用户目录 → 部署 → 已部署 → 有候选。
+  add_executable(xime-firstrun-smoke tests/FirstRunSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
+    src/core/CandidatePicker.cpp)
+  target_include_directories(xime-firstrun-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  if(MSVC)
+    target_link_options(xime-firstrun-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-firstrun-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-firstrun-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-firstrun-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-firstrun-smoke xime-tsf)
 endif()

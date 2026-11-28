@@ -49,6 +49,8 @@ public:
                     const std::string& sharedDataDir);
     bool StartMaintenance(bool full);
     bool IsMaintaining() const;
+    // 是否已部署（用户目录已有编译产物 build/）。用于首启按需部署。
+    bool IsDeployed() const;
 
     bool CreateSession();
     void DestroySession();
