@@ -332,15 +332,24 @@ bool XimeTextService::EnsureSession() {
 
 bool XimeTextService::HandleCandidateSelection(ITfContext* context,
                                                unsigned int vk) {
-    int index = -1;
+    int displayIndex = -1;
     if (vk >= '1' && vk <= '9') {
-        index = static_cast<int>(vk - '1');
+        displayIndex = static_cast<int>(vk - '1');
     } else if (vk == '0') {
-        index = 9;
+        displayIndex = 9;
     }
-    if (index < 0) {
+    if (displayIndex < 0) {
         return false;
     }
+    // 候选可能被词频重排：数字键对应「显示位」，选词要回到它原本的引擎下标。
+    if (displayIndex < static_cast<int>(lastCandidates_.size()) &&
+        lastCandidates_[displayIndex].engineIndex >= 0) {
+        const auto result = core::RimeEngine::Instance().SelectCandidateByEngineIndex(
+            lastCandidates_[displayIndex].engineIndex);
+        ApplyEngineResult(context, result);
+        return true;
+    }
+    // 无候选映射时退回引擎页内选词。
     const auto result =
         core::RimeEngine::Instance().ProcessKeyAndGetResult(vk, 0);
     ApplyEngineResult(context, result);
@@ -362,6 +371,7 @@ void XimeTextService::ProcessInputKey(ITfContext* context, unsigned int vk,
 
 void XimeTextService::ApplyEngineResult(ITfContext* context,
                                         const core::ProcessResult& result) {
+    lastCandidates_ = result.candidates;
     if (!result.committedText.empty()) {
         CommitText(context, result.committedText);
     }

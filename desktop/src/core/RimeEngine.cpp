@@ -5,6 +5,7 @@
 #include <rime/schema.h>
 
 #include "t9_processor.h"
+#include "WordFreqStore.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -51,6 +52,9 @@ bool RimeEngine::Initialize(const std::string& userDataDir,
 
     userDataDir_ = userDataDir;
     sharedDataDir_ = sharedDataDir;
+    // 词频表与 xime 的其它用户数据同目录，启动即载入。
+    WordFreqStore::Instance().SetUserDir(userDataDir);
+    WordFreqStore::Instance().Load();
     const std::string logDir = userDataDir + "/logs";
 
     RIME_STRUCT(RimeTraits, traits);
@@ -123,10 +127,33 @@ ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
     if (!HasSession()) {
         return result;
     }
+    // 词频记录需要在 commit 前拿到「当时的编码」：process_key 之后 composition 往往已清空。
+    const char* preInputRaw = rime_->get_input(session_);
+    const std::string preInput = preInputRaw ? preInputRaw : "";
     result.processed = rime_->process_key(session_, keycode, mask) != 0;
     FlushT9IfActive();
     ReadCurrentState(result);
+    if (!result.committedText.empty() && !result.isAsciiMode &&
+        WordFreqStore::IsCountableWord(result.committedText)) {
+        WordFreqStore::Instance().RecordCommit(preInput, result.committedText);
+        WordFreqStore::Instance().Save();
+    }
     return result;
+}
+
+ProcessResult RimeEngine::SelectCandidateByEngineIndex(int engineIndex) {
+    // 引擎页内数字选词：下标 0..8 -> 数字键 1..9，9 -> 0（仅当前页 0）。
+    // 走 process_key 数字通道，与正常按键一致（能触发完整 commit 与词频记录）。
+    unsigned int vk = 0;
+    if (engineIndex >= 0 && engineIndex <= 8) {
+        vk = static_cast<unsigned int>('1' + engineIndex);
+    } else if (engineIndex == 9) {
+        vk = '0';
+    }
+    if (vk == 0) {
+        return ProcessResult{};
+    }
+    return ProcessKeyAndGetResult(vk, 0);
 }
 
 void RimeEngine::FlushT9IfActive() {
@@ -173,11 +200,35 @@ void RimeEngine::ReadCurrentState(ProcessResult& result) const {
             c.comment = context.menu.candidates[i].comment
                             ? context.menu.candidates[i].comment
                             : "";
+            c.engineIndex = i;
             result.candidates.push_back(std::move(c));
         }
         result.hasNextPage = !context.menu.is_last_page;
         result.hasPrevPage = context.menu.page_no > 0;
         rime_->free_context(&context);
+
+        // 词频重排：仅非 ascii、非 T9、有输入编码时，按上屏频数降序显示。
+        // 重排后候选对象自带 engineIndex，点选据此回到引擎原始词。
+        const bool t9Active = rime::T9ProcessorRequire() != nullptr;
+        if (!result.isAsciiMode && !t9Active && !result.inputText.empty() &&
+            !result.candidates.empty()) {
+            std::vector<std::string> texts;
+            texts.reserve(result.candidates.size());
+            for (const auto& c : result.candidates) {
+                texts.push_back(c.text);
+            }
+            const std::vector<int> order =
+                WordFreqStore::Instance().ComputeDisplayOrder(result.inputText,
+                                                              texts);
+            if (!order.empty()) {
+                std::vector<Candidate> reordered;
+                reordered.reserve(order.size());
+                for (int idx : order) {
+                    reordered.push_back(result.candidates[idx]);
+                }
+                result.candidates.swap(reordered);
+            }
+        }
     } else {
         const char* input = rime_->get_input(session_);
         result.inputText = input ? input : "";

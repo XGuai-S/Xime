@@ -3,6 +3,8 @@
 
 #include "Guids.h"
 
+#include "../core/RimeEngine.h"
+
 #include <windows.h>
 #include <msctf.h>
 #include <string>
@@ -13,10 +15,6 @@
 #endif
 
 namespace xime {
-namespace core {
-struct Candidate;
-struct ProcessResult;
-}
 namespace ui {
 class CandidateWindow;
 }
@@ -98,6 +96,7 @@ private:
     bool activated_ = false;
     bool hasSession_ = false;
     ui::CandidateWindow* candidateWindow_ = nullptr;
+    std::vector<core::Candidate> lastCandidates_; // 最近一次候选（用于按显示位映射引擎下标选词）
 };
 
 } // namespace tsf

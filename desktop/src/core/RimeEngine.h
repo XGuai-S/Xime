@@ -14,6 +14,7 @@ namespace core {
 struct Candidate {
     std::string text;
     std::string comment;
+    int engineIndex = -1; // 该候选在引擎原始候选列表中的下标（重排后仍指回引擎）
 };
 
 struct ProcessResult {
@@ -51,6 +52,9 @@ public:
     bool ProcessKey(int keycode, int mask);
     ProcessResult ProcessKeyAndGetResult(int keycode, int mask);
     ProcessResult ReadResult(bool processed);
+
+    // 按引擎原始下标选词（用于候选被词频重排后，点选回到正确引擎词）。
+    ProcessResult SelectCandidateByEngineIndex(int engineIndex);
 
     bool SetInput(const std::string& input);
     void ClearComposition();
