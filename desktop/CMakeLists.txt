@@ -21,6 +21,7 @@ add_library(xime-tsf SHARED
   src/core/RimeEngine.cpp
   src/core/WordFreqStore.cpp
   src/core/AutoWordStore.cpp
+  src/core/SchemeCodeIndex.cpp
   src/core/KeyMap.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
@@ -148,4 +149,8 @@ if(XIME_BUILD_SMOKE)
   # 自动造词纯逻辑单测（不依赖 librime，秒级运行）。
   add_executable(xime-autoword-test tests/AutoWordTest.cpp src/core/AutoWordStore.cpp)
   target_include_directories(xime-autoword-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 组合生词编码生成纯逻辑单测。
+  add_executable(xime-scheme-test tests/SchemeCodeIndexTest.cpp src/core/SchemeCodeIndex.cpp)
+  target_include_directories(xime-scheme-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
