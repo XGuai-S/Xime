@@ -18,6 +18,7 @@ const std::set<std::string> kWhitelist = {
     "auto_word.txt",
     "xime.yaml",
     "default.custom.yaml",
+    "clipboard.json",
 };
 
 bool ReadFile(const std::string& path, std::string& out) {

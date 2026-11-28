@@ -31,6 +31,8 @@ add_library(xime-tsf SHARED
   src/ai/AiHttp.cpp
   src/ai/AiProviderConfig.cpp
   src/ai/AiService.cpp
+  src/clipboard/ClipboardStore.cpp
+  src/clipboard/WinClipboard.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -237,4 +239,15 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-schemadeploy-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-schemadeploy-smoke xime-tsf)
+
+  # 剪贴板存储纯逻辑测试。
+  add_executable(xime-clipboard-test tests/ClipboardStoreTest.cpp
+    src/clipboard/ClipboardStore.cpp src/ai/Json.cpp)
+  target_include_directories(xime-clipboard-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # Win32 剪贴板读写往返测试（真实 OS 剪贴板）。
+  add_executable(xime-winclip-test tests/WinClipboardTest.cpp
+    src/clipboard/WinClipboard.cpp)
+  target_include_directories(xime-winclip-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-winclip-test PRIVATE user32)
 endif()
