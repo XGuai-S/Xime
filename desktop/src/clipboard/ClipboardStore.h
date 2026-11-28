@@ -1,6 +1,7 @@
 // 剪贴板存储（移植安卓 Clipboard 语义）：文本历史 + 置顶 + 去重 + 验证码(OTP)隔离 + 快捷发送。
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -14,6 +15,15 @@ struct ClipItem {
     long long tsMs = 0;
 };
 
+struct ClipImage {
+    std::string hash; // 内容哈希（去重用）
+    size_t size = 0;
+    int width = 0;
+    int height = 0;
+    long long tsMs = 0;
+    bool pinned = false;
+};
+
 struct QuickSendItem {
     std::string text;
     std::string code;
@@ -24,6 +34,7 @@ class ClipboardStore {
 public:
     static constexpr size_t kHistoryCapacity = 200;
     static constexpr size_t kOtpCapacity = 5;
+    static constexpr size_t kImageCapacity = 100;
     static constexpr long long kOtpTtlMs = 2 * 60 * 1000; // 2 分钟
 
     // 普通文本入历史：去重（同文移到最前并刷新时间），超出容量淘汰最旧的未置顶项。
@@ -40,6 +51,11 @@ public:
     // 快捷发送：按 (文字, 快捷码) 联合去重。
     void AddQuickSend(const std::string& text, const std::string& code,
                       long long nowMs);
+
+    // 图片入历史（按内容哈希去重移到最前，超容量淘汰最旧）。
+    void AddImage(const std::vector<uint8_t>& bytes, int width, int height,
+                  long long nowMs);
+    std::vector<ClipImage> Images() const { return images_; }
 
     // 可见普通项：置顶在前、其余按时间倒序；顺带清理过期 OTP。
     std::vector<ClipItem> VisibleItems(long long nowMs);
@@ -58,6 +74,7 @@ private:
     std::vector<ClipItem> otp_;       // 验证码（新在前，含过期时间）
     std::vector<long long> otpExpiry_;
     std::vector<QuickSendItem> quick_; // 新在前
+    std::vector<ClipImage> images_;    // 图片（新在前）
 };
 
 } // namespace clipboard

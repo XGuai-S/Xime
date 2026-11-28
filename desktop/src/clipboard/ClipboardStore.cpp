@@ -3,6 +3,8 @@
 #include "../ai/Json.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 
 namespace xime {
 namespace clipboard {
@@ -101,6 +103,53 @@ void ClipboardStore::AddQuickSend(const std::string& text, const std::string& co
     item.code = code;
     item.tsMs = nowMs;
     quick_.insert(quick_.begin(), item);
+}
+
+namespace {
+std::string FnvHash(const std::vector<uint8_t>& bytes) {
+    uint64_t h = 1469598103934665603ULL;
+    for (uint8_t b : bytes) {
+        h ^= b;
+        h *= 1099511628211ULL;
+    }
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+} // namespace
+
+void ClipboardStore::AddImage(const std::vector<uint8_t>& bytes, int width,
+                              int height, long long nowMs) {
+    if (bytes.empty()) {
+        return;
+    }
+    const std::string hash = FnvHash(bytes);
+    images_.erase(std::remove_if(images_.begin(), images_.end(),
+                                 [&](const ClipImage& im) {
+                                     return im.hash == hash;
+                                 }),
+                  images_.end());
+    ClipImage img;
+    img.hash = hash;
+    img.size = bytes.size();
+    img.width = width;
+    img.height = height;
+    img.tsMs = nowMs;
+    images_.insert(images_.begin(), img);
+    // 淘汰最旧的未置顶项，保留置顶。
+    while (images_.size() > kImageCapacity) {
+        size_t idx = images_.size();
+        for (size_t i = images_.size(); i-- > 0;) {
+            if (!images_[i].pinned) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == images_.size()) {
+            break;
+        }
+        images_.erase(images_.begin() + static_cast<long>(idx));
+    }
 }
 
 std::vector<ClipItem> ClipboardStore::VisibleItems(long long nowMs) {
