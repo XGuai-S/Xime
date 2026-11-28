@@ -189,10 +189,22 @@ void PluginHost::EnsureReady() {
         return;
     }
     rt_ = JS_NewRuntime();
+    if (!rt_) {
+        return;
+    }
+    // 限制插件堆内存：QuickJS 默认无上限（malloc_limit = -1），插件一句
+    // new ArrayBuffer(2**31) 就能把 TSF 宿主进程撑爆。输入法挂在每个前台
+    // 进程里，必须设硬上限。
+    JS_SetMemoryLimit(rt_, kMaxHeapBytes);
     // opaque 指向成员 deadline_（对象生命周期内稳定）；未调用时其 time_point 为默认
     // （count==0），回调直接放行，不影响 LoadFromSource 等初始化执行。
     JS_SetInterruptHandler(rt_, InterruptHandler, &deadline_);
     ctx_ = JS_NewContext(rt_);
+    if (!ctx_) {
+        JS_FreeRuntime(rt_);
+        rt_ = nullptr;
+        return;
+    }
     InstallHost(ctx_);
 }
 
@@ -219,10 +231,23 @@ void PluginHost::EndCall(bool wasException) {
 
 bool PluginHost::LoadFromSource(const std::string& jsSource, std::string* err) {
     EnsureReady();
+    if (!rt_ || !ctx_) {
+        if (err) {
+            *err = "quickjs init failed";
+        }
+        return false;
+    }
     loaded_ = false;
     transformAvailable_ = false;
+    // 加载期同样打断保护：main.js 顶层写 while(true){} 会让 Activate 永不返回，
+    // 表现为"每次切换输入法都卡死"。加载放宽到 kLoadTimeoutMs。
+    const int savedTimeout = timeoutMs_;
+    timeoutMs_ = kLoadTimeoutMs;
+    BeginCall();
     JSValue val = JS_Eval(ctx_, jsSource.c_str(), jsSource.size(), "main.js",
                           JS_EVAL_TYPE_GLOBAL);
+    EndCall(JS_IsException(val));
+    timeoutMs_ = savedTimeout;
     if (JS_IsException(val)) {
         if (err) {
             JSValue exc = JS_GetException(ctx_);
@@ -260,17 +285,30 @@ std::string PluginHost::Name() const {
 }
 
 bool PluginHost::InvokeLoad(std::string* err) {
-    if (!loaded_ || !ctx_) {
+    if (!loaded_ || !ctx_ || !rt_) {
         return true;
     }
-    return CallLifecycle(this, ctx_, "onLoad", err);
+    // 生命周期回调同样设超时：onLoad 里死循环会让 Activate 永不返回。
+    const int saved = timeoutMs_;
+    timeoutMs_ = kLoadTimeoutMs;
+    BeginCall();
+    const bool ok = CallLifecycle(this, ctx_, "onLoad", err);
+    EndCall(false);
+    timeoutMs_ = saved;
+    return ok;
 }
 
 bool PluginHost::InvokeUnload(std::string* err) {
-    if (!loaded_ || !ctx_) {
+    if (!loaded_ || !ctx_ || !rt_) {
         return true;
     }
-    return CallLifecycle(this, ctx_, "onUnload", err);
+    const int saved = timeoutMs_;
+    timeoutMs_ = kLoadTimeoutMs;
+    BeginCall();
+    const bool ok = CallLifecycle(this, ctx_, "onUnload", err);
+    EndCall(false);
+    timeoutMs_ = saved;
+    return ok;
 }
 
 TransformResponse PluginHost::Transform(const TransformRequest& request) {

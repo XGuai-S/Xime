@@ -102,6 +102,10 @@ private:
     bool transformAvailable_ = false;
     std::string name_;
     int timeoutMs_ = 15;
+    // 插件堆内存硬上限。输入法注入到每个前台进程，不能让插件撑爆宿主内存。
+    static constexpr size_t kMaxHeapBytes = 16u * 1024u * 1024u;
+    // 加载/生命周期回调的超时（比按键热路径宽松，但仍必须有上限）。
+    static constexpr int kLoadTimeoutMs = 2000;
     bool lastTimedOut_ = false;
     std::chrono::steady_clock::time_point deadline_{};
     QuickSendProvider quickSendProvider_;

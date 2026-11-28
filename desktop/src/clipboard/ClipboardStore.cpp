@@ -19,30 +19,41 @@ void ClipboardStore::AddText(const std::string& text, long long nowMs) {
     if (text.empty()) {
         return;
     }
+    // 去重时保留原「置顶」状态：用户置顶的常用语再次复制不应掉出置顶区。
+    bool wasPinned = false;
+    for (const auto& it : history_) {
+        if (it.text == text) {
+            wasPinned = wasPinned || it.pinned;
+        }
+    }
     history_.erase(std::remove_if(history_.begin(), history_.end(),
                                   [&](const ClipItem& it) { return it.text == text; }),
                    history_.end());
     ClipItem item;
     item.text = text;
-    item.pinned = false;
+    item.pinned = wasPinned;
     item.tsMs = nowMs;
     history_.insert(history_.begin(), item);
 
     // 淘汰最旧的非置顶项，直到非置顶数量 <= 容量。
+    // 注意：这里必须用下标正序遍历。原先用反向迭代器 + erase，erase 后 rit
+    // 立即失效，下一轮再比较/解引用就是未定义行为（Debug 下直接断言崩溃）。
     size_t nonPinned = 0;
     for (const auto& it : history_) {
         if (!it.pinned) {
             ++nonPinned;
         }
     }
-    for (auto rit = history_.rbegin(); rit != history_.rend() && nonPinned > kHistoryCapacity;) {
-        if (!rit->pinned) {
-            auto fwd = std::next(rit).base();
-            history_.erase(fwd);
+    // 从尾部（最旧）向前收集要删的下标，再从后往前一次性删除。
+    std::vector<size_t> doomed;
+    for (size_t i = history_.size(); i-- > 0 && nonPinned > kHistoryCapacity;) {
+        if (!history_[i].pinned) {
+            doomed.push_back(i);
             --nonPinned;
-        } else {
-            ++rit;
         }
+    }
+    for (size_t idx : doomed) {
+        history_.erase(history_.begin() + static_cast<long>(idx));
     }
 }
 

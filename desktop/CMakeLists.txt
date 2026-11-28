@@ -637,6 +637,11 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-fuzz-test tests/MaliciousInputTest.cpp
     src/ai/Json.cpp src/backup/BackupArchive.cpp)
   target_include_directories(xime-fuzz-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  # 插件/剪贴板资源限额：内存上限、加载期超时不挂死、淘汰不崩、置顶保留。
+  add_executable(xime-limit-test tests/ResourceLimitTest.cpp
+    src/plugins/PluginHost.cpp src/clipboard/ClipboardStore.cpp src/ai/Json.cpp)
+  target_include_directories(xime-limit-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-limit-test PRIVATE xime-quickjs)
 endif()
 
 # ---- 安装规则 ----
