@@ -22,6 +22,8 @@ add_library(xime-tsf SHARED
   src/core/WordFreqStore.cpp
   src/core/AutoWordStore.cpp
   src/core/SchemeCodeIndex.cpp
+  src/backup/BackupArchive.cpp
+  src/backup/BackupService.cpp
   src/core/KeyMap.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
@@ -177,4 +179,9 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-autocand-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-autocand-smoke xime-tsf)
+
+  # 备份/恢复往返测试（纯文件 IO，不依赖 librime）。
+  add_executable(xime-backup-test tests/BackupTest.cpp
+    src/backup/BackupArchive.cpp src/backup/BackupService.cpp)
+  target_include_directories(xime-backup-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
