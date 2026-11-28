@@ -332,6 +332,14 @@ if(XIME_BUILD_SMOKE)
   target_include_directories(xime-recorder-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-recorder-test PRIVATE winmm)
 
+  # 语音全链路：真实录音 → WAV → STT → 润色/直出（回环，不连外网）。
+  add_executable(xime-voicechain-smoke tests/VoiceChainSmoke.cpp
+    src/voice/AudioRecorder.cpp src/voice/Wav.cpp src/voice/VoiceService.cpp
+    src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp
+    src/ai/AiService.cpp src/ai/AiProviderConfig.cpp)
+  target_include_directories(xime-voicechain-smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-voicechain-smoke PRIVATE winmm ws2_32 winhttp)
+
   # WinHTTP 传输回环测试（https 走此路径；本机用 http 回环验证链路）。
   add_executable(xime-aihttp-winhttp-test tests/AiHttpWinhttpTest.cpp
     src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
