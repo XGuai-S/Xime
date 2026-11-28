@@ -11,6 +11,16 @@ namespace plugins {
 
 namespace {
 
+// 输入热路径的 JS 中断回调：超时后返回非 0，QuickJS 在循环回边/函数调用处
+// 抛出内部异常，避免死循环插件卡死输入法。
+int InterruptHandler(JSRuntime* rt, void* opaque) {
+    auto* deadline = static_cast<std::chrono::steady_clock::time_point*>(opaque);
+    if (deadline->time_since_epoch().count() == 0) {
+        return 0;
+    }
+    return std::chrono::steady_clock::now() >= *deadline ? 1 : 0;
+}
+
 // host.console.log：把插件日志转 stderr（最小 host 服务）。
 JSValue HostLog(JSContext* ctx, JSValueConst /*this_val*/, int argc,
                 JSValueConst* argv) {
@@ -108,8 +118,32 @@ void PluginHost::EnsureReady() {
         return;
     }
     rt_ = JS_NewRuntime();
+    // opaque 指向成员 deadline_（对象生命周期内稳定）；未调用时其 time_point 为默认
+    // （count==0），回调直接放行，不影响 LoadFromSource 等初始化执行。
+    JS_SetInterruptHandler(rt_, InterruptHandler, &deadline_);
     ctx_ = JS_NewContext(rt_);
     InstallHost(ctx_);
+}
+
+void PluginHost::BeginCall() {
+    lastTimedOut_ = false;
+    if (timeoutMs_ > 0) {
+        deadline_ = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeoutMs_);
+    } else {
+        deadline_ = std::chrono::steady_clock::time_point{};
+    }
+}
+
+void PluginHost::EndCall(bool wasException) {
+    // 仅当本次调用真的抛异常（超时中断或插件错误）时取回并清除，
+    // 避免污染后续调用；正常调用不触碰异常状态。
+    if (wasException) {
+        JSValue exc = JS_GetException(ctx_);
+        JS_FreeValue(ctx_, exc);
+        lastTimedOut_ = true;
+    }
+    deadline_ = std::chrono::steady_clock::time_point{};
 }
 
 bool PluginHost::LoadFromSource(const std::string& jsSource, std::string* err) {
@@ -184,7 +218,16 @@ TransformResponse PluginHost::Transform(const TransformRequest& request) {
     }
     JS_SetPropertyStr(ctx_, req, "candidates", cands);
 
+    BeginCall();
     JSValue ret = JS_Call(ctx_, fn, plugin, 1, &req);
+    EndCall(JS_IsException(ret));
+    if (lastTimedOut_) {
+        JS_FreeValue(ctx_, ret);
+        JS_FreeValue(ctx_, req);
+        JS_FreeValue(ctx_, fn);
+        JS_FreeValue(ctx_, plugin);
+        return response; // 超时 = 不干预，保护输入热路径
+    }
     JS_FreeValue(ctx_, req);
     JS_FreeValue(ctx_, fn);
     JS_FreeValue(ctx_, plugin);
@@ -258,10 +301,16 @@ std::vector<std::string> PluginHost::TransformCandidates(
                              JS_NewString(ctx_, input[i].c_str()));
     }
 
+    BeginCall();
     JSValue ret = JS_Call(ctx_, fn, plugin, 1, &arr);
+    EndCall(JS_IsException(ret));
     JS_FreeValue(ctx_, arr);
     JS_FreeValue(ctx_, fn);
     JS_FreeValue(ctx_, plugin);
+    if (lastTimedOut_) {
+        JS_FreeValue(ctx_, ret);
+        return input; // 超时 = 原样返回
+    }
 
     std::vector<std::string> out = input;
     if (!JS_IsException(ret) && JS_IsArray(ctx_, ret)) {

@@ -341,4 +341,10 @@ if(XIME_BUILD_SMOKE)
     src/plugins/PluginManager.cpp src/plugins/PluginHost.cpp)
   target_include_directories(xime-pluginmgr-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-pluginmgr-test PRIVATE xime-quickjs)
+
+  # 插件 transform 硬超时测试（死循环插件不卡死输入热路径）。
+  add_executable(xime-plugintimeout-test tests/PluginTimeoutTest.cpp
+    src/plugins/PluginHost.cpp)
+  target_include_directories(xime-plugintimeout-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-plugintimeout-test PRIVATE xime-quickjs)
 endif()

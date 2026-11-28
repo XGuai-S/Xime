@@ -3,6 +3,7 @@
 // 执行后 globalThis.plugin 即插件对象；transform.candidates 同步变换候选。
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -56,14 +57,28 @@ public:
 
     bool transformAvailable() const { return transformAvailable_; }
 
+    // transform 硬超时（毫秒），对齐安卓 hotPath 15ms。0 表示不限时。
+    // 默认 15ms；超时后中断 JS 执行并返回「不干预」。
+    void SetTransformTimeoutMs(int ms) { timeoutMs_ = ms; }
+    int TransformTimeoutMs() const { return timeoutMs_; }
+    // 最近一次 transform 是否因超时被中断。
+    bool lastTimedOut() const { return lastTimedOut_; }
+
 private:
     void EnsureReady();
+    // 在 JS 调用前后设置/清除中断截止时间。传入本次调用的返回值，
+    // 仅当它为异常时才取回并清理异常状态（避免误清正常调用）。
+    void BeginCall();
+    void EndCall(bool wasException);
 
     JSRuntime* rt_ = nullptr;
     JSContext* ctx_ = nullptr;
     bool loaded_ = false;
     bool transformAvailable_ = false;
     std::string name_;
+    int timeoutMs_ = 15;
+    bool lastTimedOut_ = false;
+    std::chrono::steady_clock::time_point deadline_{};
 };
 
 } // namespace plugins
