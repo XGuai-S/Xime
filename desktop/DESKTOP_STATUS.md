@@ -38,6 +38,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-pageflip-smoke` | 每页1候选 `nihao`→「你好」→下一页「拟好」→回退 |
 | 核心 | `xime-ascii-smoke` | 中英文切换（ascii_mode）：中文→英文→中文 |
 | 设置 | `xime-settingapply-smoke` | settings.json pageSize=9 → 启动加载应用 → 引擎 pageSize=9 |
+| 首启 | `xime-firstrun-smoke` | 全新用户目录→自动部署→有候选（你好） |
 | 逻辑 | `xime-picker-test` | 数字键与鼠标点击共用选词映射（引擎/造词/插件候选） |
 | 核心 | `xime-autocand-smoke` | 造词`小霞`→码`ihfn`→候选出现 |
 | 核心 | `xime-schemadeploy-smoke` | 写 schema_list→部署→选中 t9_pinyin |
