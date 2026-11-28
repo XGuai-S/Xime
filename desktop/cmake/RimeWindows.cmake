@@ -61,6 +61,14 @@ set(Opencc_INCLUDE_PATH "${XIME_JNI_DIR}/librime/deps/opencc/src" CACHE PATH "" 
 set(Opencc_LIBRARY libopencc CACHE STRING "" FORCE)
 set(Opencc_STATIC TRUE CACHE BOOL "" FORCE)
 
+# librime 与 lua 插件都以 <opencc/XXX.hpp> 形式引用 opencc 头文件；
+# opencc 源码头文件在 src/ 下（无 opencc/ 子目录），这里建一个头文件镜像目录。
+set(XIME_OPENCC_SHIM "${CMAKE_BINARY_DIR}/opencc_include")
+file(MAKE_DIRECTORY "${XIME_OPENCC_SHIM}/opencc")
+file(GLOB XIME_OPENCC_HPP "${XIME_JNI_DIR}/librime/deps/opencc/src/*.hpp")
+file(COPY ${XIME_OPENCC_HPP} DESTINATION "${XIME_OPENCC_SHIM}/opencc")
+include_directories("${XIME_OPENCC_SHIM}")
+
 include_directories("${XIME_JNI_DIR}/librime/include")
 
 # ── 插件接入 ─────────────────────────────────────────────────────────────────
