@@ -2,9 +2,11 @@
 
 #include "../core/KeyMap.h"
 #include "../core/RimeEngine.h"
+#include "../plugins/PluginManager.h"
 #include "../ui/CandidateWindow.h"
 
 #include <functional>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -198,6 +200,39 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
     hasSession_ = false;
     if (!candidateWindow_) {
         candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
+    }
+
+    // 启动加载插件：DLL 同级 plugins/ 目录下的所有 <name>/main.js。
+    // 插件宿主失败（目录不存在/插件语法错）不影响输入法主体。
+    pluginManager_.reset(new (std::nothrow) plugins::PluginManager());
+    if (pluginManager_) {
+        const std::string pluginDir = wideToUtf8(dir + L"\\plugins");
+        std::string pluginErr;
+        pluginManager_->LoadDirectory(pluginDir, &pluginErr);
+        // 把完整契约变换注册进引擎（core 类型回调，不链接 QuickJS）。
+        auto* mgr = pluginManager_.get();
+        core::RimeEngine::Instance().SetPluginTransformFull(
+            [mgr](core::RimeEngine::PluginTransformContext& ctx) {
+                plugins::TransformRequest pr;
+                pr.inputText = ctx.inputText;
+                pr.preedit = ctx.preedit;
+                pr.asciiMode = ctx.asciiMode;
+                for (const auto& c : ctx.candidates) {
+                    pr.candidates.push_back({c.text, c.comment, c.engineIndex});
+                }
+                plugins::TransformResponse pres = mgr->Transform(pr);
+                if (!pres.changed) {
+                    return; // 插件不干预
+                }
+                ctx.candidates.clear();
+                for (const auto& c : pres.candidates) {
+                    core::Candidate cc;
+                    cc.text = c.text;
+                    cc.comment = c.comment;
+                    cc.engineIndex = c.engineIndex;
+                    ctx.candidates.push_back(std::move(cc));
+                }
+            });
     }
     activated_ = true;
     return S_OK;

@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <msctf.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@
 #endif
 
 namespace xime {
+namespace plugins {
+class PluginManager;
+}
 namespace ui {
 class CandidateWindow;
 }
@@ -96,6 +100,7 @@ private:
     bool activated_ = false;
     bool hasSession_ = false;
     ui::CandidateWindow* candidateWindow_ = nullptr;
+    std::unique_ptr<plugins::PluginManager> pluginManager_; // 插件宿主（启动时从 plugins/ 加载）
     std::vector<core::Candidate> lastCandidates_; // 最近一次候选（用于按显示位映射引擎下标选词）
 };
 
