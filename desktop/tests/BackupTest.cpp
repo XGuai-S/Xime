@@ -76,6 +76,26 @@ int main() {
     Check(!fs::exists(dst + "/sub/evil.txt"), "subdir rejected");
     Check(ReadText(dst + "/word_freq.txt") == "# ok\n", "whitelist restored from evil zip");
 
+    // 合并恢复：本地已有词频，导入应保留本地独有词、同键取较大频数。
+    const std::string localFreq =
+        "# header\n甲\tab\t3\n乙\tcd\t10\n";
+    WriteText(dst + "/word_freq.txt", localFreq);
+    const std::string incomingFreq =
+        "# header\n甲\tab\t5\n丙\tef\t7\n";
+    std::vector<xime::backup::ZipEntry> mergeEntries = {
+        {"word_freq.txt", incomingFreq}};
+    const std::string mergeZip = base + "/merge.zip";
+    Check(xime::backup::WriteZip(mergeZip, mergeEntries), "merge zip write");
+    Check(xime::backup::ImportBackup(dst, mergeZip, true), "merge import ok");
+    const std::string merged = ReadText(dst + "/word_freq.txt");
+    Check(merged.find("甲\tab\t5") != std::string::npos, "same key takes max");
+    Check(merged.find("乙\tcd\t10") != std::string::npos, "local-only kept");
+    Check(merged.find("丙\tef\t7") != std::string::npos, "incoming-only kept");
+
+    // 直接测 MergeFreqTable 的确定性。
+    const std::string m2 = xime::backup::MergeFreqTable(localFreq, incomingFreq);
+    Check(m2.find("乙\tcd\t10") != std::string::npos, "merge fn local kept");
+
     fs::remove_all(base, ec);
     if (fails == 0) {
         std::printf("BACKUP_TEST_OK\n");
