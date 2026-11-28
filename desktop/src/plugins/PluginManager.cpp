@@ -33,6 +33,7 @@ size_t PluginManager::LoadDirectory(const std::string& dir, std::string* err) {
         auto host = std::make_unique<PluginHost>();
         std::string perr;
         if (host->LoadFromFile(mainJs.string(), &perr)) {
+            // onLoad 延后到 InvokeAllLoad：那时 host 服务（quickSend 等）已注入。
             hosts_.push_back(std::move(host));
             ++loaded;
         } else if (err) {
@@ -66,6 +67,30 @@ TransformResponse PluginManager::Transform(const TransformRequest& request) {
         result.candidates = std::move(cur.candidates);
     }
     return result;
+}
+
+void PluginManager::InvokeAllLoad(std::string* err) {
+    for (auto& h : hosts_) {
+        std::string e;
+        if (!h->InvokeLoad(&e) && err) {
+            *err += e + "; ";
+        }
+    }
+}
+
+void PluginManager::InvokeAllUnload(std::string* err) {
+    for (auto& h : hosts_) {
+        std::string e;
+        if (!h->InvokeUnload(&e) && err) {
+            *err += e + "; ";
+        }
+    }
+}
+
+void PluginManager::SetQuickSendProvider(PluginHost::QuickSendProvider provider) {
+    for (auto& h : hosts_) {
+        h->SetQuickSendProvider(provider);
+    }
 }
 
 std::vector<std::string> PluginManager::Names() const {

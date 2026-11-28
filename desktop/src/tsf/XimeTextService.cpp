@@ -3,11 +3,14 @@
 #include "../core/KeyMap.h"
 #include "../core/RimeEngine.h"
 #include "../plugins/PluginManager.h"
+#include "../clipboard/ClipboardStore.h"
 #include "../ui/CandidateWindow.h"
 
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <new>
+#include <sstream>
 #include <string>
 
 namespace xime {
@@ -209,6 +212,37 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         const std::string pluginDir = wideToUtf8(dir + L"\\plugins");
         std::string pluginErr;
         pluginManager_->LoadDirectory(pluginDir, &pluginErr);
+
+        // 注入 host.quickSend.list() 数据源（读 <user>/clipboard.json）。
+        const std::string clipboardPath = wideToUtf8(userDir) + "/clipboard.json";
+        pluginManager_->SetQuickSendProvider(
+            [clipboardPath]() -> std::vector<plugins::QuickSendEntry> {
+                std::vector<plugins::QuickSendEntry> out;
+                std::ifstream in(clipboardPath, std::ios::binary);
+                if (!in) {
+                    return out;
+                }
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                clipboard::ClipboardStore store;
+                if (!store.Deserialize(ss.str())) {
+                    return out;
+                }
+                const auto items = store.QuickSends();
+                out.reserve(items.size());
+                for (const auto& it : items) {
+                    plugins::QuickSendEntry e;
+                    e.text = it.text;
+                    e.code = it.code;
+                    e.timestamp = it.tsMs;
+                    out.push_back(std::move(e));
+                }
+                return out;
+            });
+        // onLoad 在所有 host 服务注入后调用（quick-phrase 等据此拉缓存）。
+        std::string lifecycleErr;
+        pluginManager_->InvokeAllLoad(&lifecycleErr);
+
         // 把完整契约变换注册进引擎（core 类型回调，不链接 QuickJS）。
         auto* mgr = pluginManager_.get();
         core::RimeEngine::Instance().SetPluginTransformFull(
@@ -241,6 +275,12 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
 STDMETHODIMP XimeTextService::Deactivate() {
     if (!activated_) {
         return S_FALSE;
+    }
+
+    // 先让插件收尾（onUnload），再释放管理器；都在引擎回调清除之前。
+    if (pluginManager_) {
+        std::string lifecycleErr;
+        pluginManager_->InvokeAllUnload(&lifecycleErr);
     }
 
     if (candidateWindow_) {

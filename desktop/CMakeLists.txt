@@ -351,6 +351,12 @@ if(XIME_BUILD_SMOKE)
     src/settings/SettingsStore.cpp src/ai/Json.cpp)
   target_include_directories(xime-settings-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+  # 插件生命周期 + host.quickSend 服务测试。
+  add_executable(xime-pluglifecycle-test tests/PluginLifecycleTest.cpp
+    src/plugins/PluginHost.cpp)
+  target_include_directories(xime-pluglifecycle-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-pluglifecycle-test PRIVATE xime-quickjs)
+
   # 插件管理器测试（目录扫描 + 链式变换）。
   add_executable(xime-pluginmgr-test tests/PluginManagerTest.cpp
     src/plugins/PluginManager.cpp src/plugins/PluginHost.cpp)

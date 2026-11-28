@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,15 @@ struct TransformResponse {
     std::vector<TransformCandidate> candidates;
 };
 
+// 快捷发送条目（host.quickSend.list() 返回，对齐安卓 QuickSendEntry）。
+struct QuickSendEntry {
+    int id = 0;
+    std::string text;
+    std::string code;
+    long long timestamp = 0;
+    bool pinned = false;
+};
+
 class PluginHost {
 public:
     PluginHost() = default;
@@ -57,6 +67,21 @@ public:
 
     bool transformAvailable() const { return transformAvailable_; }
 
+    // 生命周期：对齐安卓 onLoad/onUnload（同步无参）。返回 false 表示插件抛错。
+    bool InvokeLoad(std::string* err);
+    bool InvokeUnload(std::string* err);
+
+    // 注入 host.quickSend.list() 的数据源（同步返回数组）。
+    using QuickSendProvider = std::function<std::vector<QuickSendEntry>()>;
+    void SetQuickSendProvider(QuickSendProvider provider) {
+        quickSendProvider_ = std::move(provider);
+    }
+    // 供 host.* C 回调读取（QuickJS 同步单线程）。
+    bool HasQuickSendProvider() const { return static_cast<bool>(quickSendProvider_); }
+    std::vector<QuickSendEntry> QuickSendList() const {
+        return quickSendProvider_ ? quickSendProvider_() : std::vector<QuickSendEntry>{};
+    }
+
     // transform 硬超时（毫秒），对齐安卓 hotPath 15ms。0 表示不限时。
     // 默认 15ms；超时后中断 JS 执行并返回「不干预」。
     void SetTransformTimeoutMs(int ms) { timeoutMs_ = ms; }
@@ -79,6 +104,7 @@ private:
     int timeoutMs_ = 15;
     bool lastTimedOut_ = false;
     std::chrono::steady_clock::time_point deadline_{};
+    QuickSendProvider quickSendProvider_;
 };
 
 } // namespace plugins

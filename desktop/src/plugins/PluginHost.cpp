@@ -9,7 +9,70 @@
 namespace xime {
 namespace plugins {
 
+// 当前正在执行 JS 的宿主（供 host.* C 回调读取，QuickJS 同步单线程）。
+thread_local PluginHost* t_activeHost = nullptr;
+
 namespace {
+
+// 调用插件的无参生命周期方法（onLoad/onUnload），返回成功与否。
+bool CallLifecycle(PluginHost* self, JSContext* ctx, const char* name,
+                   std::string* err) {
+    // onLoad 可能调用 host.quickSend.list()，设置活动宿主。
+    PluginHost* prev = t_activeHost;
+    t_activeHost = self;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue plugin = JS_GetPropertyStr(ctx, global, "plugin");
+    JS_FreeValue(ctx, global);
+    if (!JS_IsObject(plugin)) {
+        JS_FreeValue(ctx, plugin);
+        return true; // 无插件对象视为无需生命周期
+    }
+    JSValue fn = JS_GetPropertyStr(ctx, plugin, name);
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        JS_FreeValue(ctx, plugin);
+        return true; // 未定义该生命周期 = 成功
+    }
+    JSValue ret = JS_Call(ctx, fn, plugin, 0, nullptr);
+    bool ok = !JS_IsException(ret);
+    if (!ok && err) {
+        JSValue exc = JS_GetException(ctx);
+        const char* s = JS_ToCString(ctx, exc);
+        *err = s ? s : "lifecycle error";
+        if (s) JS_FreeCString(ctx, s);
+        JS_FreeValue(ctx, exc);
+    }
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, fn);
+    JS_FreeValue(ctx, plugin);
+    t_activeHost = prev;
+    return ok;
+}
+
+// 输入热路径的 JS 中断回调
+JSValue QuickSendList(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
+                      JSValueConst* /*argv*/) {
+    JSValue arr = JS_NewArray(ctx);
+    if (!t_activeHost || !t_activeHost->HasQuickSendProvider()) {
+        return arr;
+    }
+    const auto items = t_activeHost->QuickSendList();
+    for (uint32_t i = 0; i < items.size(); ++i) {
+        JSValue o = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, o, "id", JS_NewInt32(ctx, items[i].id));
+        JS_SetPropertyStr(ctx, o, "text",
+                          JS_NewString(ctx, items[i].text.c_str()));
+        JS_SetPropertyStr(ctx, o, "code",
+                          JS_NewString(ctx, items[i].code.c_str()));
+        JS_SetPropertyStr(ctx, o, "timestamp",
+                          JS_NewFloat64(ctx,
+                                        static_cast<double>(items[i].timestamp)));
+        JS_SetPropertyStr(ctx, o, "isPinned",
+                          JS_NewBool(ctx, items[i].pinned));
+        JS_SetPropertyUint32(ctx, arr, i, o);
+    }
+    return arr;
+}
 
 // 输入热路径的 JS 中断回调：超时后返回非 0，QuickJS 在循环回边/函数调用处
 // 抛出内部异常，避免死循环插件卡死输入法。
@@ -59,6 +122,14 @@ void InstallHost(JSContext* ctx) {
     JS_SetPropertyStr(ctx, console, "error",
                       JS_NewCFunction(ctx, HostLog, "error", 1));
     JS_SetPropertyStr(ctx, host, "console", console);
+
+    // host.quickSend.list()：同步返回快捷发送条目数组。
+    // 用线程局部指针把 provider 传给 C 回调（QuickJS 调用同步、单线程）。
+    JSValue quickSend = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, quickSend, "list",
+                      JS_NewCFunction(ctx, QuickSendList, "list", 0));
+    JS_SetPropertyStr(ctx, host, "quickSend", quickSend);
+
     JS_SetPropertyStr(ctx, global, "host", host);
     JS_FreeValue(ctx, global);
 }
@@ -188,6 +259,20 @@ std::string PluginHost::Name() const {
     return name_;
 }
 
+bool PluginHost::InvokeLoad(std::string* err) {
+    if (!loaded_ || !ctx_) {
+        return true;
+    }
+    return CallLifecycle(this, ctx_, "onLoad", err);
+}
+
+bool PluginHost::InvokeUnload(std::string* err) {
+    if (!loaded_ || !ctx_) {
+        return true;
+    }
+    return CallLifecycle(this, ctx_, "onUnload", err);
+}
+
 TransformResponse PluginHost::Transform(const TransformRequest& request) {
     TransformResponse response;
     if (!loaded_ || !transformAvailable_) {
@@ -219,7 +304,10 @@ TransformResponse PluginHost::Transform(const TransformRequest& request) {
     JS_SetPropertyStr(ctx_, req, "candidates", cands);
 
     BeginCall();
+    PluginHost* prev = t_activeHost;
+    t_activeHost = this;
     JSValue ret = JS_Call(ctx_, fn, plugin, 1, &req);
+    t_activeHost = prev;
     EndCall(JS_IsException(ret));
     if (lastTimedOut_) {
         JS_FreeValue(ctx_, ret);
@@ -302,7 +390,10 @@ std::vector<std::string> PluginHost::TransformCandidates(
     }
 
     BeginCall();
+    PluginHost* prev = t_activeHost;
+    t_activeHost = this;
     JSValue ret = JS_Call(ctx_, fn, plugin, 1, &arr);
+    t_activeHost = prev;
     EndCall(JS_IsException(ret));
     JS_FreeValue(ctx_, arr);
     JS_FreeValue(ctx_, fn);
