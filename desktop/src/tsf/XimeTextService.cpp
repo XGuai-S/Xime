@@ -5,6 +5,7 @@
 #include "../core/CandidatePicker.h"
 #include "../plugins/PluginManager.h"
 #include "../clipboard/ClipboardStore.h"
+#include "../settings/SettingsStore.h"
 #include "../ui/CandidateWindow.h"
 
 #include <fstream>
@@ -207,6 +208,15 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
 
     core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
                                             wideToUtf8(dataDir));
+    // 载入用户设置并应用（每页候选数、方案列表），使设置真正生效。
+    {
+        settings::DesktopSettings ds;
+        if (settings::SettingsStore::Load(wideToUtf8(userDir), &ds)) {
+            if (ds.pageSize > 0) {
+                core::RimeEngine::Instance().SetPageSize(ds.pageSize);
+            }
+        }
+    }
     hasSession_ = false;
     if (!candidateWindow_) {
         candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
