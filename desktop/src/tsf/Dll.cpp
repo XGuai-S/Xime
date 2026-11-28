@@ -1,4 +1,5 @@
-// TSF COM DLL 入口与类工厂。
+// TSF COM DLL entry and class factory. Exports DllGetClassObject etc. so that
+// TSF can CoCreateInstance the text service.
 #include "Guids.h"
 #include "XimeTextService.h"
 
@@ -68,11 +69,13 @@ public:
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     (void)hModule;
+    (void)reason;
     (void)reserved;
     return TRUE;
 }
 
-STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
+extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(
+    REFCLSID rclsid, REFIID riid, void** ppv) {
     if (!ppv) {
         return E_POINTER;
     }
@@ -89,14 +92,14 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
     return hr;
 }
 
-STDAPI DllCanUnloadNow() {
+extern "C" __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow() {
     return g_lockCount == 0 ? S_OK : S_FALSE;
 }
 
-STDAPI DllRegisterServer() {
-    return S_OK; // 由 xime-register.exe 完成注册。
+extern "C" __declspec(dllexport) HRESULT __stdcall DllRegisterServer() {
+    return S_OK; // registration handled by xime-register.exe
 }
 
-STDAPI DllUnregisterServer() {
+extern "C" __declspec(dllexport) HRESULT __stdcall DllUnregisterServer() {
     return S_OK;
 }

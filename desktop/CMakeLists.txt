@@ -87,6 +87,9 @@ if(MSVC)
 else()
   target_link_libraries(xime-tsf PRIVATE
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  # 静态链接 MinGW 运行时（libgcc/libstdc++/winpthread），使 DLL 自包含：
+  # TSF 被加载进 explorer 等任意进程，不能依赖外部 MinGW 运行时 DLL。
+  target_link_options(xime-tsf PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 target_link_libraries(xime-tsf PRIVATE
   ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp winmm xime-quickjs)
@@ -97,6 +100,9 @@ if(MSVC)
 endif()
 
 # 方案与词库放到 DLL 同级 data 目录（ActivateEx 从此处加载）。
+# MinGW 默认产物带 lib 前缀（libxime-tsf.dll），TSF 注册按 xime-tsf.dll 加载，
+# 故去掉前缀，使产物名在 MSVC/MinGW 下统一为 xime-tsf.dll。
+set_target_properties(xime-tsf PROPERTIES PREFIX "")
 add_custom_command(TARGET xime-tsf POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/assets/rime"
@@ -107,7 +113,10 @@ add_custom_command(TARGET xime-tsf POST_BUILD
 # 注册工具。
 add_executable(xime-register tools/Register.cpp)
 target_compile_definitions(xime-register PRIVATE UNICODE _UNICODE)
-target_link_libraries(xime-register PRIVATE ole32 shlwapi)
+target_link_libraries(xime-register PRIVATE ole32 uuid shlwapi)
+if(NOT MSVC)
+  target_link_options(xime-register PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
 add_dependencies(xime-register xime-tsf)
 
 # 引擎冒烟测试（仅在本机构建时启用；CI 亦可验证核心链路）。
