@@ -57,6 +57,7 @@ add_library(xime-tsf SHARED
   src/plugins/PluginHost.cpp
   src/voice/Wav.cpp
   src/voice/VoiceService.cpp
+  src/voice/AudioRecorder.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -84,7 +85,7 @@ else()
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
 endif()
 target_link_libraries(xime-tsf PRIVATE
-  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp xime-quickjs)
+  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp winmm xime-quickjs)
 if(MSVC)
   # msctf 是 MSVC/Windows SDK 的导入库（TSF 接口 IID 与 msctf.dll）；
   # MinGW 无同名导入库，其 TSF IID 由 libuuid.a 提供，故仅 MSVC 追加。
@@ -324,6 +325,12 @@ if(XIME_BUILD_SMOKE)
     src/ai/AiProtocol.cpp src/ai/Json.cpp src/ai/AiHttp.cpp)
   target_include_directories(xime-voice-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-voice-test PRIVATE ws2_32 winhttp)
+
+  # 麦克风采集器 headless 验证（无设备优雅失败；真机录音另验）。
+  add_executable(xime-recorder-test tests/AudioRecorderTest.cpp
+    src/voice/AudioRecorder.cpp src/voice/Wav.cpp)
+  target_include_directories(xime-recorder-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-recorder-test PRIVATE winmm)
 
   # WinHTTP 传输回环测试（https 走此路径；本机用 http 回环验证链路）。
   add_executable(xime-aihttp-winhttp-test tests/AiHttpWinhttpTest.cpp
