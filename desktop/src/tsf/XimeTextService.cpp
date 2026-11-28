@@ -7,6 +7,7 @@
 #include "../plugins/PluginManager.h"
 #include "../clipboard/ClipboardStore.h"
 #include "../settings/SettingsStore.h"
+#include "../settings/SettingsApplier.h"
 #include "../ui/CandidateWindow.h"
 
 #include <fstream>
@@ -227,6 +228,8 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
             if (ds.pageSize > 0) {
                 core::RimeEngine::Instance().SetPageSize(ds.pageSize);
             }
+            // 方案列表写入 default.custom.yaml（下次部署生效）。
+            settings::Apply(ds, wideToUtf8(userDir));
         }
     }
     hasSession_ = false;

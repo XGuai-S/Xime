@@ -54,6 +54,7 @@ add_library(xime-tsf SHARED
   src/clipboard/ClipboardStore.cpp
   src/clipboard/WinClipboard.cpp
   src/settings/SettingsStore.cpp
+  src/settings/SettingsApplier.cpp
   src/plugins/PluginHost.cpp
   src/plugins/PluginManager.cpp
   src/plugins/PluginHost.cpp
@@ -352,6 +353,11 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-settings-test tests/SettingsStoreTest.cpp
     src/settings/SettingsStore.cpp src/ai/Json.cpp)
   target_include_directories(xime-settings-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 设置应用：schemaList 落 default.custom.yaml（幂等/空列表不写）。
+  add_executable(xime-settingsapplier-test tests/SettingsApplierTest.cpp
+    src/settings/SettingsApplier.cpp src/core/SchemaListConfig.cpp)
+  target_include_directories(xime-settingsapplier-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
   # 插件生命周期 + host.quickSend 服务测试。
   add_executable(xime-pluglifecycle-test tests/PluginLifecycleTest.cpp
