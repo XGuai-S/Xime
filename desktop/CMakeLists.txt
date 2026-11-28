@@ -52,6 +52,8 @@ add_library(xime-tsf SHARED
   src/clipboard/ClipboardStore.cpp
   src/clipboard/WinClipboard.cpp
   src/plugins/PluginHost.cpp
+  src/voice/Wav.cpp
+  src/voice/VoiceService.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -294,4 +296,11 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-plugincand-smoke PRIVATE ole32 uuid xime-quickjs)
   add_dependencies(xime-plugincand-smoke xime-tsf)
+
+  # 语音链路：WAV 编码 + AI STT 回环上传（合成音频）。
+  add_executable(xime-voice-test tests/VoiceTest.cpp
+    src/voice/Wav.cpp src/voice/VoiceService.cpp
+    src/ai/AiProtocol.cpp src/ai/Json.cpp src/ai/AiHttp.cpp)
+  target_include_directories(xime-voice-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-voice-test PRIVATE ws2_32)
 endif()
