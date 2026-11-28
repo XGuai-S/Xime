@@ -8,24 +8,33 @@
 #include <string>
 #include <vector>
 
+#ifndef TF_CLIENTID_NULL
+#define TF_CLIENTID_NULL 0
+#endif
+
 namespace xime {
 namespace core {
 struct Candidate;
+struct ProcessResult;
+}
+namespace ui {
+class CandidateWindow;
 }
 namespace tsf {
 
-class CandidateWindow;
-
 // 文本服务：实现 TSF 必需的输入处理、按键接收与组合管理接口。
+// 说明：为兼容 MinGW 与 MSVC 两套头文件，只实现 ITfTextInputProcessor
+// （Activate/Deactivate 是 TSF 装载 TIP 的硬性接口）；ITfTextInputProcessorEx
+// 为可选增强，最小实现不依赖它。
 class XimeTextService :
-    public ITfTextInputProcessorEx,
+    public ITfTextInputProcessor,
     public ITfKeyEventSink,
     public ITfThreadMgrEventSink,
     public ITfTextEditSink,
     public ITfCompositionSink {
 public:
     XimeTextService();
-    ~XimeTextService() override;
+    ~XimeTextService();
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override;
@@ -35,9 +44,6 @@ public:
     // ITfTextInputProcessor
     STDMETHODIMP Activate(ITfThreadMgr* ptim, TfClientId tid) override;
     STDMETHODIMP Deactivate() override;
-
-    // ITfTextInputProcessorEx
-    STDMETHODIMP ActivateEx(ITfThreadMgr* ptim, TfClientId tid, DWORD dwFlags) override;
 
     // ITfKeyEventSink
     STDMETHODIMP OnSetFocus(BOOL fForeground) override;
@@ -67,11 +73,14 @@ private:
     bool HandleCandidateSelection(ITfContext* context, unsigned int vk);
     void ProcessInputKey(ITfContext* context, unsigned int vk,
                          bool shift, bool ctrl, bool alt, bool capslock);
+    void ApplyEngineResult(ITfContext* context,
+                           const core::ProcessResult& result);
     void CommitText(ITfContext* context, const std::string& utf8);
     void UpdateComposition(ITfContext* context, const std::string& preedit,
                            int caretBytes,
                            const std::vector<core::Candidate>& candidates);
     void EndComposition(ITfContext* context);
+    void EndCompositionInSession(ITfContext* context, TfEditCookie ec);
     ITfContext* CurrentContext() const;
 
     ULONG refCount_ = 1;
@@ -88,7 +97,7 @@ private:
     DWORD textEditSinkCookie_ = TF_INVALID_COOKIE;
     bool activated_ = false;
     bool hasSession_ = false;
-    CandidateWindow* candidateWindow_ = nullptr;
+    ui::CandidateWindow* candidateWindow_ = nullptr;
 };
 
 } // namespace tsf

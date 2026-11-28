@@ -15,6 +15,8 @@
 #include <rime/engine.h>
 #include <rime/schema.h>
 
+#include "t9_platform_compat.h"
+
 using namespace rime;
 
 // ── 农历数据表 ──

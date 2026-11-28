@@ -47,7 +47,7 @@ CandidateWindow::CandidateWindow() {
                                     LBS_NOINTEGRALHEIGHT,
                                 0, 0, 360, 220, hwnd_, nullptr,
                                 GetModuleHandleW(nullptr), nullptr);
-        SendMessageW(list_, LB_SETFONT,
+        SendMessageW(list_, WM_SETFONT,
                      reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
                      TRUE);
     }

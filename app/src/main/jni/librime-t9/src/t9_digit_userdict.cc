@@ -7,6 +7,7 @@
 #include <rime/dict/level_db.h>
 
 #include "t9_log.h"
+#include "t9_platform_compat.h"
 
 namespace rime {
 

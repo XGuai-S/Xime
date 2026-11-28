@@ -14,55 +14,11 @@ set(WITH_UNWIND "none" CACHE STRING "" FORCE)
 set(ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 
 # ── Boost 头文件（捆绑源码，无需下载）────────────────────────────────────────
-include_directories(
-  "${XIME_JNI_DIR}/boost/boost"
-  "${XIME_JNI_DIR}/boost/libs/algorithm/include"
-  "${XIME_JNI_DIR}/boost/libs/crc/include"
-  "${XIME_JNI_DIR}/boost/libs/dll/include"
-  "${XIME_JNI_DIR}/boost/libs/interprocess/include"
-  "${XIME_JNI_DIR}/boost/libs/range/include"
-  "${XIME_JNI_DIR}/boost/libs/regex/include"
-  "${XIME_JNI_DIR}/boost/libs/scope_exit/include"
-  "${XIME_JNI_DIR}/boost/libs/signals2/include"
-  "${XIME_JNI_DIR}/boost/libs/utility/include"
-  "${XIME_JNI_DIR}/boost/libs/uuid/include"
-  "${XIME_JNI_DIR}/boost/libs/assert/include"
-  "${XIME_JNI_DIR}/boost/libs/config/include"
-  "${XIME_JNI_DIR}/boost/libs/core/include"
-  "${XIME_JNI_DIR}/boost/libs/throw_exception/include"
-  "${XIME_JNI_DIR}/boost/libs/static_assert/include"
-  "${XIME_JNI_DIR}/boost/libs/mpl/include"
-  "${XIME_JNI_DIR}/boost/libs/preprocessor/include"
-  "${XIME_JNI_DIR}/boost/libs/vmd/include"
-  "${XIME_JNI_DIR}/boost/libs/type_traits/include"
-  "${XIME_JNI_DIR}/boost/libs/smart_ptr/include"
-  "${XIME_JNI_DIR}/boost/libs/move/include"
-  "${XIME_JNI_DIR}/boost/libs/container/include"
-  "${XIME_JNI_DIR}/boost/libs/container_hash/include"
-  "${XIME_JNI_DIR}/boost/libs/describe/include"
-  "${XIME_JNI_DIR}/boost/libs/intrusive/include"
-  "${XIME_JNI_DIR}/boost/libs/detail/include"
-  "${XIME_JNI_DIR}/boost/libs/integer/include"
-  "${XIME_JNI_DIR}/boost/libs/predef/include"
-  "${XIME_JNI_DIR}/boost/libs/io/include"
-  "${XIME_JNI_DIR}/boost/libs/lexical_cast/include"
-  "${XIME_JNI_DIR}/boost/libs/numeric/conversion/include"
-  "${XIME_JNI_DIR}/boost/libs/spirit/include"
-  "${XIME_JNI_DIR}/boost/libs/serialization/include"
-  "${XIME_JNI_DIR}/boost/libs/foreach/include"
-  "${XIME_JNI_DIR}/boost/libs/iterator/include"
-  "${XIME_JNI_DIR}/boost/libs/function/include"
-  "${XIME_JNI_DIR}/boost/libs/bind/include"
-  "${XIME_JNI_DIR}/boost/libs/tuple/include"
-  "${XIME_JNI_DIR}/boost/libs/optional/include"
-  "${XIME_JNI_DIR}/boost/libs/any/include"
-  "${XIME_JNI_DIR}/boost/libs/array/include"
-  "${XIME_JNI_DIR}/boost/libs/mp11/include"
-  "${XIME_JNI_DIR}/boost/libs/unordered/include"
-  "${XIME_JNI_DIR}/boost/libs/multi_index/include"
-  "${XIME_JNI_DIR}/boost/libs/variant/include"
-  "${XIME_JNI_DIR}/boost/libs/concept_check/include"
-)
+# 模块化 boost：superproject 头文件在 boost/，其余分散在 libs/*/include。
+# 逐一枚举易漏（如 type_index 被 variant 依赖），这里直接 glob 全部库头文件目录。
+include_directories("${XIME_JNI_DIR}/boost/boost")
+file(GLOB XIME_BOOST_LIB_INCLUDES "${XIME_JNI_DIR}/boost/libs/*/include")
+include_directories(${XIME_BOOST_LIB_INCLUDES})
 
 # ── 捆绑依赖 ─────────────────────────────────────────────────────────────────
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
@@ -121,7 +77,12 @@ function(xime_copy_plugin name source)
 endfunction()
 
 xime_copy_plugin(librime-t9 "${XIME_JNI_DIR}/librime-t9")
-xime_copy_plugin(librime-correction "${XIME_JNI_DIR}/librime-correction")
+# librime-correction 直接依赖 <android/log.h>（未做平台隔离），桌面默认不启用。
+# 这是安卓侧的邻键纠错定制；后续如需桌面纠错，应先把其日志抽象到跨平台层。
+option(XIME_ENABLE_CORRECTION "启用 librime-correction 插件（需 android/log.h）" OFF)
+if(XIME_ENABLE_CORRECTION)
+  xime_copy_plugin(librime-correction "${XIME_JNI_DIR}/librime-correction")
+endif()
 xime_copy_plugin(librime-octagram "${XIME_JNI_DIR}/librime-octagram")
 xime_copy_plugin(librime-predict "${XIME_JNI_DIR}/librime-predict")
 

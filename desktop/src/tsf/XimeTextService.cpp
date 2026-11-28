@@ -4,7 +4,7 @@
 #include "../core/RimeEngine.h"
 #include "../ui/CandidateWindow.h"
 
-#include <algorithm>
+#include <functional>
 #include <new>
 #include <string>
 
@@ -35,12 +35,64 @@ void SafeRelease(IUnknown* p) {
     }
 }
 
+// TSF 的所有文本改动（提交、组合、清空）都必须在 edit session 内、凭有效
+// edit cookie 执行。这里用一个同步 edit session 封装，回调里拿 cookie 干活。
+class FuncEditSession : public ITfEditSession {
+public:
+    explicit FuncEditSession(std::function<HRESULT(TfEditCookie)> fn)
+        : fn_(std::move(fn)) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+            *ppv = static_cast<ITfEditSession*>(this);
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return 2; }
+    STDMETHODIMP_(ULONG) Release() override { return 1; }
+
+    STDMETHODIMP DoEditSession(TfEditCookie ec) override {
+        result_ = fn_(ec);
+        return S_OK;
+    }
+
+    HRESULT Result() const { return result_; }
+
+private:
+    std::function<HRESULT(TfEditCookie)> fn_;
+    HRESULT result_ = E_FAIL;
+};
+
+HRESULT SyncEdit(ITfContext* context, TfClientId clientId,
+                 std::function<HRESULT(TfEditCookie)> fn) {
+    if (!context) {
+        return E_INVALIDARG;
+    }
+    FuncEditSession session(std::move(fn));
+    HRESULT sessionHr = S_OK;
+    const HRESULT hr = context->RequestEditSession(
+        clientId, &session, TF_ES_SYNC | TF_ES_READWRITE, &sessionHr);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    if (FAILED(sessionHr)) {
+        return sessionHr;
+    }
+    return session.Result();
+}
+
 } // namespace
 
 XimeTextService::XimeTextService() = default;
 
 XimeTextService::~XimeTextService() {
-    SafeRelease(candidateWindow_);
+    delete candidateWindow_;
+    candidateWindow_ = nullptr;
     SafeRelease(composition_);
     SafeRelease(context_);
     SafeRelease(docMgr_);
@@ -58,8 +110,6 @@ STDMETHODIMP XimeTextService::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<IUnknown*>(static_cast<ITfTextInputProcessor*>(this));
     } else if (riid == IID_ITfTextInputProcessor) {
         *ppv = static_cast<ITfTextInputProcessor*>(this);
-    } else if (riid == IID_ITfTextInputProcessorEx) {
-        *ppv = static_cast<ITfTextInputProcessorEx*>(this);
     } else if (riid == IID_ITfKeyEventSink) {
         *ppv = static_cast<ITfKeyEventSink*>(this);
     } else if (riid == IID_ITfThreadMgrEventSink) {
@@ -90,12 +140,6 @@ STDMETHODIMP_(ULONG) XimeTextService::Release() {
 // ── ITfTextInputProcessor ───────────────────────────────────────────────────
 
 STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
-    return ActivateEx(ptim, tid, 0);
-}
-
-STDMETHODIMP XimeTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
-                                         DWORD dwFlags) {
-    (void)dwFlags;
     if (!ptim) {
         return E_INVALIDARG;
     }
@@ -107,8 +151,8 @@ STDMETHODIMP XimeTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
     threadMgr_->AddRef();
     clientId_ = tid;
 
-    if (SUCCEEDED(threadMgr_->QueryInterface(IID_ITfSource,
-                                             reinterpret_cast<void**>(&threadMgrSource_)))) {
+    if (SUCCEEDED(threadMgr_->QueryInterface(
+            IID_ITfSource, reinterpret_cast<void**>(&threadMgrSource_)))) {
         threadMgrSource_->AdviseSink(IID_ITfThreadMgrEventSink,
                                      static_cast<ITfThreadMgrEventSink*>(this),
                                      &threadMgrSinkCookie_);
@@ -120,7 +164,7 @@ STDMETHODIMP XimeTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                           TRUE);
     }
 
-    // 初始化 librime：用户目录放在 %LOCALAPPDATA%\Xime，共享数据目录取模块目录。
+    // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
     wchar_t modulePath[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
     std::wstring dir(modulePath);
@@ -153,7 +197,7 @@ STDMETHODIMP XimeTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid,
                                             wideToUtf8(dataDir));
     hasSession_ = false;
     if (!candidateWindow_) {
-        candidateWindow_ = new (std::nothrow) CandidateWindow();
+        candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
     }
     activated_ = true;
     return S_OK;
@@ -205,30 +249,42 @@ STDMETHODIMP XimeTextService::OnSetFocus(BOOL fForeground) {
 
 STDMETHODIMP XimeTextService::OnTestKeyDown(ITfContext* pic, WPARAM wParam,
                                             LPARAM lParam, BOOL* pfEaten) {
+    (void)pic;
+    (void)wParam;
+    (void)lParam;
     *pfEaten = FALSE;
     return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnTestKeyUp(ITfContext* pic, WPARAM wParam,
                                           LPARAM lParam, BOOL* pfEaten) {
+    (void)pic;
+    (void)wParam;
+    (void)lParam;
     *pfEaten = FALSE;
     return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                                       LPARAM lParam, BOOL* pfEaten) {
+    (void)pic;
+    (void)wParam;
+    (void)lParam;
     *pfEaten = FALSE;
     return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnPreservedKey(ITfContext* pic, REFGUID rguid,
                                              BOOL* pfEaten) {
+    (void)pic;
+    (void)rguid;
     *pfEaten = FALSE;
     return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                         LPARAM lParam, BOOL* pfEaten) {
+    (void)lParam;
     *pfEaten = FALSE;
     if (!pic || !activated_) {
         return S_OK;
@@ -240,7 +296,6 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
     const bool capslock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
 
-    // 修饰键与系统快捷键不拦截。
     if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_CAPITAL) {
         return S_OK;
     }
@@ -252,7 +307,6 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
-    // 候选窗口存在时，数字键用于直接选词。
     if (candidateWindow_ && candidateWindow_->IsVisible() &&
         HandleCandidateSelection(pic, vk)) {
         *pfEaten = TRUE;
@@ -287,35 +341,27 @@ bool XimeTextService::HandleCandidateSelection(ITfContext* context,
     if (index < 0) {
         return false;
     }
-    // 候选选择走 Rime 的数字键；由 Rime 决定消费还是上屏。
-    const unsigned int rimeKey = vk;
-    const auto result = core::RimeEngine::Instance().ProcessKeyAndGetResult(
-        rimeKey, 0);
-    if (!result.committedText.empty()) {
-        CommitText(context, result.committedText);
-    }
-    if (result.candidates.empty()) {
-        EndComposition(context);
-    } else {
-        UpdateComposition(context, result.preeditText, result.preeditCursorPos,
-                          result.candidates);
-    }
+    const auto result =
+        core::RimeEngine::Instance().ProcessKeyAndGetResult(vk, 0);
+    ApplyEngineResult(context, result);
     return true;
 }
 
 void XimeTextService::ProcessInputKey(ITfContext* context, unsigned int vk,
                                       bool shift, bool ctrl, bool alt,
                                       bool capslock) {
-    (void)ctrl;
-    (void)alt;
     const unsigned int rimeKey = core::ToRimeKey(vk, shift, capslock);
     const unsigned int mask = core::ToRimeMask(shift, ctrl, alt);
     if (rimeKey == 0) {
         return;
     }
-
     const auto result =
         core::RimeEngine::Instance().ProcessKeyAndGetResult(rimeKey, mask);
+    ApplyEngineResult(context, result);
+}
+
+void XimeTextService::ApplyEngineResult(ITfContext* context,
+                                        const core::ProcessResult& result) {
     if (!result.committedText.empty()) {
         CommitText(context, result.committedText);
     }
@@ -331,20 +377,24 @@ void XimeTextService::ProcessInputKey(ITfContext* context, unsigned int vk,
 
 void XimeTextService::CommitText(ITfContext* context,
                                  const std::string& utf8) {
-    if (context && !utf8.empty()) {
-        EndComposition(context);
-        const std::wstring text = Utf8ToWide(utf8);
-        ITfInsertAtSelection* insert = nullptr;
-        if (SUCCEEDED(context->QueryInterface(
-                IID_ITfInsertAtSelection, reinterpret_cast<void**>(&insert)))) {
-            ITfRange* range = nullptr;
-            insert->InsertTextAtSelection(TF_DEFAULT_SELECTION, text.c_str(),
-                                          static_cast<LONG>(text.size()),
-                                          &range, nullptr);
-            SafeRelease(range);
-            SafeRelease(insert);
-        }
+    if (!context || utf8.empty()) {
+        return;
     }
+    const std::wstring text = Utf8ToWide(utf8);
+    SyncEdit(context, clientId_, [this, context, &text](TfEditCookie ec) -> HRESULT {
+        EndCompositionInSession(context, ec);
+        ITfInsertAtSelection* insert = nullptr;
+        if (FAILED(context->QueryInterface(
+                IID_ITfInsertAtSelection, reinterpret_cast<void**>(&insert)))) {
+            return E_FAIL;
+        }
+        ITfRange* range = nullptr;
+        const HRESULT hr = insert->InsertTextAtSelection(
+            ec, 0, text.c_str(), static_cast<LONG>(text.size()), &range);
+        SafeRelease(range);
+        SafeRelease(insert);
+        return hr;
+    });
     if (candidateWindow_) {
         candidateWindow_->Hide();
     }
@@ -357,45 +407,52 @@ void XimeTextService::UpdateComposition(
         return;
     }
     const std::wstring text = Utf8ToWide(preedit);
-
-    if (!composition_) {
-        ITfContextComposition* ctxComp = nullptr;
-        if (FAILED(context->QueryInterface(
-                IID_ITfContextComposition,
-                reinterpret_cast<void**>(&ctxComp)))) {
-            return;
-        }
-        ITfRange* caret = nullptr;
-        TF_SELECTION sel = {0};
-        ULONG fetched = 0;
-        if (SUCCEEDED(context->GetSelection(TF_DEFAULT_SELECTION, 1, &sel,
-                                            &fetched)) &&
-            fetched > 0) {
-            caret = sel.range;
-        }
-        if (caret) {
-            ctxComp->StartComposition(context, caret,
-                                      static_cast<ITfCompositionSink*>(this),
-                                      &composition_);
-        }
-        SafeRelease(ctxComp);
+    LONG caretUtf16 = 0;
+    if (caretBytes > 0) {
+        caretUtf16 = static_cast<LONG>(
+            Utf8ToWide(preedit.substr(0, static_cast<size_t>(caretBytes))).size());
     }
 
-    if (composition_) {
-        ITfRange* range = nullptr;
-        if (SUCCEEDED(composition_->GetRange(&range))) {
-            range->SetText(TF_STRING_INSERTION, text.c_str(),
-                           static_cast<LONG>(text.size()));
-            // caretBytes 是 UTF-8 字节偏移，近似换算为 UTF-16 单元偏移。
-            LONG offset = 0;
-            if (caretBytes > 0) {
-                offset = static_cast<LONG>(Utf8ToWide(preedit.substr(
-                    0, static_cast<size_t>(caretBytes))).size());
-            }
-            range->Collapse(offset > 0 ? TF_ANCHOR_END : TF_ANCHOR_START);
-            SafeRelease(range);
-        }
-    }
+    SyncEdit(context, clientId_,
+             [this, context, &text, caretUtf16](TfEditCookie ec) -> HRESULT {
+                 if (!composition_) {
+                     ITfContextComposition* ctxComp = nullptr;
+                     if (FAILED(context->QueryInterface(
+                             IID_ITfContextComposition,
+                             reinterpret_cast<void**>(&ctxComp)))) {
+                         return E_FAIL;
+                     }
+                     TF_SELECTION sel = {0};
+                     ULONG fetched = 0;
+                     ITfRange* caret = nullptr;
+                     if (SUCCEEDED(context->GetSelection(
+                             ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) &&
+                         fetched > 0) {
+                         caret = sel.range;
+                     }
+                     if (caret) {
+                         ctxComp->StartComposition(
+                             ec, caret,
+                             static_cast<ITfCompositionSink*>(this),
+                             &composition_);
+                     }
+                     SafeRelease(caret);
+                     SafeRelease(ctxComp);
+                 }
+                 if (!composition_) {
+                     return E_FAIL;
+                 }
+                 ITfRange* range = nullptr;
+                 if (FAILED(composition_->GetRange(&range))) {
+                     return E_FAIL;
+                 }
+                 range->SetText(ec, 0, text.c_str(),
+                                static_cast<LONG>(text.size()));
+                 range->Collapse(ec, caretUtf16 > 0 ? TF_ANCHOR_END
+                                                    : TF_ANCHOR_START);
+                 SafeRelease(range);
+                 return S_OK;
+             });
 
     if (candidateWindow_) {
         candidateWindow_->Update(candidates, caretBytes);
@@ -404,13 +461,34 @@ void XimeTextService::UpdateComposition(
 }
 
 void XimeTextService::EndComposition(ITfContext* context) {
+    if (!composition_) {
+        if (candidateWindow_) {
+            candidateWindow_->Hide();
+        }
+        return;
+    }
+    if (context) {
+        SyncEdit(context, clientId_,
+                 [this, context](TfEditCookie ec) -> HRESULT {
+                     EndCompositionInSession(context, ec);
+                     return S_OK;
+                 });
+    }
     if (composition_) {
-        composition_->EndComposition(context);
         SafeRelease(composition_);
         composition_ = nullptr;
     }
     if (candidateWindow_) {
         candidateWindow_->Hide();
+    }
+}
+
+void XimeTextService::EndCompositionInSession(ITfContext* context,
+                                              TfEditCookie ec) {
+    if (composition_) {
+        composition_->EndComposition(ec);
+        SafeRelease(composition_);
+        composition_ = nullptr;
     }
 }
 
