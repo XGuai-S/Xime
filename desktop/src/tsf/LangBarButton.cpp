@@ -76,7 +76,12 @@ STDMETHODIMP LangBarButton::GetInfo(TF_LANGBARITEMINFO* info) {
         info->dwStyle = TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWTOOLTIP;
         info->ulSort = 0;
         wcscpy_s(info->szDescription, TF_LBI_DESC_MAXLEN, L"Xime 输入法");
-        xime::log::WriteDebug("语言栏 GetInfo clsid=%08X style=0x%X", static_cast<unsigned>(info->clsidService.Data1), static_cast<unsigned>(info->dwStyle));
+        xime::log::WriteInfo(
+            "语言栏 GetInfo guid=%08X-%04X-%04X style=0x%X desc=%ls",
+            static_cast<unsigned>(info->guidItem.Data1),
+            static_cast<unsigned>(info->guidItem.Data2),
+            static_cast<unsigned>(info->guidItem.Data3),
+            static_cast<unsigned>(info->dwStyle), info->szDescription);
         return S_OK;
     } catch (...) {
         return E_FAIL;

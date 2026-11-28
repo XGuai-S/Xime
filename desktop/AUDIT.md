@@ -128,8 +128,52 @@
 
 ---
 
-## 四、已修复的历史崩溃（本轮之前）
+## 三·五、TSF 层第二轮修复（日志驱动）
 
+加入 `xime-tsf.log` 后立刻暴露出 4 个此前完全看不见的缺陷：
+
+### P0 组合文本永久残留在用户文档
+- **位置**：`XimeTextService.cpp` `EndCompositionInSession`
+- **问题**：`ITfComposition::EndComposition` 只移除组合属性，**不删除文本**。
+  选词后 `InsertTextAtSelection` 再插入候选 → 文档里变成 `nihao你好`。
+  Esc 取消组合同样把 `nihao` 落进文档。
+- **修复**：结束组合前在同一 edit session 内把组合 range `SetText` 为空。
+
+### P0 按键回调里 Sleep 最长 90 秒冻结宿主 UI
+- **位置**：`EnsureSession`
+- **问题**：`for (i<900) Sleep(100)` 等待部署完成。该函数由 `OnKeyDown`、
+  `OnPreservedKey`、语言栏点击调用，全部跑在宿主 UI 线程 →
+  首启部署期间 explorer/Word 被冻成"未响应"，用户只能强杀。
+- **修复**：按键路径改为**非阻塞** —— 部署中或仍无产物时直接返回，
+  放弃本次按键（不吞键），由用户下次按键自然重试。
+
+### P0 单例会话被多个 TIP 实例互相销毁
+- **位置**：`RimeEngine::CreateSession` / `DestroySession`
+- **问题**：TSF 为每个激活线程建一个 `XimeTextService`，但引擎是进程级单例，
+  `session_` 只有一份。实例 B 建会话会覆盖 A 正在用的；A 的 `Deactivate`
+  又会销毁 B 的会话 → 文本可能进入错误文档。
+- **修复**：会话改**引用计数**，最后一个实例销毁时才真正 `destroy_session`。
+
+### P1 Deactivate 不撤销保留键、不结束组合
+- **位置**：`Deactivate`
+- **问题**：只 `SafeRelease(composition_)`，不结束组合（残留编码串）；
+  且全仓**没有任何 `UnpreserveKey`** → Shift/F4 永久绑定在旧 clientId 上，
+  重激活时 `PreserveKey` 返回 `TF_E_ALREADY_EXISTS` 被忽略。
+- **修复**：`Deactivate` 里先 `EndComposition`（清空 range），
+  再对两个 GUID 调 `UnpreserveKey`。
+
+### 语言栏：平台限制（已确认为不可用）
+`ITfLangBarItemMgr::AddItem` 在 Win10 19045 上恒返回 `E_FAIL`。
+已系统性排除：vtable 12 槽布局（验证正确）、CLSID 6 种组合（含 `CLSID_NULL`
+与微软拼音真实 CLSID）、5 种 `dwStyle`、`GUID_LBI_INPUTMODE`、
+注册表 `Enable`/`ShowStatus=3`、`TF_CreateLangBarItemMgr`。
+根因是 Win10 1809+ 的任务栏输入指示器由 `TextInputHost`（Windows 输入体验）
+接管，不再渲染传统 `ITfLangBarItem` 项。
+
+**不影响输入功能**：`Shift` 切换中英（保留键已确认注册成功 `hr=0`）、
+`F4` 切换方案、`Win+Space` 切换输入法均正常。语言栏缺失仅是任务栏图标。
+
+## 四、已修复的历史崩溃（本轮之前）
 | 问题 | 症状 | 修复 |
 |---|---|---|
 | 15 个 TSF COM 回调无 `try/catch` | 宿主进程 `TextInputFramework.dll` + `0xC000041D` 崩溃（曾打崩 DSH 与资源管理器） | 全部加异常边界，`xime-exsafe-test` 锁定 |

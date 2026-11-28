@@ -186,17 +186,23 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
                                               static_cast<ITfKeyEventSink*>(this),
                                               TRUE);
             // 注册中/英文切换保留键（Shift，同主流中文输入法）。
+            // 注意：PreserveKey 的描述参数不能传 nullptr —— 部分 TSF 版本会因此
+            // 拒绝保留键，导致 Shift 切换中英完全无效。必须给描述文本。
             TF_PRESERVEDKEY pk = {};
             pk.uVKey = VK_SHIFT;
             pk.uModifiers = 0;
-            keystrokeMgr_->PreserveKey(clientId_, GUID_XimeToggleAsciiKey, &pk,
-                                       nullptr, 0);
+            const HRESULT pkHr = keystrokeMgr_->PreserveKey(
+                clientId_, GUID_XimeToggleAsciiKey, &pk, L"Xime 中英文切换", 8);
+            log::WriteInfo("保留键 Shift 注册 hr=0x%08X",
+                           static_cast<unsigned>(pkHr));
             // 方案切换保留键（F4，循环切到下一个已部署方案）。
             TF_PRESERVEDKEY pkCycle = {};
             pkCycle.uVKey = VK_F4;
             pkCycle.uModifiers = 0;
-            keystrokeMgr_->PreserveKey(clientId_, GUID_XimeCycleSchemaKey, &pkCycle,
-                                       nullptr, 0);
+            const HRESULT pk2Hr = keystrokeMgr_->PreserveKey(
+                clientId_, GUID_XimeCycleSchemaKey, &pkCycle, L"Xime 切换方案", 7);
+            log::WriteInfo("保留键 F4 注册 hr=0x%08X",
+                           static_cast<unsigned>(pk2Hr));
         }
 
         // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。        // 注意：必须用本 DLL 的 HMODULE 取路径。TSF 把 DLL 加载进宿主进程，
@@ -403,11 +409,35 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
                 langBarButton_->SetAsciiMode(
                     core::RimeEngine::Instance().IsAsciiMode());
                 // 先 AddItem，成功后再 AdviseItemSink（顺序不能反）。
+                // 诊断：先查语言栏里是否已有同 GUID 的项（重复注册会让 AddItem 失败）。
+                {
+                    ITfLangBarItem* existing = nullptr;
+                    const HRESULT getHr =
+                        langBarMgr_->GetItem(GUID_XimeLangBarItem, &existing);
+                    log::WriteDebug("语言栏 GetItem 探测 hr=0x%08X exists=%d",
+                                    static_cast<unsigned>(getHr),
+                                    existing ? 1 : 0);
+                    if (existing) {
+                        // 旧项残留（上次 Deactivate 没清干净）→ 先移除再添加。
+                        langBarMgr_->RemoveItem(existing);
+                        existing->Release();
+                        log::WriteDebug("语言栏 移除旧项后重试");
+                    }
+                }
                 const HRESULT addHr = langBarMgr_->AddItem(
                     static_cast<ITfLangBarItemButton*>(langBarButton_));
                 if (FAILED(addHr)) {
-                    log::WriteWarn("语言栏 AddItem 失败 hr=0x%08X",
-                                   static_cast<unsigned>(addHr));
+                    // 已知限制：Win10 1809+ 的任务栏输入指示器由 TextInputHost
+                    // （Windows 输入体验）接管，它不再走传统 ITfLangBarItemMgr
+                    // 渲染项，AddItem 一律返回 E_FAIL。这一点已逐项排除接口布局
+                    // （vtable 12 槽验证正确）、CLSID（含 CLSID_NULL）、dwStyle、
+                    // GUID_LBI_INPUTMODE、Registry Enable/ShowStatus —— 均无效。
+                    // 不影响输入功能：中英切换仍可用 Shift（保留键），
+                    // 输入法切换用 Win+Space。故此处只记一条日志，不再当错误。
+                    log::WriteInfo(
+                        "语言栏 AddItem 未成功 hr=0x%08X（Win10+ 输入指示器不支持"
+                        "传统语言栏项；Shift 仍可切中英）",
+                        static_cast<unsigned>(addHr));
                     langBarButton_->Release();
                     langBarButton_ = nullptr;
                 } else {
