@@ -68,5 +68,61 @@ DictationResult FinalizeDictation(const AppSettings& settings,
     return result;
 }
 
+HelpWriteResult HelpWrite(const AppSettings& settings,
+                          const ProviderVault& vault,
+                          const std::string& selectedText,
+                          const std::string& instruction,
+                          const HttpPostFn& http) {
+    HelpWriteResult result;
+    result.text = selectedText;
+    if (selectedText.empty()) {
+        result.error = "empty_text";
+        return result;
+    }
+
+    const std::string providerId = settings.llm.providerId;
+    const std::string apiKey = vault.KeyOf(providerId);
+    if (apiKey.empty()) {
+        result.error = "no_llm_credential";
+        return result;
+    }
+
+    const std::string systemPrompt =
+        "你是中文输入法的 AI 帮写助手。严格按用户指令改写给定文本，"
+        "只输出改写后的正文，不要解释、不要复述指令。";
+    const std::string userText = "指令：" + instruction + "\n\n文本：" + selectedText;
+
+    ChatRequestOptions opts;
+    opts.model = settings.llm.model;
+    opts.systemPrompt = systemPrompt;
+    opts.userText = userText;
+    opts.temperature = 0.35;
+
+    AiHttpRequest req;
+    req.method = "POST";
+    req.url = ResolveChatEndpoint(vault.BaseUrlOf(providerId));
+    req.body = BuildChatRequestBody(opts);
+    req.headers["Content-Type"] = "application/json";
+    req.headers["Authorization"] = "Bearer " + apiKey;
+
+    AiHttpResponse resp;
+    if (!http || !http(req, resp)) {
+        result.error = "http_failed";
+        return result;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+        result.error = "http_status_" + std::to_string(resp.status);
+        return result;
+    }
+    const std::string rewritten = ExtractChatContent(resp.body);
+    if (rewritten.empty()) {
+        result.error = "empty_result";
+        return result;
+    }
+    result.text = rewritten;
+    result.ok = true;
+    return result;
+}
+
 } // namespace ai
 } // namespace xime

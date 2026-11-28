@@ -42,5 +42,18 @@ DictationResult FinalizeDictation(const AppSettings& settings,
                                   const std::string& rawStt,
                                   const HttpPostFn& http);
 
+// AI 帮写：对选中文本按用户指令改写（润色/续写/翻译/改写风格等）。
+// 无凭据或失败时 ok=false 并给出 error，text 保持输入原文（不静默丢内容）。
+struct HelpWriteResult {
+    bool ok = false;
+    std::string text;   // 成功为改写结果；失败为输入原文
+    std::string error;
+};
+HelpWriteResult HelpWrite(const AppSettings& settings,
+                          const ProviderVault& vault,
+                          const std::string& selectedText,
+                          const std::string& instruction,
+                          const HttpPostFn& http);
+
 } // namespace ai
 } // namespace xime

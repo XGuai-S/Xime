@@ -115,6 +115,48 @@ int main() {
         Check(r.error == "http_failed", "transport fail error");
     }
 
+    // 7. AI 帮写：成功改写
+    {
+        int calls = 0;
+        auto http = [&](const AiHttpRequest& req, AiHttpResponse& resp) {
+            ++calls;
+            Check(req.url == "https://api.siliconflow.cn/v1/chat/completions",
+                  "helpwrite url");
+            Check(req.body.find("改成正式语气") != std::string::npos,
+                  "helpwrite instruction in body");
+            Check(req.body.find("原文内容") != std::string::npos,
+                  "helpwrite selected text in body");
+            resp.status = 200;
+            resp.body = "{\"choices\":[{\"message\":{\"content\":\"尊敬的原文内容\"}}]}";
+            return true;
+        };
+        auto r = HelpWrite(settings, vault, "原文内容", "改成正式语气", http);
+        Check(r.ok && r.text == "尊敬的原文内容", "helpwrite success");
+        Check(calls == 1, "helpwrite one call");
+    }
+
+    // 8. AI 帮写：无凭据 → 保留原文、失败
+    {
+        ProviderVault empty;
+        int calls = 0;
+        auto http = [&](const AiHttpRequest&, AiHttpResponse&) {
+            ++calls; return true;
+        };
+        auto r = HelpWrite(settings, empty, "原文", "润色", http);
+        Check(!r.ok && r.text == "原文", "helpwrite no credential keeps text");
+        Check(r.error == "no_llm_credential" && calls == 0, "helpwrite no credential no call");
+    }
+
+    // 9. AI 帮写：服务 500 → 保留原文
+    {
+        auto http = [&](const AiHttpRequest&, AiHttpResponse& resp) {
+            resp.status = 500; return true;
+        };
+        auto r = HelpWrite(settings, vault, "原文", "润色", http);
+        Check(!r.ok && r.text == "原文", "helpwrite http 500 keeps text");
+        Check(r.error == "http_status_500", "helpwrite http 500 error");
+    }
+
     if (fails == 0) {
         std::printf("AISERVICE_TEST_OK\n");
         return 0;
