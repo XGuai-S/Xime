@@ -9,6 +9,7 @@
 #include "../settings/SettingsStore.h"
 #include "../settings/SettingsApplier.h"
 #include "../ui/CandidateWindow.h"
+#include "LangBarButton.h"
 
 #include <fstream>
 #include <functional>
@@ -131,6 +132,8 @@ STDMETHODIMP XimeTextService::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfTextEditSink*>(this);
     } else if (riid == IID_ITfCompositionSink) {
         *ppv = static_cast<ITfCompositionSink*>(this);
+    } else if (riid == IID_ITfLangBarItemSink) {
+        *ppv = static_cast<ITfLangBarItemSink*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -193,8 +196,7 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
                                        nullptr, 0);
         }
 
-        // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
-        // 注意：必须用本 DLL 的 HMODULE 取路径。TSF 把 DLL 加载进宿主进程，
+        // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。        // 注意：必须用本 DLL 的 HMODULE 取路径。TSF 把 DLL 加载进宿主进程，
         // GetModuleFileNameW(nullptr, ...) 返回的是宿主 EXE（explorer.exe 等）的路径，
         // 会把共享数据目录算成 C:\Windows\data，导致引擎一个方案都加载不到、
         // 按键全部直通（表现为"只能打英文"）。
@@ -336,6 +338,48 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
                     }
                 });
         }
+        // 注册语言栏项（输入指示器）：显示 logo / 中英状态，支持单击切换、右键设置。
+        // 没有这一步，任务栏只有一个空白条目，且无法从指示器切换中/英。
+        if (!threadMgr_->QueryInterface(IID_ITfLangBarItemMgr,
+                                        reinterpret_cast<void**>(&langBarMgr_)) ||
+            !langBarMgr_) {
+            langBarMgr_ = nullptr;
+        }
+        if (langBarMgr_) {
+            DWORD cookie = TF_INVALID_COOKIE;
+            if (SUCCEEDED(langBarMgr_->AdviseItemSink(
+                    static_cast<ITfLangBarItemSink*>(this), &cookie,
+                    GUID_XimeLangBarItem))) {
+                langBarSinkCookie_ = cookie;
+            }
+            langBarButton_ = new (std::nothrow) LangBarButton(
+                static_cast<ITfLangBarItemSink*>(this));
+            if (langBarButton_) {
+                langBarButton_->SetHandlers(
+                    this,
+                    [](void* ctx) {
+                        auto* self = static_cast<XimeTextService*>(ctx);
+                        if (self->EnsureSession()) {
+                            core::RimeEngine::Instance().ToggleAsciiMode();
+                        }
+                    },
+                    [](void* ctx) {
+                        // 右键/菜单：打开设置（Ask Rime 的 settings.json 目录）。
+                        auto* self = static_cast<XimeTextService*>(ctx);
+                        self->OpenSettings();
+                    });
+                // 与当前 ascii 状态对齐（重新激活时可能已经是英文）。
+                langBarButton_->SetAsciiMode(
+                    core::RimeEngine::Instance().IsAsciiMode());
+                if (FAILED(langBarMgr_->AddItem(
+                        static_cast<ITfLangBarItemButton*>(langBarButton_)))) {
+                    // 语言栏不可用（如无语言栏的系统）不影响输入主体。
+                    langBarButton_->Release();
+                    langBarButton_ = nullptr;
+                }
+            }
+        }
+
         activated_ = true;
         return S_OK;
     } catch (...) {
@@ -360,6 +404,22 @@ STDMETHODIMP XimeTextService::Deactivate() {
 
         if (candidateWindow_) {
             candidateWindow_->Hide();
+        }
+
+        // 先移除语言栏项：之后 langBarButton_ 释放，语言栏不能再回调它。
+        if (langBarMgr_ && langBarButton_) {
+            langBarMgr_->RemoveItem(
+                static_cast<ITfLangBarItemButton*>(langBarButton_));
+            langBarButton_->Release();
+            langBarButton_ = nullptr;
+        }
+        if (langBarMgr_) {
+            if (langBarSinkCookie_ != TF_INVALID_COOKIE) {
+                langBarMgr_->UnadviseItemSink(langBarSinkCookie_);
+                langBarSinkCookie_ = TF_INVALID_COOKIE;
+            }
+            langBarMgr_->Release();
+            langBarMgr_ = nullptr;
         }
 
         if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
@@ -483,6 +543,7 @@ STDMETHODIMP XimeTextService::OnPreservedKey(ITfContext* pic, REFGUID rguid,
         if (IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
             if (EnsureSession()) {
                 core::RimeEngine::Instance().ToggleAsciiMode();
+                SyncLangBarState();
                 *pfEaten = TRUE;
             }
             return S_OK;
@@ -686,6 +747,57 @@ void XimeTextService::CommitText(ITfContext* context,
     }
 }
 
+// 取组合文本的屏幕矩形（候选窗定位的唯一可靠来源）。
+// 优先对 composition range 调 ITfContextView::GetTextExt；失败再退回
+// 选区 range 的矩形；都失败则返回 false 由候选窗自行兜底。
+bool XimeTextService::GetCompositionScreenRect(ITfContext* context,
+                                              TfEditCookie ec, RECT* out) {
+    if (!context || !out) {
+        return false;
+    }
+    ITfContextView* view = nullptr;
+    if (FAILED(context->GetActiveView(&view)) || !view) {
+        return false;
+    }
+
+    bool ok = false;
+    RECT rc = {0, 0, 0, 0};
+    BOOL clipped = FALSE;
+
+    // 1) 组合范围（最贴合"跟着光标走"的直觉）。
+    ITfRange* range = nullptr;
+    if (composition_ && SUCCEEDED(composition_->GetRange(&range)) && range) {
+        if (SUCCEEDED(view->GetTextExt(ec, range, &rc, &clipped)) &&
+            (rc.right > rc.left || rc.bottom > rc.top)) {
+            ok = true;
+        }
+        SafeRelease(range);
+        range = nullptr;
+    }
+
+    // 2) 退化为当前选区。
+    if (!ok) {
+        TF_SELECTION sel = {0};
+        ULONG fetched = 0;
+        if (SUCCEEDED(context->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel,
+                                           &fetched)) &&
+            fetched > 0 && sel.range) {
+            BOOL clipped2 = FALSE;
+            if (SUCCEEDED(view->GetTextExt(ec, sel.range, &rc, &clipped2)) &&
+                (rc.right > rc.left || rc.bottom > rc.top)) {
+                ok = true;
+            }
+            SafeRelease(sel.range);
+        }
+    }
+
+    SafeRelease(view);
+    if (ok) {
+        *out = rc;
+    }
+    return ok;
+}
+
 void XimeTextService::UpdateComposition(
     ITfContext* context, const std::string& preedit, int caretBytes,
     const std::vector<core::Candidate>& candidates) {
@@ -699,8 +811,12 @@ void XimeTextService::UpdateComposition(
             Utf8ToWide(preedit.substr(0, static_cast<size_t>(caretBytes))).size());
     }
 
+    // 候选窗位置：在同一 edit session 内取组合文本的屏幕矩形。
+    RECT caretRect = {0, 0, 0, 0};
+    bool caretOk = false;
     SyncEdit(context, clientId_,
-             [this, context, &text, caretUtf16](TfEditCookie ec) -> HRESULT {
+             [this, context, &text, caretUtf16, &caretRect,
+              &caretOk](TfEditCookie ec) -> HRESULT {
                  if (!composition_) {
                      ITfContextComposition* ctxComp = nullptr;
                      if (FAILED(context->QueryInterface(
@@ -737,13 +853,54 @@ void XimeTextService::UpdateComposition(
                  range->Collapse(ec, caretUtf16 > 0 ? TF_ANCHOR_END
                                                     : TF_ANCHOR_START);
                  SafeRelease(range);
+
+                 // 组合文本刚落好，此刻取屏幕矩形最准确（跟随光标）。
+                 caretOk = GetCompositionScreenRect(context, ec, &caretRect);
                  return S_OK;
              });
 
     if (candidateWindow_) {
         candidateWindow_->Update(candidates, caretBytes);
+        if (caretOk) {
+            // 传左上角即可；候选窗内部按"光标下方优先、放不下翻上方"定位。
+            POINT pt = {caretRect.left, caretRect.bottom};
+            candidateWindow_->SetCaretScreenPos(pt, true);
+        } else {
+            candidateWindow_->SetCaretScreenPos(POINT{0, 0}, false);
+        }
         candidateWindow_->Show();
     }
+}
+
+// ── 语言栏 ──────────────────────────────────────────────────────────────────
+
+STDMETHODIMP XimeTextService::OnUpdate(DWORD dwFlags) {
+    // 语言栏项状态变化（显示/隐藏/启用）时回调。当前无需额外处理：
+    // 图标与文字由 LangBarButton 按需返回，状态变化会自行 OnUpdate 通知语言栏。
+    (void)dwFlags;
+    return S_OK;
+}
+
+void XimeTextService::SyncLangBarState() {
+    if (!langBarButton_ || !langBarSink_) {
+        return;
+    }
+    langBarButton_->SetAsciiMode(core::RimeEngine::Instance().IsAsciiMode());
+    // 通知语言栏重取图标/文字/提示。
+    langBarSink_->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
+}
+
+void XimeTextService::OpenSettings() {
+    // 打开用户数据目录（settings.json 所在处）；没有独立设置 UI 前，
+    // 让用户能直接定位并编辑配置文件，同时给出说明。
+    wchar_t localAppData[MAX_PATH] = {0};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) == 0) {
+        return;
+    }
+    const std::wstring dir = std::wstring(localAppData) + L"\\Xime";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr,
+                  SW_SHOWNORMAL);
 }
 
 void XimeTextService::EndComposition(ITfContext* context) {

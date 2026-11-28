@@ -1,0 +1,40 @@
+// Xime 桌面版资源：语言栏图标与版本信息。
+// 图标来自 Android 版 Xime logo（mipmap-xxxhdpi/ic_launcher.webp）。
+#include <windows.h>
+
+// 中/英文状态图标（语言栏按状态切换）
+#define IDI_XIME_ZH 101
+#define IDI_XIME_EN 102
+
+IDI_XIME_ZH ICON "xime_zh.ico"
+IDI_XIME_EN ICON "xime_en.ico"
+// 主图标（安装包 / 文件属性页）
+1 ICON "xime.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     3,4,70,0
+PRODUCTVERSION  3,4,70,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "Xime"
+            VALUE "FileDescription",  "Xime 输入法 (TSF)"
+            VALUE "FileVersion",      "3.4.70.0"
+            VALUE "InternalName",     "xime-tsf"
+            VALUE "OriginalFilename", "xime-tsf.dll"
+            VALUE "ProductName",      "Xime"
+            VALUE "ProductVersion",   "3.4.70.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

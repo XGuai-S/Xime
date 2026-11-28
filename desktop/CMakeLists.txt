@@ -63,6 +63,7 @@ add_library(xime-tsf SHARED
   src/voice/VoiceService.cpp
   src/voice/AudioRecorder.cpp
   src/tsf/XimeTextService.cpp
+  src/tsf/LangBarButton.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
 )
@@ -73,6 +74,30 @@ target_include_directories(xime-tsf PRIVATE
   "${XIME_JNI_DIR}/librime-t9/src"
   "${CMAKE_BINARY_DIR}/librime/src"
 )
+# 语言栏图标资源（中/英状态图标 + 版本信息）。
+# 注意：不能把 .rc 直接加入 target —— xime-tsf 挂了上百个 boost include 路径，
+# windres 预处理时命令行会超长（"command line is too long"）。
+# 故先用 windres 单独编译成 .o（只传必要参数），再作为目标文件链接进去。
+if(MSVC)
+  target_sources(xime-tsf PRIVATE res/xime.rc)
+else()
+  find_program(XIME_WINDRES windres HINTS "${CMAKE_CXX_COMPILER}/../")
+  if(XIME_WINDRES)
+    set(XIME_RC_OBJ "${CMAKE_CURRENT_BINARY_DIR}/xime_res.o")
+    add_custom_command(
+      OUTPUT ${XIME_RC_OBJ}
+      COMMAND ${XIME_WINDRES} -I "${CMAKE_CURRENT_SOURCE_DIR}/res"
+              -i "${CMAKE_CURRENT_SOURCE_DIR}/res/xime.rc" -o ${XIME_RC_OBJ}
+              --input-format=rc --output-format=coff
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/xime.rc"
+              "${CMAKE_CURRENT_SOURCE_DIR}/res/xime.ico"
+              "${CMAKE_CURRENT_SOURCE_DIR}/res/xime_zh.ico"
+              "${CMAKE_CURRENT_SOURCE_DIR}/res/xime_en.ico"
+      COMMENT "编译语言栏图标资源")
+    target_sources(xime-tsf PRIVATE ${XIME_RC_OBJ})
+  endif()
+endif()
+
 target_compile_definitions(xime-tsf PRIVATE UNICODE _UNICODE)
 if(MSVC)
   target_compile_options(xime-tsf PRIVATE /utf-8 /W3 /EHsc)
@@ -561,7 +586,7 @@ if(XIME_BUILD_SMOKE)
 
   # 异常安全验收：TSF 回调里的异常不得逃逸到宿主进程（曾致宿主 0xC000041D 崩溃）。
   add_executable(xime-exsafe-test tests/ExceptionSafetyTest.cpp
-    src/tsf/XimeTextService.cpp
+    src/tsf/XimeTextService.cpp src/tsf/LangBarButton.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
     src/core/CandidatePicker.cpp src/core/KeyMap.cpp src/core/KeyEatPolicy.cpp
     src/core/AutoWordStore.cpp src/core/SchemaListConfig.cpp
@@ -594,6 +619,20 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-pathresolve-test tests/PathResolveTest.cpp)
   # 宿主模拟：把安装好的 DLL 载入另一个进程，验证 DLL 能定位自己的 data/。
   add_executable(xime-hostsim-test tests/HostSimTest.cpp)
+  # 候选窗定位：跟随光标 + 边缘翻转，不越界。
+  add_executable(xime-placement-test tests/CandidatePlacementTest.cpp
+    src/ui/CandidateWindow.cpp)
+  target_include_directories(xime-placement-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src")
+  target_link_libraries(xime-placement-test PRIVATE ole32 uuid user32 gdi32)
+  # 语言栏项：IID/vtable 正确性 + 语言栏管理器可达性。
+  add_executable(xime-langbar-test tests/LangBarTest.cpp)
+  target_include_directories(xime-langbar-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-langbar-test PRIVATE ole32 uuid)
 endif()
 
 # ---- 安装规则 ----
