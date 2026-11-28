@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <objbase.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 
 #include <string>
@@ -92,9 +93,14 @@ bool Uninstall() {
 
 } // namespace
 
-int wmain(int argc, wchar_t** argv) {
-    if (argc < 2) {
+int main() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv || argc < 2) {
         fwprintf(stderr, L"用法: xime-register.exe install|uninstall\n");
+        if (argv) {
+            LocalFree(argv);
+        }
         return 1;
     }
     const std::wstring cmd(argv[1]);
@@ -108,5 +114,6 @@ int wmain(int argc, wchar_t** argv) {
         fwprintf(stderr, L"未知命令: %s\n", cmd.c_str());
     }
     CoUninitialize();
+    LocalFree(argv);
     return ok ? 0 : 1;
 }

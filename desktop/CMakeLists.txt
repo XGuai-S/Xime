@@ -47,7 +47,12 @@ else()
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
 endif()
 target_link_libraries(xime-tsf PRIVATE
-  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi msctf)
+  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi)
+if(MSVC)
+  # msctf 是 MSVC/Windows SDK 的导入库（TSF 接口 IID 与 msctf.dll）；
+  # MinGW 无同名导入库，其 TSF IID 由 libuuid.a 提供，故仅 MSVC 追加。
+  target_link_libraries(xime-tsf PRIVATE msctf)
+endif()
 
 # 方案与词库放到 DLL 同级 data 目录（ActivateEx 从此处加载）。
 add_custom_command(TARGET xime-tsf POST_BUILD
