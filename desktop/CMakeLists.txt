@@ -20,6 +20,7 @@ endif()
 add_library(xime-tsf SHARED
   src/core/RimeEngine.cpp
   src/core/WordFreqStore.cpp
+  src/core/AutoWordStore.cpp
   src/core/KeyMap.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
@@ -143,4 +144,8 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-word-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-word-smoke xime-tsf)
+
+  # 自动造词纯逻辑单测（不依赖 librime，秒级运行）。
+  add_executable(xime-autoword-test tests/AutoWordTest.cpp src/core/AutoWordStore.cpp)
+  target_include_directories(xime-autoword-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
