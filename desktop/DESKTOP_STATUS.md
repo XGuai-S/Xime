@@ -37,6 +37,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-page-smoke` | 每页 5→9；方案 pinyin↔wubi 切换 |
 | 核心 | `xime-pageflip-smoke` | 每页1候选 `nihao`→「你好」→下一页「拟好」→回退 |
 | 核心 | `xime-ascii-smoke` | 中英文切换（ascii_mode）：中文→英文→中文 |
+| 核心 | `xime-schemacycle-smoke` | 已部署 5 方案，F4 循环切换一圈回到首个 |
 | 设置 | `xime-settingapply-smoke` | settings.json pageSize=9 → 启动加载应用 → 引擎 pageSize=9 |
 | 首启 | `xime-firstrun-smoke` | 全新用户目录→自动部署→有候选（你好） |
 | 逻辑 | `xime-picker-test` | 数字键与鼠标点击共用选词映射（引擎/造词/插件候选） |
@@ -57,7 +58,7 @@ cmake --build desktop/build --config Release
 |---|---|
 | librime 1.18.0 + T9 定制 + lua/octagram/predict 插件 | ✅ |
 | 拼音/五笔/T9 打字、候选/翻页/选词上屏（数字键 + 鼠标点击）、中英文切换 | ✅ 实测 |
-| 每页候选数（5..50）、方案切换/管理持久化、候选翻页 | ✅ |
+| 每页候选数（5..50）、方案切换/管理持久化、候选翻页、**运行时方案循环切换（F4）** | ✅ |
 | 上屏词频 + 候选重排（engineIndex 保选词正确） | ✅ |
 | 自动造词（组合算法 + 编码生成 + 候选接入 + 上屏） | ✅ |
 | 备份/恢复（本地 ZIP 白名单、防穿越、按内容合并保留本地） | ✅ |
