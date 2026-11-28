@@ -71,6 +71,14 @@ cmake --build desktop/build --config Release
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
 | AI 帮写面板 UI / 插件 panel·onAction·speech 扩展点 / 实时同步 | ⬜ 待做 |
 | 真实麦克风采集（WinMM waveIn PCM16） / 语音全链路（真机录音→STT→直出） | ✅ 实测 |
+| 剪贴板自动捕获（ClipboardWatcher.PollOnce） | ✅ 实测 |
+
+## 三·五、最终验证（第 40 轮收尾，实际执行）
+
+- 全量构建 **29 个 CMake 目标** `BUILD_EXIT=0`；产物 `libxime-tsf.dll`(39.5MB) + `xime-register.exe`。
+- **23 项无参单测全绿**（FAILS=0）。
+- **14 项引擎/集成冒烟带参全通过**：smoke / t9 / word / page / pageflip / autocand / schemadeploy / plugincand / pluginfull / firstrun / settingapply / ascii / voicechain / tsfplugin。
+- 基线 `baseline-android-3.4.70` → `51eaf367` 保持不动；`desktop` 分支自基线累计 63 次提交。
 
 ## 四、环境限制（如实记录）
 
@@ -78,6 +86,13 @@ cmake --build desktop/build --config Release
 2. **本地离线 ASR / 手写**：依赖 Windows x64 ONNX Runtime；仓库仅有 Android arm64 `.so`，无法构建。语音改走 AI 服务商 STT（已实测）。
 3. **真实外网 TLS**：WinHTTP 路径已用本机 http 回环验证，未对真实服务商 https 端点实测（沙箱不连外网）。
 4. **GitHub Actions**：该仓库为 fork，自 2026-11-28 起 Actions 不处理任何事件（workflow 已注册 active，`desktop-build.yml` 在 desktop 与 main）。恢复后 push/tag 即自动构建。
+
+## 四·五、尚未完成的差距（诚实记录）
+
+- AI 帮写 / 语音 / 剪贴板所需的**交互面板 UI**（数据与逻辑层已就绪并离线验证，缺可视控件）。
+- 插件 **panel / onAction / speech** 扩展点（transform + 生命周期 + host.quickSend 已实现）。
+- 剪贴板**实时同步**（自动捕获已实现，跨设备实时同步未做，安卓侧也已停用）。
+- 本地离线 ASR / 手写（需 Windows ONNX）；TSF 在真实 Windows 桌面的注册与输入验收。
 
 ## 五、基线纪律
 
