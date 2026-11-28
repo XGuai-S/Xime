@@ -38,6 +38,7 @@ endif()
 add_library(xime-tsf SHARED
   src/core/RimeEngine.cpp
   src/core/CandidatePicker.cpp
+  src/core/KeyEatPolicy.cpp
   src/core/WordFreqStore.cpp
   src/core/AutoWordStore.cpp
   src/core/SchemeCodeIndex.cpp
@@ -415,6 +416,17 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-picker-test tests/CandidatePickerTest.cpp
     src/core/CandidatePicker.cpp)
   target_include_directories(xime-picker-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  target_link_libraries(xime-picker-test PRIVATE ole32 uuid)
+
+  # 按键吞掉策略单测（纯逻辑）。
+  add_executable(xime-keyeat-test tests/KeyEatPolicyTest.cpp
+    src/core/KeyEatPolicy.cpp)
+  target_include_directories(xime-keyeat-test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
     "${XIME_JNI_DIR}/librime/src"

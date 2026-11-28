@@ -76,8 +76,9 @@ private:
     bool HandleCandidateSelection(ITfContext* context, unsigned int vk);
     void ApplyPickAction(ITfContext* context, const core::PickAction& action,
                          unsigned int fallbackVk);
-    void ProcessInputKey(ITfContext* context, unsigned int vk,
-                         bool shift, bool ctrl, bool alt, bool capslock);
+    core::ProcessResult ProcessInputKey(ITfContext* context, unsigned int vk,
+                                        bool shift, bool ctrl, bool alt,
+                                        bool capslock);
     void ApplyEngineResult(ITfContext* context,
                            const core::ProcessResult& result);
     void CommitText(ITfContext* context, const std::string& utf8);

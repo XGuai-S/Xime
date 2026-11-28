@@ -3,6 +3,7 @@
 #include "../core/KeyMap.h"
 #include "../core/RimeEngine.h"
 #include "../core/CandidatePicker.h"
+#include "../core/KeyEatPolicy.h"
 #include "../plugins/PluginManager.h"
 #include "../clipboard/ClipboardStore.h"
 #include "../settings/SettingsStore.h"
@@ -431,9 +432,10 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
-    // 英文模式：字母/符号直接交给应用（不进入引擎组合），与原生英文输入一致。
-    if (core::RimeEngine::Instance().IsAsciiMode() && core::IsRimeKey(vk) &&
-        vk != VK_BACK && vk != VK_RETURN && vk != VK_ESCAPE) {
+    // 英文模式：字符/符号直通应用（退格/回车/ESC 仍交引擎处理残留组合）。
+    if (core::KeyEatPolicy::PassThroughInAscii(
+            core::RimeEngine::Instance().IsAsciiMode(), core::IsRimeKey(vk),
+            vk == VK_BACK, vk == VK_RETURN, vk == VK_ESCAPE)) {
         return S_OK;
     }
 
@@ -466,8 +468,10 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
-    ProcessInputKey(pic, vk, shift, ctrl, alt, capslock);
-    *pfEaten = TRUE;
+    const auto result =
+        ProcessInputKey(pic, vk, shift, ctrl, alt, capslock);
+    // 仅当引擎真正处理或产生提交/组合/候选时拦截；否则放行给应用。
+    *pfEaten = core::KeyEatPolicy::ShouldEat(result) ? TRUE : FALSE;
     return S_OK;
 }
 
@@ -518,17 +522,20 @@ void XimeTextService::ApplyPickAction(ITfContext* context,
     lastCandidates_.clear();
 }
 
-void XimeTextService::ProcessInputKey(ITfContext* context, unsigned int vk,
-                                      bool shift, bool ctrl, bool alt,
-                                      bool capslock) {
+core::ProcessResult XimeTextService::ProcessInputKey(ITfContext* context,
+                                                     unsigned int vk,
+                                                     bool shift, bool ctrl,
+                                                     bool alt, bool capslock) {
+    core::ProcessResult empty;
     const unsigned int rimeKey = core::ToRimeKey(vk, shift, capslock);
     const unsigned int mask = core::ToRimeMask(shift, ctrl, alt);
     if (rimeKey == 0) {
-        return;
+        return empty;
     }
     const auto result =
         core::RimeEngine::Instance().ProcessKeyAndGetResult(rimeKey, mask);
     ApplyEngineResult(context, result);
+    return result;
 }
 
 void XimeTextService::ApplyEngineResult(ITfContext* context,
