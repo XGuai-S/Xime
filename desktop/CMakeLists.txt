@@ -154,6 +154,10 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-scheme-test tests/SchemeCodeIndexTest.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-scheme-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+  # AI 配置策略纯逻辑单测（STT 复用密钥 + 润色开关）。
+  add_executable(xime-ai-test tests/AiProviderTest.cpp src/ai/AiProviderConfig.cpp)
+  target_include_directories(xime-ai-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
   # 自动造词候选接入冒烟（真实 librime + wubi86 单字码）。
   add_executable(xime-autocand-smoke tests/AutoCandSmoke.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
