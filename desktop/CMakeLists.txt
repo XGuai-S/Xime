@@ -26,6 +26,10 @@ add_library(xime-tsf SHARED
   src/backup/BackupArchive.cpp
   src/backup/BackupService.cpp
   src/core/KeyMap.cpp
+  src/ai/Json.cpp
+  src/ai/AiProtocol.cpp
+  src/ai/AiHttp.cpp
+  src/ai/AiProviderConfig.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -53,7 +57,7 @@ else()
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
 endif()
 target_link_libraries(xime-tsf PRIVATE
-  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi)
+  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32)
 if(MSVC)
   # msctf 是 MSVC/Windows SDK 的导入库（TSF 接口 IID 与 msctf.dll）；
   # MinGW 无同名导入库，其 TSF IID 由 libuuid.a 提供，故仅 MSVC 追加。
@@ -194,6 +198,13 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-aiprotocol-test tests/AiProtocolTest.cpp
     src/ai/Json.cpp src/ai/AiProtocol.cpp)
   target_include_directories(xime-aiprotocol-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # AI 传输层回环测试（Winsock 本机收发）。
+  find_package(Threads REQUIRED)
+  add_executable(xime-aihttp-test tests/AiHttpLoopbackTest.cpp
+    src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
+  target_include_directories(xime-aihttp-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-aihttp-test PRIVATE ws2_32 Threads::Threads)
 
   # 方案管理端到端：写 schema_list → 部署 → 选中。
   add_executable(xime-schemadeploy-smoke tests/SchemaDeploySmoke.cpp
