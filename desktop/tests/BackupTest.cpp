@@ -41,9 +41,12 @@ int main() {
     const std::string freq = "# header\n你好\tnihao\t3\n拟好\tnihao\t1\n";
     const std::string auto1 = "# auto\n小霞\tihfn\t0\n";
     const std::string cfg = "auto_word:\n  enabled: true\n";
+    const std::string settings =
+        "{\"page_size\":9,\"polish_enabled\":true}";
     WriteText(src + "/word_freq.txt", freq);
     WriteText(src + "/auto_word.txt", auto1);
     WriteText(src + "/xime.yaml", cfg);
+    WriteText(src + "/settings.json", settings);
     // 非白名单文件不应进备份。
     WriteText(src + "/secret.bin", "zzz");
 
@@ -59,6 +62,7 @@ int main() {
     Check(ReadText(dst + "/word_freq.txt") == freq, "word_freq roundtrip");
     Check(ReadText(dst + "/auto_word.txt") == auto1, "auto_word roundtrip");
     Check(ReadText(dst + "/xime.yaml") == cfg, "xime.yaml roundtrip");
+    Check(ReadText(dst + "/settings.json") == settings, "settings.json roundtrip");
     Check(!fs::exists(dst + "/secret.bin"), "non-whitelist excluded");
 
     // 非法条目：手工构造含 "../evil" 与子目录的 ZIP，恢复应忽略。

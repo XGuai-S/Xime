@@ -19,6 +19,7 @@ const std::set<std::string> kWhitelist = {
     "xime.yaml",
     "default.custom.yaml",
     "clipboard.json",
+    "settings.json",  // 桌面版统一设置（润色开关/LLM·STT/方案列表/每页候选数）
 };
 
 bool ReadFile(const std::string& path, std::string& out) {
