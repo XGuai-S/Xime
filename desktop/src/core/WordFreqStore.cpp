@@ -1,10 +1,15 @@
+#include "PathUtil.h"
 #include "WordFreqStore.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
+
+#include <windows.h>
 
 namespace xime {
 namespace core {
@@ -13,6 +18,8 @@ namespace {
 
 constexpr const char* kHeader =
     "# 上屏词频：词\t编码\t频数（每次上屏自动 +1）";
+
+
 
 // 解码一个 UTF-8 码点；成功返回码点并推进 i，失败返回 0xFFFFFFFF。
 uint32_t DecodeUtf8(const std::string& s, size_t& i) {
@@ -250,12 +257,30 @@ bool WordFreqStore::Save() {
             }
         }
         out.flush();
+        if (!out) {
+            return false;
+        }
     }
-    std::remove(path.c_str());
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    // 原子替换：绝不能再"先 remove 旧文件、再 rename"。
+    // 那样在两者之间崩溃/断电/被结束进程，用户的整个词频表就没了（旧文件已删、
+    // 新文件还叫 .tmp，而 Load 只认 word_freq.txt）。ReplaceFileW / MoveFileEx
+    // 的 REPLACE_EXISTING 是单步原子操作，失败时原文件保持不变。
+    const std::wstring wtmp = Utf8ToWidePath(tmp);
+    const std::wstring wpath = Utf8ToWidePath(path);
+    if (wtmp.empty() || wpath.empty()) {
         return false;
     }
-    return true;
+    if (MoveFileExW(wtmp.c_str(), wpath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    // 极端情况（跨卷/被占用）退化为旧方式，但仍先备份原文件。
+    std::error_code ec;
+    std::filesystem::copy_file(path, path + ".bak",
+                               std::filesystem::copy_options::overwrite_existing,
+                               ec);
+    std::remove(path.c_str());
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
 } // namespace core

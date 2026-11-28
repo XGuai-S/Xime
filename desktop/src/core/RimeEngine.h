@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <chrono>
 #include <string>
 #include <utility>
 #include <vector>
@@ -55,6 +56,8 @@ public:
     bool CreateSession();
     void DestroySession();
     bool HasSession() const;
+    // 不加锁版本：仅限已持有 g_engine_mutex 的类内部代码调用（避免自死锁）。
+    bool HasSessionLocked() const;
 
     bool ProcessKey(int keycode, int mask);
     ProcessResult ProcessKeyAndGetResult(int keycode, int mask);
@@ -134,6 +137,9 @@ private:
     // 插件候选变换回调（可为空）。
     PluginTransform pluginTransform_;
     PluginTransformFull pluginTransformFull_;
+    // 词频表脏标记与节流时间戳：避免每次上屏都在锁内做全表磁盘写。
+    bool wordFreqDirty_ = false;
+    std::chrono::steady_clock::time_point lastWordFreqSave_{};
 };
 
 } // namespace core

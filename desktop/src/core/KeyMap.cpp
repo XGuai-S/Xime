@@ -22,10 +22,12 @@ constexpr unsigned int kXK_Prior = 0xff55; // PageUp
 constexpr unsigned int kXK_Next = 0xff56;  // PageDown
 constexpr unsigned int kXK_End = 0xff57;
 
-// librime mask 约定（与 Android JNI 一致）。
+// librime mask 约定，必须与 librime/src/rime/key_table.h 完全一致：
+//   kShiftMask = 1<<0, kLockMask = 1<<1, kControlMask = 1<<2, kAltMask = kMod1Mask = 1<<3
+// 早期这里写成 Ctrl=2 / Alt=4，把 CapsLock 当成了 Ctrl、把 Ctrl 当成了 Alt。
 constexpr unsigned int kRimeModShift = 1;
-constexpr unsigned int kRimeModCtrl = 2;
-constexpr unsigned int kRimeModAlt = 4;
+constexpr unsigned int kRimeModCtrl = 4;
+constexpr unsigned int kRimeModAlt = 8;
 
 } // namespace
 
@@ -44,6 +46,9 @@ bool IsRimeKey(unsigned int vk) {
     case VK_PRIOR:
     case VK_NEXT:
     case VK_END:
+    // 空格是中文输入最主要的选词键，必须交给引擎。此前漏了它，导致
+    // 空格既选不了词、又把字面空格插进文档而组合态仍留在引擎里。
+    case VK_SPACE:
         return true;
     default:
         break;
@@ -81,6 +86,8 @@ unsigned int ToRimeKey(unsigned int vk, bool shift, bool capslock) {
         return kXK_Tab;
     case VK_RETURN:
         return kXK_Return;
+    case VK_SPACE:
+        return 0x20; // XK_space：让 speller 的 use_space 生效（空格选词）
     case VK_ESCAPE:
         return kXK_Escape;
     case VK_DELETE:

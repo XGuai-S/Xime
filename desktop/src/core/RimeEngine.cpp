@@ -5,6 +5,7 @@
 #include <rime/schema.h>
 
 #include "t9_processor.h"
+#include "PathUtil.h"
 #include "WordFreqStore.h"
 #include "SchemeCodeIndex.h"
 #include "plugins/PluginHost.h"
@@ -86,11 +87,26 @@ bool RimeEngine::StartMaintenance(bool full) {
 }
 
 bool RimeEngine::IsMaintaining() const {
+    // 加锁：rime_ 可能在 Initialize/析构期间被改动，而本函数会被按键线程
+    // 在部署等待循环里反复轮询。
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
     return rime_ ? rime_->is_maintenance_mode() != 0 : false;
 }
 
 bool RimeEngine::IsDeployed() const {
-    if (userDataDir_.empty()) {
+    std::string userDir;
+    {
+        std::lock_guard<std::mutex> lock(g_engine_mutex);
+        userDir = userDataDir_;
+    }
+    if (userDir.empty()) {
+        return false;
+    }
+    // 用宽路径构造 filesystem::path：窄字符会按 ANSI 代码页解释，
+    // 中文用户名（C:\Users\张三\...）下 is_directory 直接返回 false，
+    // 于是永远判定"未部署"，每次激活都重新部署并冻结按键线程。
+    const std::wstring wdir = Utf8ToWidePath(userDir);
+    if (wdir.empty()) {
         return false;
     }
     // librime 部署产物落在 <user>/build/。注意该目录可能由 rime 提前创建但为空，
@@ -98,7 +114,7 @@ bool RimeEngine::IsDeployed() const {
     // 否则会把"空目录"误判成已部署，从此再也不触发部署、永远没有候选。
     std::error_code ec;
     const std::filesystem::path buildDir =
-        std::filesystem::path(userDataDir_) / "build";
+        std::filesystem::path(wdir) / L"build";
     if (!std::filesystem::is_directory(buildDir, ec)) {
         return false;
     }
@@ -120,6 +136,12 @@ bool RimeEngine::CreateSession() {
     if (!rime_ || !initialized_) {
         return false;
     }
+    // 先销毁旧会话：重复创建会让上一个 librime Session（连同词典与组件）
+    // 失去引用而永久泄漏。TSF 反复激活时这条路径会被频繁走到。
+    if (session_ != 0) {
+        rime_->destroy_session(session_);
+        session_ = 0;
+    }
     session_ = rime_->create_session();
     if (session_ != 0) {
         ReapplyPageSizeIfNeeded();
@@ -137,17 +159,31 @@ void RimeEngine::DestroySession() {
         rime_->destroy_session(session_);
         session_ = 0;
     }
+    // 会话结束时强制落盘一次：上屏路径已改为节流保存，这里补上最终写入，
+    // 保证退出/停用时不丢最近的词频。
+    if (wordFreqDirty_) {
+        WordFreqStore::Instance().Save();
+        wordFreqDirty_ = false;
+    }
+}
+
+bool RimeEngine::HasSessionLocked() const {
+    return session_ != 0 && initialized_;
 }
 
 bool RimeEngine::HasSession() const {
     // setup/initialize 未完成时必须拒绝，否则残留 session_id 会在组件系统
     // 尚未建立时触发空指针（Android 端曾因此冷启动崩溃率 >50%）。
-    return session_ != 0 && initialized_;
+    // 对外入口加锁（DestroySession/Initialize 在锁内改这些字段，本函数会被
+    // 按键线程反复轮询，与部署线程并发）；类内部调用一律用 HasSessionLocked，
+    // 否则会自死锁（std::mutex 不可重入）。
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    return HasSessionLocked();
 }
 
 bool RimeEngine::ProcessKey(int keycode, int mask) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return false;
     }
     const bool processed = rime_->process_key(session_, keycode, mask) != 0;
@@ -158,7 +194,7 @@ bool RimeEngine::ProcessKey(int keycode, int mask) {
 ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     ProcessResult result;
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return result;
     }
     // 词频记录需要在 commit 前拿到「当时的编码」：process_key 之后 composition 往往已清空。
@@ -170,7 +206,19 @@ ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
     if (!result.committedText.empty() && !result.isAsciiMode &&
         WordFreqStore::IsCountableWord(result.committedText)) {
         WordFreqStore::Instance().RecordCommit(preInput, result.committedText);
-        WordFreqStore::Instance().Save();
+        // 不能每次上屏都在引擎锁内做全表磁盘写：词频表随使用增长，这里会变成
+        // 打一个词写一遍全表，期间所有引擎入口（含语言栏查 ascii 状态）被阻塞。
+        // 改为脏标记 + 节流落盘，DestroySession/停用/退出时强制补写。
+        // 注意：词频本身在 RecordCommit 里已进内存表，读侧（重排）不受影响；
+        // 这里只推迟"写文件"，不推迟"生效"。
+        wordFreqDirty_ = true;
+        const auto now = std::chrono::steady_clock::now();
+        if (lastWordFreqSave_.time_since_epoch().count() == 0 ||
+            now - lastWordFreqSave_ >= std::chrono::seconds(2)) {
+            WordFreqStore::Instance().Save();
+            lastWordFreqSave_ = now;
+            wordFreqDirty_ = false;
+        }
     }
     ApplyPluginTransform(result);
     return result;
@@ -272,7 +320,7 @@ ProcessResult RimeEngine::ReadResult(bool processed) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     ProcessResult result;
     result.processed = processed;
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return result;
     }
     ReadCurrentState(result);
@@ -411,7 +459,7 @@ void RimeEngine::ReadCurrentState(ProcessResult& result) const {
 
 bool RimeEngine::SetInput(const std::string& input) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return false;
     }
     if (input.empty()) {
@@ -423,7 +471,7 @@ bool RimeEngine::SetInput(const std::string& input) {
 
 void RimeEngine::ClearComposition() {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (HasSession()) {
+    if (HasSessionLocked()) {
         rime_->clear_composition(session_);
     }
 }
@@ -431,7 +479,7 @@ void RimeEngine::ClearComposition() {
 ProcessResult RimeEngine::ChangePage(bool backward) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     ProcessResult result;
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return result;
     }
     result.processed = rime_->change_page(session_, backward ? 1 : 0) != 0;
@@ -442,7 +490,7 @@ ProcessResult RimeEngine::ChangePage(bool backward) {
 
 std::string RimeEngine::CurrentSchema() const {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return "";
     }
     char buffer[256] = {0};
@@ -454,7 +502,7 @@ std::string RimeEngine::CurrentSchema() const {
 
 bool RimeEngine::SelectSchema(const std::string& schemaId) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession() || schemaId.empty()) {
+    if (!HasSessionLocked() || schemaId.empty()) {
         return false;
     }
     const bool ok = rime_->select_schema(session_, schemaId.c_str()) != 0;
@@ -467,7 +515,7 @@ bool RimeEngine::SelectSchema(const std::string& schemaId) {
 std::vector<std::string> RimeEngine::SchemaList() const {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     std::vector<std::string> ids;
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return ids;
     }
     RimeSchemaList list = {};
@@ -485,7 +533,7 @@ std::vector<std::string> RimeEngine::SchemaList() const {
 
 std::string RimeEngine::CycleSchema() {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return "";
     }
     RimeSchemaList list = {};
@@ -587,7 +635,7 @@ std::vector<std::string> RimeEngine::ComposeWordCodes(const std::string& word) c
 
 bool RimeEngine::IsAsciiMode() const {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return false;
     }
     RIME_STRUCT(RimeStatus, status);
@@ -601,7 +649,7 @@ bool RimeEngine::IsAsciiMode() const {
 
 bool RimeEngine::ToggleAsciiMode() {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
-    if (!HasSession()) {
+    if (!HasSessionLocked()) {
         return false;
     }
     const bool current = rime_->get_option(session_, "ascii_mode") != 0;
