@@ -39,6 +39,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-ascii-smoke` | 中英文切换（ascii_mode）：中文→英文→中文 |
 | 核心 | `xime-schemacycle-smoke` | 已部署 5 方案，F4 循环切换一圈回到首个 |
 | 设置 | `xime-settingapply-smoke` | settings.json pageSize=9 → 启动加载应用 → 引擎 pageSize=9 |
+| 设置 | `xime-settingsapplier-test` | schemaList 落 default.custom.yaml（幂等/空列表不写） |
 | 首启 | `xime-firstrun-smoke` | 全新用户目录→自动部署→有候选（你好） |
 | 逻辑 | `xime-picker-test` | 数字键与鼠标点击共用选词映射（引擎/造词/插件候选） |
 | 逻辑 | `xime-keyeat-test` | 按键吞掉策略（未处理则放行→英文退格/标点不再被吞） |
@@ -62,7 +63,7 @@ cmake --build desktop/build --config Release
 | 上屏词频 + 候选重排（engineIndex 保选词正确） | ✅ |
 | 自动造词（组合算法 + 编码生成 + 候选接入 + 上屏） | ✅ |
 | 备份/恢复（本地 ZIP 白名单、防穿越、按内容合并保留本地） | ✅ |
-| 统一设置存储（settings.json 原子写）**并在 TSF 启动时真正生效** | ✅ 实测 |
+| 统一设置存储（settings.json 原子写）**并在 TSF 启动时真正生效（pageSize + schemeList）** | ✅ 实测 |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
 | 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、onLoad/onUnload 生命周期、host.quickSend 服务、目录管理、链式变换、TSF 启动加载 | ✅ |
