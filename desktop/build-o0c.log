@@ -1,0 +1,298 @@
+﻿[0/2] Re-checking globbed directories...
+[1/235] Copying libopencc to directory of opencc_dict
+[2/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/file_sinks.cpp.obj
+[3/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/bundled_fmtlib_format.cpp.obj
+[4/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/cfg.cpp.obj
+[5/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/async.cpp.obj
+[6/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/stdout_sinks.cpp.obj
+[7/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/color_sinks.cpp.obj
+[8/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_buffer.cc.obj
+[9/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_apostrophe_strategy.cc.obj
+[10/235] Building CXX object librime/deps/spdlog/CMakeFiles/spdlog.dir/src/spdlog.cpp.obj
+[11/235] Building CXX object librime/plugins/librime-octagram/CMakeFiles/rime-octagram-objs.dir/src/gram_encoding.cc.obj
+[12/235] Building CXX object librime/plugins/librime-octagram/CMakeFiles/rime-octagram-objs.dir/src/grammar_module.cc.obj
+[13/235] Linking CXX static library librime\deps\spdlog\libspdlog.a
+[14/235] Building CXX object librime/plugins/librime-octagram/CMakeFiles/rime-octagram-objs.dir/src/octagram.cc.obj
+[15/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_digit_segment_strategy.cc.obj
+[16/235] Building CXX object librime/plugins/librime-octagram/CMakeFiles/rime-octagram-objs.dir/src/gram_db.cc.obj
+[17/235] Building CXX object librime/plugins/librime-predict/CMakeFiles/rime-predict-objs.dir/src/predict_db.cc.obj
+[18/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_letter_buffer_strategy.cc.obj
+[19/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_digit_userdict_core.cc.obj
+[20/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_panel_state.cc.obj
+[21/235] Building CXX object librime/plugins/librime-predict/CMakeFiles/rime-predict-objs.dir/src/predict_module.cc.obj
+[22/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_patch_utils.cc.obj
+[23/235] Building CXX object librime/plugins/librime-predict/CMakeFiles/rime-predict-objs.dir/src/predict_translator.cc.obj
+[24/235] Building CXX object librime/plugins/librime-predict/CMakeFiles/rime-predict-objs.dir/src/predict_engine.cc.obj
+[25/235] Building CXX object librime/plugins/librime-predict/CMakeFiles/rime-predict-objs.dir/src/predictor.cc.obj
+[26/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_pinyin_map.cc.obj
+[27/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_state_machine.cc.obj
+[28/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_right_commit_utils.cc.obj
+[29/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_right_commit_handler.cc.obj
+[30/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_string_utils.cc.obj
+[31/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_syllable_alignment.cc.obj
+[32/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_undo_model.cc.obj
+[33/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_date_translator.cc.obj
+[34/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/lib/lauxlib-compat.c.obj
+[35/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_digit_userdict.cc.obj
+[36/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/lib/lutf8lib-compat.c.obj
+[37/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lapi.c.obj
+[38/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lauxlib.c.obj
+[39/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_module.cc.obj
+[40/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lbaselib.c.obj
+[41/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lcode.c.obj
+[42/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lcorolib.c.obj
+[43/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/lib/lua.cc.obj
+[44/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lctype.c.obj
+[45/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ldblib.c.obj
+[46/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ldebug.c.obj
+[47/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ldo.c.obj
+[48/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ldump.c.obj
+[49/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lfunc.c.obj
+[50/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/linit.c.obj
+[51/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lgc.c.obj
+[52/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/liolib.c.obj
+[53/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_filter.cc.obj
+[54/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/llex.c.obj
+[55/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lmathlib.c.obj
+[56/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lmem.c.obj
+[57/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lopcodes.c.obj
+[58/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lobject.c.obj
+[59/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/loslib.c.obj
+[60/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lparser.c.obj
+[61/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lstate.c.obj
+[62/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lstring.c.obj
+[63/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ltable.c.obj
+[64/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lstrlib.c.obj
+[65/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ltablib.c.obj
+[66/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/ltm.c.obj
+[67/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lundump.c.obj
+[68/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lutf8lib.c.obj
+[69/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lzio.c.obj
+[70/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/lvm.c.obj
+[71/235] Building C object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/thirdparty/lua5.4/loadlib.c.obj
+[72/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/lua_gears.cc.obj
+[73/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/modules.cc.obj
+[74/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/opencc.cc.obj
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/opencc.cc: In function 'void opencc_init(lua_State*)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/opencc.cc:246:1: warning: visibility attribute not supported in this configuration; ignored [-Wattributes]
+  246 | }
+      | ^
+[75/235] Building CXX object librime/plugins/librime-t9/CMakeFiles/rime-t9-objs.dir/src/t9_processor.cc.obj
+[76/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/types_ext.cc.obj
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/types_ext.cc: In function 'void types_ext_init(lua_State*)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/types_ext.cc:397:1: warning: visibility attribute not supported in this configuration; ignored [-Wattributes]
+  397 | }
+      | ^
+[77/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/script_translator.cc.obj
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/script_translator.cc: In function 'void script_translator_init(lua_State*)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/script_translator.cc:201:1: warning: visibility attribute not supported in this configuration; ignored [-Wattributes]
+  201 | }
+      | ^
+[78/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/table_translator.cc.obj
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/table_translator.cc: In function 'void table_translator_init(lua_State*)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime/plugins/lua/src/table_translator.cc:256:1: warning: visibility attribute not supported in this configuration; ignored [-Wattributes]
+  256 | }
+      | ^
+[79/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/key_table.cc.obj
+[80/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/candidate.cc.obj
+[81/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime_api_stdbool.cc.obj
+[82/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime_api.cc.obj
+[83/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/commit_history.cc.obj
+[84/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/core_module.cc.obj
+[85/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/composition.cc.obj
+[86/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/context.cc.obj
+[87/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/deployer.cc.obj
+[88/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/logging.cc.obj
+[89/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/key_event.cc.obj
+[90/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/language.cc.obj
+[91/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/engine.cc.obj
+[92/235] Building CXX object librime/plugins/lua/CMakeFiles/rime-lua-objs.dir/src/types.cc.obj
+[93/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/menu.cc.obj
+[94/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/module.cc.obj
+[95/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/registry.cc.obj
+[96/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/segmentation.cc.obj
+[97/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/resource.cc.obj
+[98/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/schema.cc.obj
+[99/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/setup.cc.obj
+[100/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/service.cc.obj
+[101/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/signature.cc.obj
+[102/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/switcher.cc.obj
+[103/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/ticket.cc.obj
+[104/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/switches.cc.obj
+[105/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/translation.cc.obj
+[106/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/build_info_plugin.cc.obj
+[107/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/auto_patch_config_plugin.cc.obj
+[108/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/config_component.cc.obj
+[109/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/config_compiler.cc.obj
+[110/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/config_types.cc.obj
+[111/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/config_data.cc.obj
+[112/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/legacy_dictionary_config_plugin.cc.obj
+[113/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/default_config_plugin.cc.obj
+[114/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/save_output_plugin.cc.obj
+[115/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/config/legacy_preset_config_plugin.cc.obj
+[116/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/algebra.cc.obj
+[117/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/spelling.cc.obj
+[118/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/strings.cc.obj
+[119/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/utilities.cc.obj
+[120/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/calculus.cc.obj
+[121/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/encoder.cc.obj
+[122/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/db_utils.cc.obj
+[123/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/algo/syllabifier.cc.obj
+[124/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/db.cc.obj
+[125/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/corrector.cc.obj
+[126/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/dict_module.cc.obj
+[127/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/dict_settings.cc.obj
+[128/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/dict_compiler.cc.obj
+[129/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/dictionary.cc.obj
+[130/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/preset_vocabulary.cc.obj
+[131/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/level_db.cc.obj
+[132/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/string_table.cc.obj
+[133/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/prism.cc.obj
+[134/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/table.cc.obj
+[135/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/entry_collector.cc.obj
+[136/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/reverse_lookup_dictionary.cc.obj
+[137/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/mapped_file.cc.obj
+[138/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/table_db.cc.obj
+[139/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/text_db.cc.obj
+[140/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/tsv.cc.obj
+[141/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/user_db.cc.obj
+[142/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/vocabulary.cc.obj
+[143/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/abc_segmentor.cc.obj
+[144/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/user_db_recovery_task.cc.obj
+[145/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/ascii_segmentor.cc.obj
+[146/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/affix_segmentor.cc.obj
+[147/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/charset_filter.cc.obj
+[148/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/ascii_composer.cc.obj
+[149/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/dict/user_dictionary.cc.obj
+[150/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/chord_composer.cc.obj
+[151/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/echo_translator.cc.obj
+[152/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/contextual_translation.cc.obj
+[153/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/editor.cc.obj
+[154/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/fallback_segmentor.cc.obj
+[155/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/filter_commons.cc.obj
+[156/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/history_translator.cc.obj
+[157/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/key_binder.cc.obj
+[158/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/opencc.cc.obj
+[159/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/gears_module.cc.obj
+[160/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/matcher.cc.obj
+[161/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/punctuator.cc.obj
+[162/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/memory.cc.obj
+[163/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/navigator.cc.obj
+[164/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/poet.cc.obj
+[165/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/recognizer.cc.obj
+[166/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/reverse_lookup_filter.cc.obj
+[167/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/schema_list_translator.cc.obj
+[168/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/selector.cc.obj
+[169/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/reverse_lookup_translator.cc.obj
+[170/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/shape.cc.obj
+[171/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/simplifier.cc.obj
+[172/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/single_char_filter.cc.obj
+[173/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/script_translator.cc.obj
+[174/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/streaming_chord_processor.cc.obj
+[175/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/switch_translator.cc.obj
+[176/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/speller.cc.obj
+[177/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/uniquifier.cc.obj
+[178/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/custom_settings.cc.obj
+[179/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/customizer.cc.obj
+[180/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/table_translator.cc.obj
+[181/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/translator_commons.cc.obj
+[182/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/gear/unity_table_encoder.cc.obj
+[183/235] Building CJK_Compatibility_Ideographs.ocd2
+[184/235] Building TSCharacters.ocd2
+[185/235] Building TSCharactersExt.ocd2
+[186/235] Building TSPhrases.ocd2
+[187/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/compile_unit.cc.obj
+[188/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/levers_module.cc.obj
+[189/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/levers_stdbool.cc.obj
+[190/235] Building CXX object CMakeFiles/xime-tsf.dir/src/core/KeyMap.cpp.obj
+[191/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/switcher_settings.cc.obj
+[192/235] Generating HKVariantsRev.txt
+[193/235] Generating JPShinjitaiCharactersRev.txt
+[194/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/deployment_tasks.cc.obj
+[195/235] Building CXX object leveldb/CMakeFiles/leveldbutil.dir/db/leveldbutil.cc.obj
+[196/235] Generating TWVariantsRev.txt
+[197/235] Generating STPhrases_GeneratedFromRegionalPhrases.txt
+[198/235] Linking CXX executable leveldb\leveldbutil.exe
+[199/235] Building HKPhrases.ocd2
+[200/235] Building HKPhrasesRev.ocd2
+[201/235] Building HKVariants.ocd2
+[202/235] Building HKVariantsPhrases.ocd2
+[203/235] Building HKVariantsRev.ocd2
+[204/235] Building HKVariantsRevPhrases.ocd2
+[205/235] Building JPShinjitaiCharacters.ocd2
+[206/235] Building CXX object CMakeFiles/xime-smoke.dir/tests/EngineSmoke.cpp.obj
+[207/235] Building CXX object librime/src/CMakeFiles/rime-static.dir/rime/lever/user_dict_manager.cc.obj
+[208/235] Building JPShinjitaiCharactersRev.ocd2
+[209/235] Building JPShinjitaiPhrases.ocd2
+[210/235] Building STCharacters.ocd2
+[211/235] Building STPhrases_GeneratedFromRegionalPhrases.ocd2
+[212/235] Building TWPhrases.ocd2
+[213/235] Building CXX object CMakeFiles/xime-tsf.dir/src/core/RimeEngine.cpp.obj
+In file included from D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime-t9/src/t9_processor.h:14,
+                 from D:/AIWork/Xime-3.4.09-source/desktop/src/core/RimeEngine.cpp:7:
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime-t9/src/t9_undo_model.h: In static member function 'static rime::T9SegmentOp rime::T9SegmentOp::LC(int)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime-t9/src/t9_undo_model.h:75:58: warning: missing initializer for member 'rime::T9SegmentOp::prev_tail' [-Wmissing-field-initializers]
+   75 |     static T9SegmentOp LC(int idx) { return {kLC, idx, {}}; }
+      |                                                          ^
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime-t9/src/t9_undo_model.h: In static member function 'static rime::T9SegmentOp rime::T9SegmentOp::RC(const std::vector<int>&)':
+D:/AIWork/Xime-3.4.09-source/app/src/main/jni/librime-t9/src/t9_undo_model.h:76:80: warning: missing initializer for member 'rime::T9SegmentOp::prev_tail' [-Wmissing-field-initializers]
+   76 |     static T9SegmentOp RC(const std::vector<int>& idxs) { return {kRC, -1, idxs}; }
+      |                                                                                ^
+[214/235] Building TWPhrasesRev.ocd2
+[215/235] Building TWVariants.ocd2
+[216/235] Building TWVariantsPhrases.ocd2
+[217/235] Building TWVariantsRev.ocd2
+[218/235] Building CXX object CMakeFiles/xime-tsf.dir/src/tsf/Dll.cpp.obj
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/Dll.cpp: In function 'BOOL DllMain(HMODULE, DWORD, LPVOID)':
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/Dll.cpp:69:46: warning: unused parameter 'reason' [-Wunused-parameter]
+   69 | BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
+      |                                        ~~~~~~^~~~~~
+[219/235] Building TWVariantsRevPhrases.ocd2
+[220/235] Building STPhrases.ocd2
+[221/235] Building CXX object CMakeFiles/xime-tsf.dir/src/tsf/XimeTextService.cpp.obj
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp: In member function 'virtual ULONG xime::tsf::XimeTextService::Release()':
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp:135:9: warning: deleting object of polymorphic class type 'xime::tsf::XimeTextService' which has non-virtual destructor might cause undefined behavior [-Wdelete-non-virtual-dtor]
+  135 |         delete this;
+      |         ^~~~~~~~~~~
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp: In lambda function:
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp:425:43: warning: missing initializer for member 'TF_SELECTION::style' [-Wmissing-field-initializers]
+  425 |                      TF_SELECTION sel = {0};
+      |                                           ^
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp: In member function 'void xime::tsf::XimeTextService::EndCompositionInSession(ITfContext*, TfEditCookie)':
+D:/AIWork/Xime-3.4.09-source/desktop/src/tsf/XimeTextService.cpp:486:59: warning: unused parameter 'context' [-Wunused-parameter]
+  486 | void XimeTextService::EndCompositionInSession(ITfContext* context,
+      |                                               ~~~~~~~~~~~~^~~~~~~
+[222/235] Building CXX object CMakeFiles/xime-register.dir/tools/Register.cpp.obj
+[223/235] Building CXX object CMakeFiles/xime-tsf.dir/src/ui/CandidateWindow.cpp.obj
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp: In constructor 'xime::ui::CandidateWindow::CandidateWindow()':
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::style' [-Wmissing-field-initializers]
+   31 |     WNDCLASSEXW wc = {0};
+      |                        ^
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::lpfnWndProc' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::cbClsExtra' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::cbWndExtra' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::hInstance' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::hIcon' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::hCursor' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::hbrBackground' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::lpszMenuName' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::lpszClassName' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:31:24: warning: missing initializer for member 'tagWNDCLASSEXW::hIconSm' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp: In member function 'void xime::ui::CandidateWindow::Show()':
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:112:19: warning: missing initializer for member 'tagRECT::top' [-Wmissing-field-initializers]
+  112 |     RECT work = {0};
+      |                   ^
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:112:19: warning: missing initializer for member 'tagRECT::right' [-Wmissing-field-initializers]
+D:/AIWork/Xime-3.4.09-source/desktop/src/ui/CandidateWindow.cpp:112:19: warning: missing initializer for member 'tagRECT::bottom' [-Wmissing-field-initializers]
+[224/235] Building CXX object opencc/src/tools/CMakeFiles/opencc_phrase_extract.dir/PhraseExtract.cpp.obj
+[225/235] Linking CXX executable opencc\src\tools\opencc_phrase_extract.exe
+[226/235] Linking CXX static library librime\lib\librime.a
+[227/235] Linking CXX shared library libxime-tsf.dll; 复制 librime 方案与词库到 data/
+FAILED: [code=1] libxime-tsf.dll libxime-tsf.dll.a 
+C:\Windows\system32\cmd.exe /C "cd . && C:\msys64\mingw64\bin\g++.exe -O0 -DNDEBUG  -shared -o libxime-tsf.dll -Wl,--out-implib,libxime-tsf.dll.a -Wl,--major-image-version,0,--minor-image-version,0 CMakeFiles/xime-tsf.dir/src/core/RimeEngine.cpp.obj CMakeFiles/xime-tsf.dir/src/core/KeyMap.cpp.obj CMakeFiles/xime-tsf.dir/src/tsf/XimeTextService.cpp.obj CMakeFiles/xime-tsf.dir/src/tsf/Dll.cpp.obj CMakeFiles/xime-tsf.dir/src/ui/CandidateWindow.cpp.obj  -Wl,--whole-archive  librime/lib/librime.a  -Wl,--no-whole-archive  -lole32  -luuid  -luser32  -lgdi32  -lcomctl32  -lshell32  -lshlwapi  -lmsctf  yaml-cpp/libyaml-cpp.a  -lwsock32  -lws2_32  -lbcrypt  leveldb/libleveldb.a  snappy/libsnappy.a  opencc/src/libopencc.a  marisa/libmarisa.a  librime/deps/spdlog/libspdlog.a  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 && C:\Windows\system32\cmd.exe /C "cd /D D:\AIWork\Xime-3.4.09-source\desktop\build && C:\msys64\mingw64\bin\cmake.exe -E copy_directory D:/AIWork/Xime-3.4.09-source/desktop/../app/src/main/assets/rime D:/AIWork/Xime-3.4.09-source/desktop/build/data""
+C:/msys64/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: cannot find -lmsctf: No such file or directory
+collect2.exe: error: ld returned 1 exit status
+[228/235] Building CXX object CMakeFiles/xime-smoke.dir/src/core/RimeEngine.cpp.obj
+[229/235] Building CXX object librime/plugins/librime-octagram/tools/CMakeFiles/build_grammar.dir/build_grammar.cc.obj
+[230/235] Building CXX object librime/plugins/librime-predict/tools/CMakeFiles/build_predict.dir/build_predict.cc.obj
+ninja: build stopped: subcommand failed.

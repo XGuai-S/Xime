@@ -149,351 +149,426 @@ STDMETHODIMP_(ULONG) XimeTextService::Release() {
 // ── ITfTextInputProcessor ───────────────────────────────────────────────────
 
 STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
-    if (!ptim) {
-        return E_INVALIDARG;
-    }
-    if (activated_) {
-        return S_FALSE;
-    }
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
 
-    threadMgr_ = ptim;
-    threadMgr_->AddRef();
-    clientId_ = tid;
-
-    if (SUCCEEDED(threadMgr_->QueryInterface(
-            IID_ITfSource, reinterpret_cast<void**>(&threadMgrSource_)))) {
-        threadMgrSource_->AdviseSink(IID_ITfThreadMgrEventSink,
-                                     static_cast<ITfThreadMgrEventSink*>(this),
-                                     &threadMgrSinkCookie_);
-    }
-    if (SUCCEEDED(threadMgr_->QueryInterface(
-            IID_ITfKeystrokeMgr, reinterpret_cast<void**>(&keystrokeMgr_)))) {
-        keystrokeMgr_->AdviseKeyEventSink(clientId_,
-                                          static_cast<ITfKeyEventSink*>(this),
-                                          TRUE);
-        // 注册中/英文切换保留键（Shift，同主流中文输入法）。
-        TF_PRESERVEDKEY pk = {};
-        pk.uVKey = VK_SHIFT;
-        pk.uModifiers = 0;
-        keystrokeMgr_->PreserveKey(clientId_, GUID_XimeToggleAsciiKey, &pk,
-                                   nullptr, 0);
-        // 方案切换保留键（F4，循环切到下一个已部署方案）。
-        TF_PRESERVEDKEY pkCycle = {};
-        pkCycle.uVKey = VK_F4;
-        pkCycle.uModifiers = 0;
-        keystrokeMgr_->PreserveKey(clientId_, GUID_XimeCycleSchemaKey, &pkCycle,
-                                   nullptr, 0);
-    }
-
-    // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
-    wchar_t modulePath[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-    std::wstring dir(modulePath);
-    const size_t slash = dir.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) {
-        dir.resize(slash);
-    }
-    wchar_t localAppData[MAX_PATH] = {0};
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) == 0) {
-        wcscpy_s(localAppData, MAX_PATH, L".");
-    }
-    const std::wstring userDir = std::wstring(localAppData) + L"\\Xime";
-    CreateDirectoryW(userDir.c_str(), nullptr);
-    const std::wstring dataDir = dir + L"\\data";
-
-    auto wideToUtf8 = [](const std::wstring& w) {
-        const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-                                          static_cast<int>(w.size()),
-                                          nullptr, 0, nullptr, nullptr);
-        std::string out(static_cast<size_t>(n > 0 ? n : 0), '\0');
-        if (n > 0) {
-            WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-                                static_cast<int>(w.size()), &out[0], n,
-                                nullptr, nullptr);
+        if (!ptim) {
+            return E_INVALIDARG;
         }
-        return out;
-    };
+        if (activated_) {
+            return S_FALSE;
+        }
 
-    core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
-                                            wideToUtf8(dataDir));
-    // 首启部署：用户目录尚无编译产物时触发一次完整部署，否则无候选可用。
-    // 非阻塞：部署在后台线程，Enter 时由 EnsureSession 等待完成。
-    if (!core::RimeEngine::Instance().IsDeployed()) {
-        core::RimeEngine::Instance().StartMaintenance(true);
-    }
-    // 载入用户设置并应用（每页候选数、方案列表），使设置真正生效。
-    {
-        settings::DesktopSettings ds;
-        if (settings::SettingsStore::Load(wideToUtf8(userDir), &ds)) {
-            if (ds.pageSize > 0) {
-                core::RimeEngine::Instance().SetPageSize(ds.pageSize);
+        threadMgr_ = ptim;
+        threadMgr_->AddRef();
+        clientId_ = tid;
+
+        if (SUCCEEDED(threadMgr_->QueryInterface(
+                IID_ITfSource, reinterpret_cast<void**>(&threadMgrSource_)))) {
+            threadMgrSource_->AdviseSink(IID_ITfThreadMgrEventSink,
+                                         static_cast<ITfThreadMgrEventSink*>(this),
+                                         &threadMgrSinkCookie_);
+        }
+        if (SUCCEEDED(threadMgr_->QueryInterface(
+                IID_ITfKeystrokeMgr, reinterpret_cast<void**>(&keystrokeMgr_)))) {
+            keystrokeMgr_->AdviseKeyEventSink(clientId_,
+                                              static_cast<ITfKeyEventSink*>(this),
+                                              TRUE);
+            // 注册中/英文切换保留键（Shift，同主流中文输入法）。
+            TF_PRESERVEDKEY pk = {};
+            pk.uVKey = VK_SHIFT;
+            pk.uModifiers = 0;
+            keystrokeMgr_->PreserveKey(clientId_, GUID_XimeToggleAsciiKey, &pk,
+                                       nullptr, 0);
+            // 方案切换保留键（F4，循环切到下一个已部署方案）。
+            TF_PRESERVEDKEY pkCycle = {};
+            pkCycle.uVKey = VK_F4;
+            pkCycle.uModifiers = 0;
+            keystrokeMgr_->PreserveKey(clientId_, GUID_XimeCycleSchemaKey, &pkCycle,
+                                       nullptr, 0);
+        }
+
+        // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
+        wchar_t modulePath[MAX_PATH] = {0};
+        GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        std::wstring dir(modulePath);
+        const size_t slash = dir.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            dir.resize(slash);
+        }
+        wchar_t localAppData[MAX_PATH] = {0};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) == 0) {
+            wcscpy_s(localAppData, MAX_PATH, L".");
+        }
+        const std::wstring userDir = std::wstring(localAppData) + L"\\Xime";
+        CreateDirectoryW(userDir.c_str(), nullptr);
+        const std::wstring dataDir = dir + L"\\data";
+
+        auto wideToUtf8 = [](const std::wstring& w) {
+            const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                              static_cast<int>(w.size()),
+                                              nullptr, 0, nullptr, nullptr);
+            std::string out(static_cast<size_t>(n > 0 ? n : 0), '\0');
+            if (n > 0) {
+                WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                    static_cast<int>(w.size()), &out[0], n,
+                                    nullptr, nullptr);
             }
-            // 方案列表写入 default.custom.yaml（下次部署生效）。
-            settings::Apply(ds, wideToUtf8(userDir));
+            return out;
+        };
+
+        core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
+                                                wideToUtf8(dataDir));
+        // 首启部署：用户目录尚无编译产物时触发一次完整部署，否则无候选可用。
+        // 非阻塞：部署在后台线程，Enter 时由 EnsureSession 等待完成。
+        if (!core::RimeEngine::Instance().IsDeployed()) {
+            core::RimeEngine::Instance().StartMaintenance(true);
         }
-    }
-    hasSession_ = false;
-    if (!candidateWindow_) {
-        candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
-        if (candidateWindow_) {
-            candidateWindow_->SetSelectCallback(
-                [this](int displayIndex) {
-                    // 鼠标点击与数字键走同一套选词映射（词频重排/造词/插件候选）。
-                    if (!context_) {
-                        return;
+        // 载入用户设置并应用（每页候选数、方案列表），使设置真正生效。
+        {
+            settings::DesktopSettings ds;
+            if (settings::SettingsStore::Load(wideToUtf8(userDir), &ds)) {
+                if (ds.pageSize > 0) {
+                    core::RimeEngine::Instance().SetPageSize(ds.pageSize);
+                }
+                // 方案列表写入 default.custom.yaml（下次部署生效）。
+                settings::Apply(ds, wideToUtf8(userDir));
+            }
+        }
+        hasSession_ = false;
+        if (!candidateWindow_) {
+            candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
+            if (candidateWindow_) {
+                candidateWindow_->SetSelectCallback(
+                    [this](int displayIndex) {
+                        // 鼠标点击与数字键走同一套选词映射（词频重排/造词/插件候选）。
+                        if (!context_) {
+                            return;
+                        }
+                        const core::PickAction action =
+                            core::CandidatePicker::Resolve(lastCandidates_,
+                                                           displayIndex);
+                        // 鼠标点击无数字键兜底，action 为空时不干预。
+                        if (!action.IsNone()) {
+                            ApplyPickAction(context_, action, 0);
+                        }
+                    });
+            }
+        }
+
+        // 启动加载插件：DLL 同级 plugins/ 目录下的所有 <name>/main.js。
+        // 插件宿主失败（目录不存在/插件语法错）不影响输入法主体。
+        pluginManager_.reset(new (std::nothrow) plugins::PluginManager());
+        if (pluginManager_) {
+            const std::string pluginDir = wideToUtf8(dir + L"\\plugins");
+            std::string pluginErr;
+            pluginManager_->LoadDirectory(pluginDir, &pluginErr);
+
+            // 注入 host.quickSend.list() 数据源（读 <user>/clipboard.json）。
+            const std::string clipboardPath = wideToUtf8(userDir) + "/clipboard.json";
+            pluginManager_->SetQuickSendProvider(
+                [clipboardPath]() -> std::vector<plugins::QuickSendEntry> {
+                    std::vector<plugins::QuickSendEntry> out;
+                    std::ifstream in(clipboardPath, std::ios::binary);
+                    if (!in) {
+                        return out;
                     }
-                    const core::PickAction action =
-                        core::CandidatePicker::Resolve(lastCandidates_,
-                                                       displayIndex);
-                    // 鼠标点击无数字键兜底，action 为空时不干预。
-                    if (!action.IsNone()) {
-                        ApplyPickAction(context_, action, 0);
+                    std::ostringstream ss;
+                    ss << in.rdbuf();
+                    clipboard::ClipboardStore store;
+                    if (!store.Deserialize(ss.str())) {
+                        return out;
+                    }
+                    const auto items = store.QuickSends();
+                    out.reserve(items.size());
+                    for (const auto& it : items) {
+                        plugins::QuickSendEntry e;
+                        e.text = it.text;
+                        e.code = it.code;
+                        e.timestamp = it.tsMs;
+                        out.push_back(std::move(e));
+                    }
+                    return out;
+                });
+            // onLoad 在所有 host 服务注入后调用（quick-phrase 等据此拉缓存）。
+            std::string lifecycleErr;
+            pluginManager_->InvokeAllLoad(&lifecycleErr);
+
+            // 把完整契约变换注册进引擎（core 类型回调，不链接 QuickJS）。
+            auto* mgr = pluginManager_.get();
+            core::RimeEngine::Instance().SetPluginTransformFull(
+                [mgr](core::RimeEngine::PluginTransformContext& ctx) {
+                    plugins::TransformRequest pr;
+                    pr.inputText = ctx.inputText;
+                    pr.preedit = ctx.preedit;
+                    pr.asciiMode = ctx.asciiMode;
+                    for (const auto& c : ctx.candidates) {
+                        pr.candidates.push_back({c.text, c.comment, c.engineIndex});
+                    }
+                    plugins::TransformResponse pres = mgr->Transform(pr);
+                    if (!pres.changed) {
+                        return; // 插件不干预
+                    }
+                    ctx.candidates.clear();
+                    for (const auto& c : pres.candidates) {
+                        core::Candidate cc;
+                        cc.text = c.text;
+                        cc.comment = c.comment;
+                        cc.engineIndex = c.engineIndex;
+                        ctx.candidates.push_back(std::move(cc));
                     }
                 });
         }
+        activated_ = true;
+        return S_OK;
+    } catch (...) {
+        return E_FAIL;
     }
-
-    // 启动加载插件：DLL 同级 plugins/ 目录下的所有 <name>/main.js。
-    // 插件宿主失败（目录不存在/插件语法错）不影响输入法主体。
-    pluginManager_.reset(new (std::nothrow) plugins::PluginManager());
-    if (pluginManager_) {
-        const std::string pluginDir = wideToUtf8(dir + L"\\plugins");
-        std::string pluginErr;
-        pluginManager_->LoadDirectory(pluginDir, &pluginErr);
-
-        // 注入 host.quickSend.list() 数据源（读 <user>/clipboard.json）。
-        const std::string clipboardPath = wideToUtf8(userDir) + "/clipboard.json";
-        pluginManager_->SetQuickSendProvider(
-            [clipboardPath]() -> std::vector<plugins::QuickSendEntry> {
-                std::vector<plugins::QuickSendEntry> out;
-                std::ifstream in(clipboardPath, std::ios::binary);
-                if (!in) {
-                    return out;
-                }
-                std::ostringstream ss;
-                ss << in.rdbuf();
-                clipboard::ClipboardStore store;
-                if (!store.Deserialize(ss.str())) {
-                    return out;
-                }
-                const auto items = store.QuickSends();
-                out.reserve(items.size());
-                for (const auto& it : items) {
-                    plugins::QuickSendEntry e;
-                    e.text = it.text;
-                    e.code = it.code;
-                    e.timestamp = it.tsMs;
-                    out.push_back(std::move(e));
-                }
-                return out;
-            });
-        // onLoad 在所有 host 服务注入后调用（quick-phrase 等据此拉缓存）。
-        std::string lifecycleErr;
-        pluginManager_->InvokeAllLoad(&lifecycleErr);
-
-        // 把完整契约变换注册进引擎（core 类型回调，不链接 QuickJS）。
-        auto* mgr = pluginManager_.get();
-        core::RimeEngine::Instance().SetPluginTransformFull(
-            [mgr](core::RimeEngine::PluginTransformContext& ctx) {
-                plugins::TransformRequest pr;
-                pr.inputText = ctx.inputText;
-                pr.preedit = ctx.preedit;
-                pr.asciiMode = ctx.asciiMode;
-                for (const auto& c : ctx.candidates) {
-                    pr.candidates.push_back({c.text, c.comment, c.engineIndex});
-                }
-                plugins::TransformResponse pres = mgr->Transform(pr);
-                if (!pres.changed) {
-                    return; // 插件不干预
-                }
-                ctx.candidates.clear();
-                for (const auto& c : pres.candidates) {
-                    core::Candidate cc;
-                    cc.text = c.text;
-                    cc.comment = c.comment;
-                    cc.engineIndex = c.engineIndex;
-                    ctx.candidates.push_back(std::move(cc));
-                }
-            });
-    }
-    activated_ = true;
-    return S_OK;
 }
 
 STDMETHODIMP XimeTextService::Deactivate() {
-    if (!activated_) {
-        return S_FALSE;
-    }
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
 
-    // 先让插件收尾（onUnload），再释放管理器；都在引擎回调清除之前。
-    if (pluginManager_) {
-        std::string lifecycleErr;
-        pluginManager_->InvokeAllUnload(&lifecycleErr);
-    }
+        if (!activated_) {
+            return S_FALSE;
+        }
 
-    if (candidateWindow_) {
-        candidateWindow_->Hide();
-    }
+        // 先让插件收尾（onUnload），再释放管理器；都在引擎回调清除之前。
+        if (pluginManager_) {
+            std::string lifecycleErr;
+            pluginManager_->InvokeAllUnload(&lifecycleErr);
+        }
 
-    if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
-        contextSource_->UnadviseSink(textEditSinkCookie_);
-        textEditSinkCookie_ = TF_INVALID_COOKIE;
-    }
-    if (keystrokeMgr_) {
-        keystrokeMgr_->UnadviseKeyEventSink(clientId_);
-    }
-    if (threadMgrSource_ && threadMgrSinkCookie_ != TF_INVALID_COOKIE) {
-        threadMgrSource_->UnadviseSink(threadMgrSinkCookie_);
-        threadMgrSinkCookie_ = TF_INVALID_COOKIE;
-    }
+        if (candidateWindow_) {
+            candidateWindow_->Hide();
+        }
 
-    // 先清除引擎中的插件变换回调（它捕获 pluginManager_ 裸指针），
-    // 否则随后 pluginManager_ 释放后回调成为悬垂指针，重激活时 UAF。
-    core::RimeEngine::Instance().ClearPluginTransforms();
+        if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
+            contextSource_->UnadviseSink(textEditSinkCookie_);
+            textEditSinkCookie_ = TF_INVALID_COOKIE;
+        }
+        if (keystrokeMgr_) {
+            keystrokeMgr_->UnadviseKeyEventSink(clientId_);
+        }
+        if (threadMgrSource_ && threadMgrSinkCookie_ != TF_INVALID_COOKIE) {
+            threadMgrSource_->UnadviseSink(threadMgrSinkCookie_);
+            threadMgrSinkCookie_ = TF_INVALID_COOKIE;
+        }
 
-    core::RimeEngine::Instance().DestroySession();
-    hasSession_ = false;
-    pluginManager_.reset();
+        // 先清除引擎中的插件变换回调（它捕获 pluginManager_ 裸指针），
+        // 否则随后 pluginManager_ 释放后回调成为悬垂指针，重激活时 UAF。
+        core::RimeEngine::Instance().ClearPluginTransforms();
 
-    SafeRelease(contextSource_);
-    SafeRelease(keystrokeMgr_);
-    SafeRelease(threadMgrSource_);
-    SafeRelease(composition_);
-    SafeRelease(context_);
-    SafeRelease(docMgr_);
-    SafeRelease(threadMgr_);
-    threadMgr_ = nullptr;
-    clientId_ = TF_CLIENTID_NULL;
-    activated_ = false;
-    return S_OK;
+        core::RimeEngine::Instance().DestroySession();
+        hasSession_ = false;
+        pluginManager_.reset();
+
+        SafeRelease(contextSource_);
+        SafeRelease(keystrokeMgr_);
+        SafeRelease(threadMgrSource_);
+        SafeRelease(composition_);
+        SafeRelease(context_);
+        SafeRelease(docMgr_);
+        SafeRelease(threadMgr_);
+        threadMgr_ = nullptr;
+        clientId_ = TF_CLIENTID_NULL;
+        activated_ = false;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 // ── ITfKeyEventSink ─────────────────────────────────────────────────────────
 
 STDMETHODIMP XimeTextService::OnSetFocus(BOOL fForeground) {
-    (void)fForeground;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)fForeground;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnTestKeyDown(ITfContext* pic, WPARAM wParam,
                                             LPARAM lParam, BOOL* pfEaten) {
-    (void)pic;
-    (void)wParam;
-    (void)lParam;
-    *pfEaten = FALSE;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+        if (!pfEaten) {
+            return S_OK;
+        }
+
+        (void)pic;
+        (void)wParam;
+        (void)lParam;
+        *pfEaten = FALSE;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnTestKeyUp(ITfContext* pic, WPARAM wParam,
                                           LPARAM lParam, BOOL* pfEaten) {
-    (void)pic;
-    (void)wParam;
-    (void)lParam;
-    *pfEaten = FALSE;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+        if (!pfEaten) {
+            return S_OK;
+        }
+
+        (void)pic;
+        (void)wParam;
+        (void)lParam;
+        *pfEaten = FALSE;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
                                       LPARAM lParam, BOOL* pfEaten) {
-    (void)pic;
-    (void)wParam;
-    (void)lParam;
-    *pfEaten = FALSE;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+        if (!pfEaten) {
+            return S_OK;
+        }
+
+        (void)pic;
+        (void)wParam;
+        (void)lParam;
+        *pfEaten = FALSE;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnPreservedKey(ITfContext* pic, REFGUID rguid,
                                              BOOL* pfEaten) {
-    (void)pic;
-    *pfEaten = FALSE;
-    if (IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
-        if (EnsureSession()) {
-            core::RimeEngine::Instance().ToggleAsciiMode();
-            *pfEaten = TRUE;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+        if (!pfEaten) {
+            return S_OK;
+        }
+
+        (void)pic;
+        *pfEaten = FALSE;
+        if (IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
+            if (EnsureSession()) {
+                core::RimeEngine::Instance().ToggleAsciiMode();
+                *pfEaten = TRUE;
+            }
+            return S_OK;
+        }
+        if (IsEqualGUID(rguid, GUID_XimeCycleSchemaKey)) {
+            if (EnsureSession()) {
+                core::RimeEngine::Instance().CycleSchema();
+                *pfEaten = TRUE;
+            }
+            return S_OK;
         }
         return S_OK;
-    }
-    if (IsEqualGUID(rguid, GUID_XimeCycleSchemaKey)) {
-        if (EnsureSession()) {
-            core::RimeEngine::Instance().CycleSchema();
-            *pfEaten = TRUE;
-        }
+    } catch (...) {
         return S_OK;
     }
-    return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
                                         LPARAM lParam, BOOL* pfEaten) {
-    (void)lParam;
-    *pfEaten = FALSE;
-    if (!pic || !activated_) {
-        return S_OK;
-    }
-
-    const unsigned int vk = static_cast<unsigned int>(wParam & 0xff);
-    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-    const bool capslock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-
-    if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_CAPITAL) {
-        return S_OK;
-    }
-    if (ctrl || alt) {
-        return S_OK;
-    }
-
-    if (!EnsureSession()) {
-        return S_OK;
-    }
-
-    // 英文模式：字符/符号直通应用（退格/回车/ESC 仍交引擎处理残留组合）。
-    if (core::KeyEatPolicy::PassThroughInAscii(
-            core::RimeEngine::Instance().IsAsciiMode(), core::IsRimeKey(vk),
-            vk == VK_BACK, vk == VK_RETURN, vk == VK_ESCAPE)) {
-        return S_OK;
-    }
-
-    // 候选翻页：仅在候选窗可见时拦截，PageUp/PageDown 与 -/= 翻页。
-    if (candidateWindow_ && candidateWindow_->IsVisible()) {
-        bool backward = false;
-        bool paging = true;
-        if (vk == VK_PRIOR || vk == VK_OEM_MINUS) {
-            backward = true;
-        } else if (vk != VK_NEXT && vk != VK_OEM_PLUS) {
-            paging = false;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+        if (!pfEaten) {
+            return S_OK;
         }
-        if (paging) {
-            const auto result = core::RimeEngine::Instance().ChangePage(backward);
-            if (result.processed) {
-                ApplyEngineResult(pic, result);
+
+        (void)lParam;
+        *pfEaten = FALSE;
+        if (!pic || !activated_) {
+            return S_OK;
+        }
+
+        const unsigned int vk = static_cast<unsigned int>(wParam & 0xff);
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        const bool capslock = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+
+        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_CAPITAL) {
+            return S_OK;
+        }
+        if (ctrl || alt) {
+            return S_OK;
+        }
+
+        if (!EnsureSession()) {
+            return S_OK;
+        }
+
+        // 英文模式：字符/符号直通应用（退格/回车/ESC 仍交引擎处理残留组合）。
+        if (core::KeyEatPolicy::PassThroughInAscii(
+                core::RimeEngine::Instance().IsAsciiMode(), core::IsRimeKey(vk),
+                vk == VK_BACK, vk == VK_RETURN, vk == VK_ESCAPE)) {
+            return S_OK;
+        }
+
+        // 候选翻页：仅在候选窗可见时拦截，PageUp/PageDown 与 -/= 翻页。
+        if (candidateWindow_ && candidateWindow_->IsVisible()) {
+            bool backward = false;
+            bool paging = true;
+            if (vk == VK_PRIOR || vk == VK_OEM_MINUS) {
+                backward = true;
+            } else if (vk != VK_NEXT && vk != VK_OEM_PLUS) {
+                paging = false;
             }
+            if (paging) {
+                const auto result = core::RimeEngine::Instance().ChangePage(backward);
+                if (result.processed) {
+                    ApplyEngineResult(pic, result);
+                }
+                *pfEaten = TRUE;
+                return S_OK;
+            }
+        }
+
+        if (candidateWindow_ && candidateWindow_->IsVisible() &&
+            HandleCandidateSelection(pic, vk)) {
             *pfEaten = TRUE;
             return S_OK;
         }
-    }
 
-    if (candidateWindow_ && candidateWindow_->IsVisible() &&
-        HandleCandidateSelection(pic, vk)) {
-        *pfEaten = TRUE;
+        if (!core::IsRimeKey(vk)) {
+            return S_OK;
+        }
+
+        const auto result =
+            ProcessInputKey(pic, vk, shift, ctrl, alt, capslock);
+        // 仅当引擎真正处理或产生提交/组合/候选时拦截；否则放行给应用。
+        *pfEaten = core::KeyEatPolicy::ShouldEat(result) ? TRUE : FALSE;
+        return S_OK;
+    } catch (...) {
         return S_OK;
     }
-
-    if (!core::IsRimeKey(vk)) {
-        return S_OK;
-    }
-
-    const auto result =
-        ProcessInputKey(pic, vk, shift, ctrl, alt, capslock);
-    // 仅当引擎真正处理或产生提交/组合/候选时拦截；否则放行给应用。
-    *pfEaten = core::KeyEatPolicy::ShouldEat(result) ? TRUE : FALSE;
-    return S_OK;
 }
 
 bool XimeTextService::EnsureSession() {
     if (hasSession_ && core::RimeEngine::Instance().HasSession()) {
         return true;
+    }
+    // 兜底：仍未有编译产物时补一次部署（可能上次部署被销毁/中断）。
+    if (!core::RimeEngine::Instance().IsDeployed()) {
+        core::RimeEngine::Instance().StartMaintenance(true);
     }
     // 首启部署可能仍在进行：等待其完成再建会话（有上限，避免永久阻塞）。
     for (int i = 0; i < 900 && core::RimeEngine::Instance().IsMaintaining(); ++i) {
@@ -694,12 +769,46 @@ ITfContext* XimeTextService::CurrentContext() const {
 // ── ITfThreadMgrEventSink ───────────────────────────────────────────────────
 
 STDMETHODIMP XimeTextService::OnInitDocumentMgr(ITfDocumentMgr* pdim) {
-    (void)pdim;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)pdim;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnUninitDocumentMgr(ITfDocumentMgr* pdim) {
-    if (docMgr_ == pdim) {
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        if (docMgr_ == pdim) {
+            if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
+                contextSource_->UnadviseSink(textEditSinkCookie_);
+                textEditSinkCookie_ = TF_INVALID_COOKIE;
+            }
+            SafeRelease(contextSource_);
+            SafeRelease(context_);
+            context_ = nullptr;
+            SafeRelease(docMgr_);
+            docMgr_ = nullptr;
+        }
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
+}
+
+STDMETHODIMP XimeTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
+                                         ITfDocumentMgr* pdimPrevFocus) {
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)pdimPrevFocus;
         if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
             contextSource_->UnadviseSink(textEditSinkCookie_);
             textEditSinkCookie_ = TF_INVALID_COOKIE;
@@ -709,67 +818,82 @@ STDMETHODIMP XimeTextService::OnUninitDocumentMgr(ITfDocumentMgr* pdim) {
         context_ = nullptr;
         SafeRelease(docMgr_);
         docMgr_ = nullptr;
-    }
-    return S_OK;
-}
 
-STDMETHODIMP XimeTextService::OnSetFocus(ITfDocumentMgr* pdimFocus,
-                                         ITfDocumentMgr* pdimPrevFocus) {
-    (void)pdimPrevFocus;
-    if (contextSource_ && textEditSinkCookie_ != TF_INVALID_COOKIE) {
-        contextSource_->UnadviseSink(textEditSinkCookie_);
-        textEditSinkCookie_ = TF_INVALID_COOKIE;
-    }
-    SafeRelease(contextSource_);
-    SafeRelease(context_);
-    context_ = nullptr;
-    SafeRelease(docMgr_);
-    docMgr_ = nullptr;
-
-    if (pdimFocus && SUCCEEDED(pdimFocus->GetTop(&context_)) && context_) {
-        docMgr_ = pdimFocus;
-        docMgr_->AddRef();
-        if (SUCCEEDED(context_->QueryInterface(
-                IID_ITfSource, reinterpret_cast<void**>(&contextSource_)))) {
-            contextSource_->AdviseSink(IID_ITfTextEditSink,
-                                       static_cast<ITfTextEditSink*>(this),
-                                       &textEditSinkCookie_);
+        if (pdimFocus && SUCCEEDED(pdimFocus->GetTop(&context_)) && context_) {
+            docMgr_ = pdimFocus;
+            docMgr_->AddRef();
+            if (SUCCEEDED(context_->QueryInterface(
+                    IID_ITfSource, reinterpret_cast<void**>(&contextSource_)))) {
+                contextSource_->AdviseSink(IID_ITfTextEditSink,
+                                           static_cast<ITfTextEditSink*>(this),
+                                           &textEditSinkCookie_);
+            }
         }
+        return S_OK;
+    } catch (...) {
+        return S_OK;
     }
-    return S_OK;
 }
 
 STDMETHODIMP XimeTextService::OnPushContext(ITfContext* pic) {
-    (void)pic;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)pic;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnPopContext(ITfContext* pic) {
-    (void)pic;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)pic;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 // ── ITfTextEditSink / ITfCompositionSink ────────────────────────────────────
 
 STDMETHODIMP XimeTextService::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
                                         ITfEditRecord* pEditRecord) {
-    (void)pic;
-    (void)ecReadOnly;
-    (void)pEditRecord;
-    return S_OK;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)pic;
+        (void)ecReadOnly;
+        (void)pEditRecord;
+        return S_OK;
+    } catch (...) {
+        return S_OK;
+    }
 }
 
 STDMETHODIMP XimeTextService::OnCompositionTerminated(TfEditCookie ecWrite,
                                                       ITfComposition* pComposition) {
-    (void)ecWrite;
-    if (composition_ == pComposition) {
-        SafeRelease(composition_);
-        composition_ = nullptr;
+    // COM 回调不得让 C++ 异常逃逸：跨 COM/TSF 边界会直接终止宿主进程
+    // （事件日志表现为 TextInputFramework.dll + 0xC000041D）。
+    try {
+
+        (void)ecWrite;
+        if (composition_ == pComposition) {
+            SafeRelease(composition_);
+            composition_ = nullptr;
+        }
+        if (candidateWindow_) {
+            candidateWindow_->Hide();
+        }
+        return S_OK;
+    } catch (...) {
+        return S_OK;
     }
-    if (candidateWindow_) {
-        candidateWindow_->Hide();
-    }
-    return S_OK;
 }
 
 } // namespace tsf

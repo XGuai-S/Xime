@@ -93,9 +93,26 @@ bool RimeEngine::IsDeployed() const {
     if (userDataDir_.empty()) {
         return false;
     }
-    // librime 部署产物落在 <user>/build/；存在即视为已部署。
+    // librime 部署产物落在 <user>/build/。注意该目录可能由 rime 提前创建但为空，
+    // 因此必须看到真正的编译产物（*.bin，如 default.prism.bin）才算已部署，
+    // 否则会把"空目录"误判成已部署，从此再也不触发部署、永远没有候选。
     std::error_code ec;
-    return std::filesystem::is_directory(userDataDir_ + "/build", ec);
+    const std::filesystem::path buildDir =
+        std::filesystem::path(userDataDir_) / "build";
+    if (!std::filesystem::is_directory(buildDir, ec)) {
+        return false;
+    }
+    for (std::filesystem::directory_iterator it(buildDir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) {
+            continue;
+        }
+        const std::string name = it->path().filename().string();
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".bin") == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool RimeEngine::CreateSession() {

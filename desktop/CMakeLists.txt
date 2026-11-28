@@ -119,6 +119,27 @@ if(NOT MSVC)
 endif()
 add_dependencies(xime-register xime-tsf)
 
+# 部署预热工具：安装后离线完成 librime 部署，避免首次打字等待。
+add_executable(xime-deploy tools/Deploy.cpp
+  src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
+target_include_directories(xime-deploy PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  "${XIME_JNI_DIR}/librime/include"
+  "${XIME_JNI_DIR}/librime/src"
+  "${XIME_JNI_DIR}/librime-t9/src"
+  "${CMAKE_BINARY_DIR}/librime/src"
+)
+if(MSVC)
+  target_link_options(xime-deploy PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+  target_link_libraries(xime-deploy PRIVATE rime-static)
+else()
+  target_link_libraries(xime-deploy PRIVATE
+    -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  target_link_options(xime-deploy PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+target_link_libraries(xime-deploy PRIVATE ole32 uuid)
+add_dependencies(xime-deploy xime-tsf)
+
 # 引擎冒烟测试（仅在本机构建时启用；CI 亦可验证核心链路）。
 option(XIME_BUILD_SMOKE "构建引擎冒烟测试" ON)
 if(XIME_BUILD_SMOKE)
@@ -537,4 +558,58 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-firstrun-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-firstrun-smoke xime-tsf)
+
+  # 异常安全验收：TSF 回调里的异常不得逃逸到宿主进程（曾致宿主 0xC000041D 崩溃）。
+  add_executable(xime-exsafe-test tests/ExceptionSafetyTest.cpp
+    src/tsf/XimeTextService.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
+    src/core/CandidatePicker.cpp src/core/KeyMap.cpp src/core/KeyEatPolicy.cpp
+    src/core/AutoWordStore.cpp src/core/SchemaListConfig.cpp
+    src/settings/SettingsStore.cpp src/settings/SettingsApplier.cpp
+    src/plugins/PluginHost.cpp src/plugins/PluginManager.cpp
+    src/clipboard/ClipboardStore.cpp src/clipboard/WinClipboard.cpp
+    src/clipboard/ClipboardWatcher.cpp
+    src/ai/Json.cpp src/ai/AiProtocol.cpp src/ai/AiHttp.cpp
+    src/ai/AiProviderConfig.cpp src/ai/AiService.cpp
+    src/voice/Wav.cpp src/voice/VoiceService.cpp src/voice/AudioRecorder.cpp
+    src/ui/CandidateWindow.cpp)
+  target_include_directories(xime-exsafe-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src")
+  if(MSVC)
+    target_link_options(xime-exsafe-test PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-exsafe-test PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-exsafe-test PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-exsafe-test PRIVATE
+    ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp winmm xime-quickjs)
+  add_dependencies(xime-exsafe-test xime-tsf)
 endif()
+
+# ---- 安装规则 ----
+# 产物布局（CMAKE_INSTALL_PREFIX 下）：
+#   xime-tsf.dll       TSF 输入法前端（自包含，静态链 MinGW 运行时）
+#   xime-register.exe  注册/注销工具
+#   data/              librime 方案与词库（同 DLL 同级）
+# 安装后由 xime-register.exe install 完成系统注册（需管理员）。
+# 默认安装到 %LOCALAPPDATA%\Xime\ime（用户目录，无需管理员；注册时才提权）。
+# 显式传 -DCMAKE_INSTALL_PREFIX=... 可覆盖（此处仅在未显式传入时设置）。
+if(NOT XIME_INSTALL_PREFIX_SET)
+  if(DEFINED ENV{LOCALAPPDATA})
+    file(TO_CMAKE_PATH "$ENV{LOCALAPPDATA}/Xime/ime" XIME_DEFAULT_PREFIX)
+    set(CMAKE_INSTALL_PREFIX "${XIME_DEFAULT_PREFIX}" CACHE PATH "安装目录" FORCE)
+  endif()
+endif()
+
+install(TARGETS xime-tsf RUNTIME DESTINATION . LIBRARY DESTINATION .)
+install(TARGETS xime-register RUNTIME DESTINATION .)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/assets/rime/"
+        DESTINATION data
+        PATTERN ".git" EXCLUDE
+        PATTERN ".github" EXCLUDE)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/INSTALL.md" DESTINATION . OPTIONAL)
