@@ -53,6 +53,7 @@ add_library(xime-tsf SHARED
   src/ai/AiService.cpp
   src/clipboard/ClipboardStore.cpp
   src/clipboard/WinClipboard.cpp
+  src/clipboard/ClipboardWatcher.cpp
   src/settings/SettingsStore.cpp
   src/settings/SettingsApplier.cpp
   src/plugins/PluginHost.cpp
@@ -278,6 +279,13 @@ if(XIME_BUILD_SMOKE)
     src/clipboard/WinClipboard.cpp)
   target_include_directories(xime-winclip-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-winclip-test PRIVATE user32)
+
+  # 剪贴板自动捕获（轮询系统剪贴板入历史）。
+  add_executable(xime-clipwatch-test tests/ClipboardWatcherTest.cpp
+    src/clipboard/ClipboardWatcher.cpp src/clipboard/ClipboardStore.cpp
+    src/clipboard/WinClipboard.cpp src/ai/Json.cpp)
+  target_include_directories(xime-clipwatch-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-clipwatch-test PRIVATE user32)
 
   # 插件宿主测试（QuickJS 加载 main.js 并调用 transform.candidates）。
   add_executable(xime-plugin-test tests/PluginHostTest.cpp src/plugins/PluginHost.cpp)
