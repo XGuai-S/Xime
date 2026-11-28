@@ -159,6 +159,12 @@ void RimeEngine::SetPluginTransformFull(PluginTransformFull fn) {
     pluginTransformFull_ = std::move(fn);
 }
 
+void RimeEngine::ClearPluginTransforms() {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    pluginTransform_ = nullptr;
+    pluginTransformFull_ = nullptr;
+}
+
 void RimeEngine::ApplyPluginTransform(ProcessResult& result) {
     if (result.isAsciiMode || result.candidates.empty()) {
         return;

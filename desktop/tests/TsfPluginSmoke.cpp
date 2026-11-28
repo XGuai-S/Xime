@@ -116,6 +116,23 @@ var plugin = definePlugin({
     std::printf("TSFPLUG_CANDS=%zu ADDED=%d\n", last.candidates.size(),
                 foundAdded ? 1 : 0);
 
+    // 模拟 TSF Deactivate→Reactivate：清除回调后插件不得再干预候选。
+    engine.ClearPluginTransforms();
+    {
+        core::ProcessResult again;
+        for (const char* p = "nihao"; *p; ++p) {
+            again = engine.ProcessKeyAndGetResult(
+                static_cast<unsigned int>(*p), 0);
+        }
+        bool stale = false;
+        for (const auto& c : again.candidates) {
+            if (c.text == "插件新增") {
+                stale = true;
+            }
+        }
+        Check(!stale, "no stale transform after deactivate");
+    }
+
     if (fails == 0) {
         std::printf("TSFPLUG_SMOKE_OK\n");
         return 0;

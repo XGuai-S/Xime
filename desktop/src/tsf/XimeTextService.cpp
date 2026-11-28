@@ -259,8 +259,13 @@ STDMETHODIMP XimeTextService::Deactivate() {
         threadMgrSinkCookie_ = TF_INVALID_COOKIE;
     }
 
+    // 先清除引擎中的插件变换回调（它捕获 pluginManager_ 裸指针），
+    // 否则随后 pluginManager_ 释放后回调成为悬垂指针，重激活时 UAF。
+    core::RimeEngine::Instance().ClearPluginTransforms();
+
     core::RimeEngine::Instance().DestroySession();
     hasSession_ = false;
+    pluginManager_.reset();
 
     SafeRelease(contextSource_);
     SafeRelease(keystrokeMgr_);

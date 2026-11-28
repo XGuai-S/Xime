@@ -99,6 +99,8 @@ public:
     };
     using PluginTransformFull = std::function<void(PluginTransformContext&)>;
     void SetPluginTransformFull(PluginTransformFull fn);
+    // 清除所有插件变换回调（服务销毁时调用，避免持有已释放的插件宿主指针）。
+    void ClearPluginTransforms();
 
 private:
     RimeEngine() = default;
