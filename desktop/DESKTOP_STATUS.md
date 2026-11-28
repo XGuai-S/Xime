@@ -42,7 +42,7 @@ cmake --build desktop/build --config Release
 | 逻辑 | `keymap_test` / `xime-schemalist-test` / `xime-settings-test` | 键位、方案列表、设置往返 |
 | 备份 | `xime-backup-test` | ZIP `PK`、往返字节一致（含 settings.json）、防路径穿越 |
 | AI | `xime-ai-test` / `aiprotocol-test` / `aiservice-test` | STT 复用密钥/润色开关、JSON/协议、帮写+9 场景决策 |
-| AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` | Winsock/WinHTTP 回环真实收发、multipart/语音 |
+| AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` / `voicechain-smoke` | Winsock/WinHTTP 回环真实收发、multipart/语音、**真机录音全链路（→STT→直出）** |
 | 剪贴板 | `xime-clipboard-test` / `xime-winclip-test` | 文本+图片 DIB、OTP 隔离、真实 OS 剪贴板 |
 | 插件 | `xime-plugin-test` / `pluginmgr-test` / `plugincand-smoke` / `pluginfull-smoke` | 加载 main.js、目录链式、简单改★仍选中正确词、**完整契约 engineIndex+新增候选** |
 
@@ -61,7 +61,8 @@ cmake --build desktop/build --config Release
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
 | 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、目录管理、链式变换、TSF 启动加载 | ✅ |
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
-| AI 帮写面板 UI / 插件完整扩展点 / 实时同步 | ⬜ 待做 |
+| AI 帮写面板 UI / 插件 panel·onAction·speech 扩展点 / 实时同步 | ⬜ 待做 |
+| 真实麦克风采集（WinMM waveIn PCM16） / 语音全链路（真机录音→STT→直出） | ✅ 实测 |
 
 ## 四、环境限制（如实记录）
 
