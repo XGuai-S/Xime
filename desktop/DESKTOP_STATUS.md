@@ -40,7 +40,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-schemadeploy-smoke` | 写 schema_list→部署→选中 t9_pinyin |
 | 逻辑 | `xime-autoword-test` / `sc_test` | 造词算法与编码生成（对齐安卓用例） |
 | 逻辑 | `keymap_test` / `xime-schemalist-test` / `xime-settings-test` | 键位、方案列表、设置往返 |
-| 备份 | `xime-backup-test` | ZIP `PK`、往返字节一致、防路径穿越 |
+| 备份 | `xime-backup-test` | ZIP `PK`、往返字节一致（含 settings.json）、防路径穿越 |
 | AI | `xime-ai-test` / `aiprotocol-test` / `aiservice-test` | STT 复用密钥/润色开关、JSON/协议、帮写+9 场景决策 |
 | AI | `xime-aihttp-test` / `aihttp-winhttp-test` / `stt-test` / `voice-test` | Winsock/WinHTTP 回环真实收发、multipart/语音 |
 | 剪贴板 | `xime-clipboard-test` / `xime-winclip-test` | 文本+图片 DIB、OTP 隔离、真实 OS 剪贴板 |
