@@ -274,8 +274,54 @@ bool RimeEngine::IsAsciiMode() const {
 }
 
 void RimeEngine::ReapplyPageSizeIfNeeded() {
-    // M1 暂不覆盖每页候选数，沿用方案自带值。
-    // Android 端通过内部 rime::Service API 覆盖；桌面版在 M2 设置模块接入。
+    if (pageSize_ <= 0 || session_ == 0 || !rime_) {
+        return;
+    }
+    char buf[256] = {0};
+    if (rime_->get_current_schema(session_, buf, sizeof(buf))) {
+        ApplyPageSizeOverrideLocked(buf);
+    }
+}
+
+bool RimeEngine::SetPageSize(int pageSize) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    if (!rime_ || !initialized_ || pageSize <= 0) {
+        return false;
+    }
+    pageSize_ = pageSize;
+    char buf[256] = {0};
+    if (session_ != 0 && rime_->get_current_schema(session_, buf, sizeof(buf))) {
+        ApplyPageSizeOverrideLocked(buf);
+    }
+    return true;
+}
+
+void RimeEngine::ApplyPageSizeOverrideLocked(const std::string& schemaId) {
+    if (!rime_ || pageSize_ <= 0 || schemaId.empty()) {
+        return;
+    }
+    RimeConfig config;
+    if (rime_->schema_open(schemaId.c_str(), &config)) {
+        rime_->config_set_int(&config, "menu/page_size", pageSize_);
+        rime_->config_close(&config);
+    }
+    if (session_ == 0) {
+        return;
+    }
+    rime::Service& service = rime::Service::instance();
+    auto session = service.GetSession(static_cast<rime::SessionId>(session_));
+    if (!session) {
+        return;
+    }
+    auto schema = session->schema();
+    if (!schema || schema->schema_id() != schemaId) {
+        return;
+    }
+    if (!initialized_) {
+        return;
+    }
+    // 重建 Schema 以让构造时读取的 menu/page_size 生效（引擎未就绪时跳过，值已写入配置）。
+    session->ApplySchema(new rime::Schema(schema->schema_id()));
 }
 
 } // namespace core

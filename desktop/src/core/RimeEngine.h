@@ -59,16 +59,22 @@ public:
     bool SelectSchema(const std::string& schemaId);
     bool IsAsciiMode() const;
 
+    // 每页候选数（对齐安卓设置 5..50）。写入当前方案 menu/page_size 并重建 Schema 生效。
+    bool SetPageSize(int pageSize);
+    int PageSize() const { return pageSize_; }
+
 private:
     RimeEngine() = default;
 
     void ReadCurrentState(ProcessResult& result) const;
     void FlushT9IfActive();
     void ReapplyPageSizeIfNeeded();
+    void ApplyPageSizeOverrideLocked(const std::string& schemaId);
 
     RimeApi* rime_ = nullptr;
     RimeSessionId session_ = 0;
     bool initialized_ = false;
+    int pageSize_ = 0;
     std::string userDataDir_;
     std::string sharedDataDir_;
 };
