@@ -35,6 +35,7 @@ cmake --build desktop/build --config Release
 | 核心 | `xime-t9-smoke` | T9 九键 `64426`→`你好`，面板状态填充 |
 | 核心 | `xime-word-smoke` | `拟好`两上屏后置顶，显示位选词回引擎 |
 | 核心 | `xime-page-smoke` | 每页 5→9；方案 pinyin↔wubi 切换 |
+| 核心 | `xime-pageflip-smoke` | 每页1候选 `nihao`→「你好」→下一页「拟好」→回退 |
 | 核心 | `xime-autocand-smoke` | 造词`小霞`→码`ihfn`→候选出现 |
 | 核心 | `xime-schemadeploy-smoke` | 写 schema_list→部署→选中 t9_pinyin |
 | 逻辑 | `xime-autoword-test` / `sc_test` | 造词算法与编码生成（对齐安卓用例） |
@@ -51,14 +52,14 @@ cmake --build desktop/build --config Release
 |---|---|
 | librime 1.18.0 + T9 定制 + lua/octagram/predict 插件 | ✅ |
 | 拼音/五笔/T9 打字、候选/翻页/选词上屏 | ✅ |
-| 每页候选数（5..50）、方案切换/管理持久化 | ✅ |
+| 每页候选数（5..50）、方案切换/管理持久化、候选翻页 | ✅ |
 | 上屏词频 + 候选重排（engineIndex 保选词正确） | ✅ |
 | 自动造词（组合算法 + 编码生成 + 候选接入 + 上屏） | ✅ |
 | 备份/恢复（本地 ZIP 白名单、防穿越） | ✅ |
 | 统一设置存储（settings.json 原子写） | ✅ |
 | AI：服务商配置、STT 复用密钥、润色开关、帮写 HelpWrite、OpenAI 协议、Winsock/WinHTTP 传输、服务门面、STT 上传、语音链路 | ✅ |
 | 剪贴板：文本历史/置顶/OTP 隔离、快捷发送、图片 DIB、真实 OS 读写 | ✅ |
-| 插件：内嵌 QuickJS、加载 main.js、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、目录管理、链式变换 | ✅ |
+| 插件：内嵌 QuickJS、加载 main.js、transform 15ms 硬超时（死循环不卡输入）、**XimeTransformRequest/Response 完整契约（engineIndex 重映射 + 新增候选）**、目录管理、链式变换、TSF 启动加载 | ✅ |
 | TSF COM 前端（文本服务/按键/组合/edit session/候选窗口/注册工具） | ✅ 编译链接通过 |
 | AI 帮写面板 UI / 插件完整扩展点 / 实时同步 | ⬜ 待做 |
 
