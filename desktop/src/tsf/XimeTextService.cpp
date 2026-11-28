@@ -44,6 +44,10 @@ void SafeRelease(IUnknown* p) {
     }
 }
 
+// 用于取本模块 HMODULE 的锚点函数（必须定义在本模块内，
+// GetModuleHandleExW 的 FROM_ADDRESS 才会解析到本 DLL）。
+void ModuleAnchor() {}
+
 // TSF 的所有文本改动（提交、组合、清空）都必须在 edit session 内、凭有效
 // edit cookie 执行。这里用一个同步 edit session 封装，回调里拿 cookie 干活。
 class FuncEditSession : public ITfEditSession {
@@ -190,8 +194,20 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         }
 
         // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
+        // 注意：必须用本 DLL 的 HMODULE 取路径。TSF 把 DLL 加载进宿主进程，
+        // GetModuleFileNameW(nullptr, ...) 返回的是宿主 EXE（explorer.exe 等）的路径，
+        // 会把共享数据目录算成 C:\Windows\data，导致引擎一个方案都加载不到、
+        // 按键全部直通（表现为"只能打英文"）。
+        // 取本模块地址必须用本文件内定义的函数，导入函数的地址在 IAT 里，不属于本模块。
+        HMODULE selfModule = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&ModuleAnchor), &selfModule)) {
+            selfModule = nullptr;
+        }
         wchar_t modulePath[MAX_PATH] = {0};
-        GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        GetModuleFileNameW(selfModule, modulePath, MAX_PATH);
         std::wstring dir(modulePath);
         const size_t slash = dir.find_last_of(L"\\/");
         if (slash != std::wstring::npos) {

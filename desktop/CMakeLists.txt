@@ -589,6 +589,11 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-exsafe-test PRIVATE
     ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 winhttp winmm xime-quickjs)
   add_dependencies(xime-exsafe-test xime-tsf)
+  # 共享数据目录解析：必须用本 DLL 的 HMODULE 取路径，而非宿主 EXE（否则
+  # 引擎找不到 data/ 方案，表现为"只能打英文"）。
+  add_executable(xime-pathresolve-test tests/PathResolveTest.cpp)
+  # 宿主模拟：把安装好的 DLL 载入另一个进程，验证 DLL 能定位自己的 data/。
+  add_executable(xime-hostsim-test tests/HostSimTest.cpp)
 endif()
 
 # ---- 安装规则 ----
