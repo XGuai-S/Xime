@@ -213,6 +213,12 @@ if(XIME_BUILD_SMOKE)
   target_include_directories(xime-aihttp-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-aihttp-test PRIVATE ws2_32 Threads::Threads)
 
+  # STT multipart 上传测试（构造 + 回环真实发送 + 解析 text）。
+  add_executable(xime-stt-test tests/AiSttTest.cpp
+    src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
+  target_include_directories(xime-stt-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-stt-test PRIVATE ws2_32 Threads::Threads)
+
   # 方案管理端到端：写 schema_list → 部署 → 选中。
   add_executable(xime-schemadeploy-smoke tests/SchemaDeploySmoke.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/SchemaListConfig.cpp)

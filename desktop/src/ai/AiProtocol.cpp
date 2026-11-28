@@ -108,5 +108,29 @@ std::string ResolveSttEndpoint(const std::string& baseUrl) {
     return base + "/v1/audio/transcriptions";
 }
 
+std::string BuildSttMultipartBody(const std::string& boundary,
+                                  const std::string& model,
+                                  const std::string& filename,
+                                  const std::string& audioData,
+                                  std::string& outContentType) {
+    outContentType = "multipart/form-data; boundary=" + boundary;
+    std::string out;
+    out += "--" + boundary + "\r\n";
+    out += "Content-Disposition: form-data; name=\"model\"\r\n\r\n";
+    out += model + "\r\n";
+    out += "--" + boundary + "\r\n";
+    out += "Content-Disposition: form-data; name=\"file\"; filename=\"" +
+           filename + "\"\r\n";
+    out += "Content-Type: application/octet-stream\r\n\r\n";
+    out += audioData;
+    out += "\r\n--" + boundary + "--\r\n";
+    return out;
+}
+
+std::string ExtractSttText(const std::string& responseJson) {
+    const JsonValue root = JsonParse(responseJson);
+    return root.GetString("text");
+}
+
 } // namespace ai
 } // namespace xime
