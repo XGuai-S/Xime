@@ -3,6 +3,7 @@
 
 #include <rime_api.h>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -67,6 +68,14 @@ public:
     bool SetPageSize(int pageSize);
     int PageSize() const { return pageSize_; }
 
+    // ── 自动造词接入 ──
+    // 为指定方案加载单字码表（用于合成组合词编码）；方案切换/建会话后自动调用。
+    void BuildAutoIndex(const std::string& schemaId);
+    // 注入自动造词词表（来自 AutoWordStore 临时库；测试可直接注入）。
+    void SetAutoTempWords(const std::vector<std::string>& words);
+    // 用当前方案单字码表给 word 合成可打出的编码（用于验证/记录）。
+    std::vector<std::string> ComposeWordCodes(const std::string& word) const;
+
 private:
     RimeEngine() = default;
 
@@ -74,6 +83,7 @@ private:
     void FlushT9IfActive();
     void ReapplyPageSizeIfNeeded();
     void ApplyPageSizeOverrideLocked(const std::string& schemaId);
+    void BuildAutoIndexLocked(const std::string& schemaId);
 
     RimeApi* rime_ = nullptr;
     RimeSessionId session_ = 0;
@@ -81,6 +91,9 @@ private:
     int pageSize_ = 0;
     std::string userDataDir_;
     std::string sharedDataDir_;
+    // 当前方案的单字码表（自动造词合成编码用）与临时造词词表。
+    std::map<std::string, std::vector<std::string>> charCodes_;
+    std::vector<std::string> autoTempWords_;
 };
 
 } // namespace core

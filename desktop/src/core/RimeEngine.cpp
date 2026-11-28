@@ -6,10 +6,12 @@
 
 #include "t9_processor.h"
 #include "WordFreqStore.h"
+#include "SchemeCodeIndex.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 
 #ifndef XIME_RIME_MODULES
@@ -93,6 +95,10 @@ bool RimeEngine::CreateSession() {
     session_ = rime_->create_session();
     if (session_ != 0) {
         ReapplyPageSizeIfNeeded();
+        char buffer[256] = {0};
+        if (rime_->get_current_schema(session_, buffer, sizeof(buffer))) {
+            BuildAutoIndexLocked(buffer);
+        }
     }
     return session_ != 0;
 }
@@ -240,6 +246,40 @@ void RimeEngine::ReadCurrentState(ProcessResult& result) const {
         rime_->free_status(&status);
     }
 
+    // 自动造词候选：用当前方案单字码给临时造词合成编码，命中当前输入则追加为候选
+    // （engineIndex=-1 表示非引擎词，选中直接上屏文本）。仅非 ascii、非 T9 时。
+    const bool t9ForAuto = rime::T9ProcessorRequire() != nullptr;
+    if (!result.isAsciiMode && !t9ForAuto && !result.inputText.empty() &&
+        !charCodes_.empty() && !autoTempWords_.empty()) {
+        for (const auto& w : autoTempWords_) {
+            const auto codes = SchemeCodeIndex::ComposeCodes(w, charCodes_);
+            bool hit = false;
+            for (const auto& c : codes) {
+                if (c == result.inputText) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) {
+                continue;
+            }
+            bool exists = false;
+            for (const auto& c : result.candidates) {
+                if (c.text == w) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                Candidate autoCand;
+                autoCand.text = w;
+                autoCand.comment = "造词";
+                autoCand.engineIndex = -1;
+                result.candidates.push_back(std::move(autoCand));
+            }
+        }
+    }
+
     // T9 快照：仅当 T9 处理器活跃时填充。
     if (rime::T9Processor* t9 = rime::T9ProcessorRequire()) {
         result.t9PanelState = t9->GetLeftPanelState();
@@ -307,7 +347,70 @@ bool RimeEngine::SelectSchema(const std::string& schemaId) {
     if (!HasSession() || schemaId.empty()) {
         return false;
     }
-    return rime_->select_schema(session_, schemaId.c_str()) != 0;
+    const bool ok = rime_->select_schema(session_, schemaId.c_str()) != 0;
+    if (ok) {
+        BuildAutoIndexLocked(schemaId);
+    }
+    return ok;
+}
+
+void RimeEngine::BuildAutoIndex(const std::string& schemaId) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    BuildAutoIndexLocked(schemaId);
+}
+
+void RimeEngine::BuildAutoIndexLocked(const std::string& schemaId) {
+    charCodes_.clear();
+    if (schemaId.empty()) {
+        return;
+    }
+    // 方案词典源文件名通常与方案 id 同名（wubi86 / pinyin_simp …），
+    // 在共享数据目录（DLL 同级 data）中查找 .dict.yaml。
+    const std::string path = sharedDataDir_ + "/" + schemaId + ".dict.yaml";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> entries;
+    std::string line;
+    bool inBody = false;
+    while (std::getline(in, line)) {
+        if (!inBody) {
+            if (line == "..." || line.rfind("...", 0) == 0) {
+                inBody = true;
+            }
+            continue;
+        }
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        // 每行： 词\t码[\t权重]
+        const size_t t1 = line.find('\t');
+        if (t1 == std::string::npos) {
+            continue;
+        }
+        const std::string word = line.substr(0, t1);
+        // 仅保留单字（单码点）条目，减少内存与后续过滤量。
+        if (SchemeCodeIndex::CodePointStrings(word).size() != 1) {
+            continue;
+        }
+        const size_t t2 = line.find('\t', t1 + 1);
+        const std::string code =
+            line.substr(t1 + 1, (t2 == std::string::npos ? std::string::npos
+                                                          : t2 - t1 - 1));
+        entries.emplace_back(word, code);
+    }
+    charCodes_ = SchemeCodeIndex::BuildCharCodes(entries);
+}
+
+void RimeEngine::SetAutoTempWords(const std::vector<std::string>& words) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    autoTempWords_ = words;
+}
+
+std::vector<std::string> RimeEngine::ComposeWordCodes(const std::string& word) const {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    return SchemeCodeIndex::ComposeCodes(word, charCodes_);
 }
 
 bool RimeEngine::IsAsciiMode() const {

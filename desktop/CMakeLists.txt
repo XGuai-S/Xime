@@ -153,4 +153,24 @@ if(XIME_BUILD_SMOKE)
   # 组合生词编码生成纯逻辑单测。
   add_executable(xime-scheme-test tests/SchemeCodeIndexTest.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-scheme-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 自动造词候选接入冒烟（真实 librime + wubi86 单字码）。
+  add_executable(xime-autocand-smoke tests/AutoCandSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
+  target_include_directories(xime-autocand-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  if(MSVC)
+    target_link_options(xime-autocand-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-autocand-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-autocand-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-autocand-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-autocand-smoke xime-tsf)
 endif()

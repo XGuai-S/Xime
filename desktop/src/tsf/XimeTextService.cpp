@@ -342,11 +342,19 @@ bool XimeTextService::HandleCandidateSelection(ITfContext* context,
         return false;
     }
     // 候选可能被词频重排：数字键对应「显示位」，选词要回到它原本的引擎下标。
-    if (displayIndex < static_cast<int>(lastCandidates_.size()) &&
-        lastCandidates_[displayIndex].engineIndex >= 0) {
-        const auto result = core::RimeEngine::Instance().SelectCandidateByEngineIndex(
-            lastCandidates_[displayIndex].engineIndex);
-        ApplyEngineResult(context, result);
+    if (displayIndex < static_cast<int>(lastCandidates_.size())) {
+        const auto& cand = lastCandidates_[displayIndex];
+        if (cand.engineIndex >= 0) {
+            const auto result =
+                core::RimeEngine::Instance().SelectCandidateByEngineIndex(
+                    cand.engineIndex);
+            ApplyEngineResult(context, result);
+            return true;
+        }
+        // engineIndex < 0：自动造词候选，非引擎词，直接上屏其文本并清空引擎组合。
+        core::RimeEngine::Instance().ClearComposition();
+        CommitText(context, cand.text);
+        lastCandidates_.clear();
         return true;
     }
     // 无候选映射时退回引擎页内选词。
