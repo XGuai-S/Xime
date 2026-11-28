@@ -393,7 +393,7 @@ if(XIME_BUILD_SMOKE)
 
   # 候选翻页端到端：真实 librime 多页 → ChangePage 前后翻页。
   add_executable(xime-pageflip-smoke tests/PageFlipSmoke.cpp
-    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/CandidatePicker.cpp)
   target_include_directories(xime-pageflip-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
@@ -420,4 +420,24 @@ if(XIME_BUILD_SMOKE)
     "${XIME_JNI_DIR}/librime/src"
     "${CMAKE_BINARY_DIR}/librime/src"
   )
+
+  # 中/英文切换端到端：真实 librime ascii_mode toggle。
+  add_executable(xime-ascii-smoke tests/AsciiToggleSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/CandidatePicker.cpp)
+  target_include_directories(xime-ascii-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  if(MSVC)
+    target_link_options(xime-ascii-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-ascii-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-ascii-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-ascii-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-ascii-smoke xime-tsf)
 endif()

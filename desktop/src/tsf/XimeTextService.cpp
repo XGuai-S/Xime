@@ -168,6 +168,12 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         keystrokeMgr_->AdviseKeyEventSink(clientId_,
                                           static_cast<ITfKeyEventSink*>(this),
                                           TRUE);
+        // 注册中/英文切换保留键（Shift，同主流中文输入法）。
+        TF_PRESERVEDKEY pk = {};
+        pk.uVKey = VK_SHIFT;
+        pk.uModifiers = 0;
+        keystrokeMgr_->PreserveKey(clientId_, GUID_XimeToggleAsciiKey, &pk,
+                                   nullptr, 0);
     }
 
     // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
@@ -374,8 +380,14 @@ STDMETHODIMP XimeTextService::OnKeyUp(ITfContext* pic, WPARAM wParam,
 STDMETHODIMP XimeTextService::OnPreservedKey(ITfContext* pic, REFGUID rguid,
                                              BOOL* pfEaten) {
     (void)pic;
-    (void)rguid;
     *pfEaten = FALSE;
+    if (!IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
+        return S_OK;
+    }
+    if (EnsureSession()) {
+        core::RimeEngine::Instance().ToggleAsciiMode();
+        *pfEaten = TRUE;
+    }
     return S_OK;
 }
 
@@ -401,6 +413,12 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
     }
 
     if (!EnsureSession()) {
+        return S_OK;
+    }
+
+    // 英文模式：字母/符号直接交给应用（不进入引擎组合），与原生英文输入一致。
+    if (core::RimeEngine::Instance().IsAsciiMode() && core::IsRimeKey(vk) &&
+        vk != VK_BACK && vk != VK_RETURN && vk != VK_ESCAPE) {
         return S_OK;
     }
 

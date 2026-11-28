@@ -70,6 +70,8 @@ public:
     std::string CurrentSchema() const;
     bool SelectSchema(const std::string& schemaId);
     bool IsAsciiMode() const;
+    // 切换中/英文（ascii_mode），返回切换后的状态。失败返回当前状态。
+    bool ToggleAsciiMode();
 
     // 每页候选数（对齐安卓设置 5..50）。写入当前方案 menu/page_size 并重建 Schema 生效。
     bool SetPageSize(int pageSize);

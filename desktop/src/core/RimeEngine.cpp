@@ -510,6 +510,16 @@ bool RimeEngine::IsAsciiMode() const {
     return false;
 }
 
+bool RimeEngine::ToggleAsciiMode() {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    if (!HasSession()) {
+        return false;
+    }
+    const bool current = rime_->get_option(session_, "ascii_mode") != 0;
+    rime_->set_option(session_, "ascii_mode", current ? 0 : 1);
+    return !current;
+}
+
 void RimeEngine::ReapplyPageSizeIfNeeded() {
     if (pageSize_ <= 0 || session_ == 0 || !rime_) {
         return;
