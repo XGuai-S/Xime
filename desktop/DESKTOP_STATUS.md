@@ -1,6 +1,15 @@
 # Xime 桌面版（Windows）状态报告
-
 生成时间：2026-11-28　｜　分支：`desktop`　｜　基线：Android 3.4.70（`baseline-android-3.4.70` / `51eaf367`，保持不变）
+
+## 〇、在本机安装为系统输入法（2026-11-28 已完成注册）
+
+已在本机（DESKTOP-M8FQP52）**注册为系统 TSF 输入法**并通过验证：
+- DLL 静态链接 MinGW 运行时（自包含，仅依赖系统 DLL），去除 lib 前缀为 `xime-tsf.dll`，显式导出 `DllGetClassObject/DllCanUnloadNow`。
+- 注册工具改用 `ITfInputProcessorProfiles::Register` + `ITfInputProcessorProfileMgr::RegisterProfile`（zh-CN 0x0804，`bEnabledByDefault=TRUE`）+ `ITfCategoryMgr::RegisterCategory`（键盘 / immersive / UI 元素三类）。
+- 验证：COM `DllGetClassObject→CreateInstance` 均 `S_OK`；系统 `GetLanguageProfileDescription` 返回「Xime 输入法」`RECOGNIZED=YES`。
+- 注册命令（需管理员）：`xime-register.exe install`；卸载：`xime-register.exe uninstall`。
+- DLL 当前位于 `desktop/build/xime-tsf.dll`（数据在同目录 `data/`）；用户数据在 `%LOCALAPPDATA%\Xime`。
+- 仅 64 位；32 位应用需另编 32 位 DLL。
 
 ## 一、构建与产物
 
