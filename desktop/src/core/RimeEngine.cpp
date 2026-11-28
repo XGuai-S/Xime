@@ -136,14 +136,17 @@ bool RimeEngine::CreateSession() {
     if (!rime_ || !initialized_) {
         return false;
     }
-    // 先销毁旧会话：重复创建会让上一个 librime Session（连同词典与组件）
-    // 失去引用而永久泄漏。TSF 反复激活时这条路径会被频繁走到。
+    // TSF 会为每个激活本 TIP 的线程各建一个 XimeTextService 实例，但引擎是
+    // 进程级单例。若这里无条件重建 session_，实例 B 会覆盖实例 A 正在用的会话，
+    // 之后 A 的按键全部作用在 B 的会话上、A 的 Deactivate 又会把 B 的会话销毁。
+    // 故改为引用计数：已有会话就复用并加计数，最后一个实例销毁时才真正释放。
     if (session_ != 0) {
-        rime_->destroy_session(session_);
-        session_ = 0;
+        ++sessionRefs_;
+        return true;
     }
     session_ = rime_->create_session();
     if (session_ != 0) {
+        sessionRefs_ = 1;
         ReapplyPageSizeIfNeeded();
         char buffer[256] = {0};
         if (rime_->get_current_schema(session_, buffer, sizeof(buffer))) {
@@ -155,6 +158,13 @@ bool RimeEngine::CreateSession() {
 
 void RimeEngine::DestroySession() {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
+    // 引用计数归零才真正销毁（见 CreateSession 说明）。
+    if (sessionRefs_ > 0) {
+        --sessionRefs_;
+    }
+    if (sessionRefs_ > 0) {
+        return;
+    }
     if (rime_ && session_ != 0) {
         rime_->destroy_session(session_);
         session_ = 0;

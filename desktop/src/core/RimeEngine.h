@@ -127,6 +127,8 @@ private:
 
     RimeApi* rime_ = nullptr;
     RimeSessionId session_ = 0;
+    // 会话引用计数：TSF 每个激活线程一个 TIP 实例，共用同一份 librime 会话。
+    int sessionRefs_ = 0;
     bool initialized_ = false;
     int pageSize_ = 0;
     std::string userDataDir_;

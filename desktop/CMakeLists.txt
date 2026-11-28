@@ -37,6 +37,7 @@ endif()
 # TSF 前端 DLL。
 add_library(xime-tsf SHARED
   src/core/RimeEngine.cpp
+  src/core/Log.cpp
   src/core/CandidatePicker.cpp
   src/core/KeyEatPolicy.cpp
   src/core/WordFreqStore.cpp
@@ -586,7 +587,7 @@ if(XIME_BUILD_SMOKE)
 
   # 异常安全验收：TSF 回调里的异常不得逃逸到宿主进程（曾致宿主 0xC000041D 崩溃）。
   add_executable(xime-exsafe-test tests/ExceptionSafetyTest.cpp
-    src/tsf/XimeTextService.cpp src/tsf/LangBarButton.cpp
+    src/tsf/XimeTextService.cpp src/tsf/LangBarButton.cpp src/core/Log.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
     src/core/CandidatePicker.cpp src/core/KeyMap.cpp src/core/KeyEatPolicy.cpp
     src/core/AutoWordStore.cpp src/core/SchemaListConfig.cpp
@@ -633,6 +634,9 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-langbar-test tests/LangBarTest.cpp)
   target_include_directories(xime-langbar-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-langbar-test PRIVATE ole32 uuid)
+  # 日志功能：文件创建/格式/级别开关/立即落盘。
+  add_executable(xime-log-test tests/LogTest.cpp src/core/Log.cpp)
+  target_include_directories(xime-log-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   # 恶意输入健壮性：深嵌套 JSON 不炸栈、畸形 ZIP 不越界读。
   add_executable(xime-fuzz-test tests/MaliciousInputTest.cpp
     src/ai/Json.cpp src/backup/BackupArchive.cpp)

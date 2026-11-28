@@ -12,6 +12,16 @@ DEFINE_GUID(CLSID_XimeTextService,
 DEFINE_GUID(GUID_XimeProfile,
             0xb4e92f10, 0x7a6c, 0x4d85, 0xa3, 0xf2, 0x1c, 0x8d, 0x9e, 0x4b, 0x7a, 0x60);
 
+// 语言栏项的 GUID。
+// 注意：Windows 8 起，输入指示器只显示 guidItem == GUID_LBI_INPUTMODE 的语言栏项
+//（见 MSDN ITfLangBarItemMgr::AddItem）。用自定义 GUID 会 AddItem 失败或不被显示，
+// 表现为"任务栏没有输入法图标、切不了中英"。
+// {2C77A81E-41CC-4178-A3A7-5F8A987568E6}
+DEFINE_GUID(GUID_LBI_INPUTMODE,
+            0x2c77a81e, 0x41cc, 0x4178, 0xa3, 0xa7, 0x5f, 0x8a, 0x98, 0x75,
+            0x68, 0xe6);
+
+// Xime 自身的语言栏项标识（保留给非输入指示器场景）。
 // {2D5A8C30-91E4-4F76-B0C8-3A7D1E9F4B52}
 DEFINE_GUID(GUID_XimeLangBarItem,
             0x2d5a8c30, 0x91e4, 0x4f76, 0xb0, 0xc8, 0x3a, 0x7d, 0x1e, 0x9f, 0x4b, 0x52);

@@ -1,12 +1,16 @@
 // 补齐 MinGW ctfutb.h 缺失的语言栏定义。
 //
-// MinGW 的 ctfutb.h 已提供：ITfLangBarItem、ITfLangBarItemSink、
-// ITfLangBarItemMgr、TF_LANGBARITEMINFO 及其 IID。
-// 缺失的是：ITfMenu、ITfLangBarItemButton、TfLBIClick 与 TF_LBI_* 常量。
-// 这里只补缺失部分，避免与系统头重复定义。
+// 重要：MinGW 的 ctfutb.h **已经提供** ITfLangBarItem / ITfLangBarItemSink /
+// ITfLangBarItemMgr 接口及其 IID（真实值，与 Windows SDK 一致）：
+//   IID_ITfLangBarItem      {73540D69-EDEB-4EE9-96C9-23AA30B25916}
+//   IID_ITfLangBarItemSink  {57DBE1A0-DE25-11D2-AFDD-00105A2799B5}
+//   IID_ITfLangBarItemMgr   {BA468C55-9956-4FB1-A59D-52A7DD7CC6AA}
+// 因此这里**绝不能**再 DEFINE_GUID 一遍 —— 重复定义会生成第二个同名 GUID 对象，
+// 导致 QueryInterface 用的 IID 与系统对象实际支持的 IID 不是同一个符号，
+// 表现为"查询语言栏管理器总是失败"（日志里 语言栏=不可用）。
 //
-// IID 与 vtable 顺序取自 Windows SDK (ctfutb.h) / microsoft win32metadata，
-// 不可凭记忆改动，否则运行期调用错位会直接崩溃。
+// 本文件只补 MinGW 真正缺的部分：ITfMenu、ITfLangBarItemButton、TfLBIClick
+// 与 TF_LBI_* 常量。
 #pragma once
 
 #include <windows.h>
@@ -14,9 +18,9 @@
 #include <ctfutb.h>
 #include <objbase.h>
 
-// ── 缺失的 IID ──────────────────────────────────────────────────────────────
-#ifndef IID_ITfLangBarItemButton
+// ── 缺失的 IID（仅 ITfLangBarItemButton）────────────────────────────────────
 // {28C7F1D0-DE25-11D2-AFDD-00105A2799B5}
+#ifndef IID_ITfLangBarItemButton
 DEFINE_GUID(IID_ITfLangBarItemButton,
             0x28c7f1d0, 0xde25, 0x11d2, 0xaf, 0xdd, 0x00, 0x10, 0x5a, 0x27,
             0x99, 0xb5);
@@ -60,8 +64,7 @@ typedef enum __TfLBIClick {
 } TfLBIClick;
 #endif
 
-// ── ITfMenu（只用 AddMenuItem；vtbl 3 起，共 4 个 Add* + 结束）─────────────
-// SDK 顺序：AddMenuItem, AddMenuSeparator, AddMenu, EndMenu
+// ── ITfMenu（SDK 顺序：AddMenuItem, AddMenuSeparator, AddMenu, EndMenu）────
 #ifndef __ITfMenu_INTERFACE_DEFINED__
 #define __ITfMenu_INTERFACE_DEFINED__
 struct ITfMenu : public IUnknown {
@@ -76,7 +79,7 @@ struct ITfMenu : public IUnknown {
 };
 #endif
 
-// ── ITfLangBarItemButton（vtbl 7..11，继承 ITfLangBarItem）──────────────────
+// ── ITfLangBarItemButton（继承已有的 ITfLangBarItem，vtbl 7..11）────────────
 #ifndef __ITfLangBarItemButton_INTERFACE_DEFINED__
 #define __ITfLangBarItemButton_INTERFACE_DEFINED__
 struct ITfLangBarItemButton : public ITfLangBarItem {

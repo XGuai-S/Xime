@@ -16,11 +16,16 @@
 namespace {
 
 // 部分 TSF 类别 GUID 在 MinGW 头中缺失，这里补齐（Windows SDK 公开值）。
-// GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT / UIELEMENTENABLED
+// GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT / UIELEMENTENABLED / SYSTRAYSUPPORT
 static const GUID kTipCapImmersive = {
     0x13a016df, 0x560b, 0x46cd, {0x94, 0x7a, 0x4c, 0x3a, 0xf1, 0xe0, 0xe3, 0x5d}};
 static const GUID kTipCapUIElement = {
     0x6c47465f, 0xd4a3, 0x4d48, {0x9d, 0x5b, 0xb9, 0x25, 0x5b, 0x3f, 0xa5, 0xc5}};
+// {57F3AF1C-3F9F-4E1C-A3B0-3A1C2F0F4E5D} 是占位；真实值见下。
+// GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT = {25504FB4-7BAB-4BC1-9C69-CF81890F0EF5}
+// （Win10/11 要在输入指示器里显示第三方输入法，这个分类是必需的）
+static const GUID kTipCapSysTray = {
+    0x25504fb4, 0x7bab, 0x4bc1, {0x9c, 0x69, 0xcf, 0x81, 0x89, 0x0f, 0x0e, 0xf5}};
 
 constexpr LANGID kLang = MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED);
 
@@ -121,6 +126,9 @@ bool Install() {
         cat->RegisterCategory(CLSID_XimeTextService, kTipCapImmersive,
                               CLSID_XimeTextService);
         cat->RegisterCategory(CLSID_XimeTextService, kTipCapUIElement,
+                              CLSID_XimeTextService);
+        // Win10/11：第三方输入法要在任务栏输入指示器里出现，必须有这个能力分类。
+        cat->RegisterCategory(CLSID_XimeTextService, kTipCapSysTray,
                               CLSID_XimeTextService);
         cat->Release();
     }

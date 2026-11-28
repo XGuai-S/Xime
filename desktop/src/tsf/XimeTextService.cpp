@@ -1,6 +1,7 @@
 #include "XimeTextService.h"
 
 #include "../core/KeyMap.h"
+#include "../core/Log.h"
 #include "../core/RimeEngine.h"
 #include "../core/CandidatePicker.h"
 #include "../core/KeyEatPolicy.h"
@@ -166,6 +167,8 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         if (activated_) {
             return S_FALSE;
         }
+        log::Init();
+        log::WriteInfo("Activate 开始 tid=%lu", GetCurrentThreadId());
 
         threadMgr_ = ptim;
         threadMgr_->AddRef();
@@ -236,12 +239,21 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
             return out;
         };
 
-        core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
-                                                wideToUtf8(dataDir));
+        log::WriteInfo("路径 userDir=%s", wideToUtf8(userDir).c_str());
+        log::WriteInfo("路径 dataDir=%s", wideToUtf8(dataDir).c_str());
+        const bool inited =
+            core::RimeEngine::Instance().Initialize(wideToUtf8(userDir),
+                                                    wideToUtf8(dataDir));
+        log::WriteInfo("RimeEngine::Initialize = %d", static_cast<int>(inited));
         // 首启部署：用户目录尚无编译产物时触发一次完整部署，否则无候选可用。
-        // 非阻塞：部署在后台线程，Enter 时由 EnsureSession 等待完成。
-        if (!core::RimeEngine::Instance().IsDeployed()) {
-            core::RimeEngine::Instance().StartMaintenance(true);
+        // 非阻塞：部署在后台线程，按键时若仍在部署则直接放行（不阻塞 UI）。
+        const bool deployed = core::RimeEngine::Instance().IsDeployed();
+        log::WriteInfo("IsDeployed = %d", static_cast<int>(deployed));
+        if (!deployed) {
+            const bool started =
+                core::RimeEngine::Instance().StartMaintenance(true);
+            log::WriteWarn("未部署 → 触发部署，start=%d（部署期间按键将放行）",
+                           static_cast<int>(started));
         }
         // 载入用户设置并应用（每页候选数、方案列表），使设置真正生效。
         {
@@ -340,18 +352,37 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         }
         // 注册语言栏项（输入指示器）：显示 logo / 中英状态，支持单击切换、右键设置。
         // 没有这一步，任务栏只有一个空白条目，且无法从指示器切换中/英。
-        if (!threadMgr_->QueryInterface(IID_ITfLangBarItemMgr,
-                                        reinterpret_cast<void**>(&langBarMgr_)) ||
-            !langBarMgr_) {
+        // 取管理器优先用 TSF 官方创建函数 TF_CreateLangBarItemMgr（mozc 等成熟
+        // 输入法都走这条路），失败再退回 threadMgr->QueryInterface。
+        HRESULT lbHr = E_FAIL;
+        {
+            using CreateFn = HRESULT(WINAPI*)(ITfLangBarItemMgr**);
+            HMODULE msctf = GetModuleHandleW(L"msctf.dll");
+            auto fn = msctf ? reinterpret_cast<CreateFn>(
+                                  GetProcAddress(msctf,
+                                                 "TF_CreateLangBarItemMgr"))
+                            : nullptr;
+            if (fn) {
+                lbHr = fn(&langBarMgr_);
+            }
+            if (FAILED(lbHr) || !langBarMgr_) {
+                lbHr = threadMgr_->QueryInterface(
+                    IID_ITfLangBarItemMgr,
+                    reinterpret_cast<void**>(&langBarMgr_));
+            }
+        }
+        if (FAILED(lbHr) || !langBarMgr_) {
+            // 常见原因：IID 与系统对象不一致（重复 DEFINE_GUID）、或无语言栏。
+            log::WriteWarn("语言栏 GetMgr 失败 hr=0x%08X（无语言栏时正常）",
+                           static_cast<unsigned>(lbHr));
             langBarMgr_ = nullptr;
+        } else {
+            log::WriteInfo("语言栏管理器已获取");
         }
         if (langBarMgr_) {
-            DWORD cookie = TF_INVALID_COOKIE;
-            if (SUCCEEDED(langBarMgr_->AdviseItemSink(
-                    static_cast<ITfLangBarItemSink*>(this), &cookie,
-                    GUID_XimeLangBarItem))) {
-                langBarSinkCookie_ = cookie;
-            }
+            // 顺序很重要：必须先 AddItem 让语言栏认识我们的项，再 AdviseItemSink。
+            // 反过来的话 AdviseItemSink 会因"项不存在"返回 E_INVALIDARG
+            // （0x80070057），语言栏项永远注册不上。
             langBarButton_ = new (std::nothrow) LangBarButton(
                 static_cast<ITfLangBarItemSink*>(this));
             if (langBarButton_) {
@@ -364,23 +395,33 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
                         }
                     },
                     [](void* ctx) {
-                        // 右键/菜单：打开设置（Ask Rime 的 settings.json 目录）。
+                        // 右键/菜单：打开设置（打开 settings.json 所在目录）。
                         auto* self = static_cast<XimeTextService*>(ctx);
                         self->OpenSettings();
                     });
                 // 与当前 ascii 状态对齐（重新激活时可能已经是英文）。
                 langBarButton_->SetAsciiMode(
                     core::RimeEngine::Instance().IsAsciiMode());
-                if (FAILED(langBarMgr_->AddItem(
-                        static_cast<ITfLangBarItemButton*>(langBarButton_)))) {
-                    // 语言栏不可用（如无语言栏的系统）不影响输入主体。
+                // 先 AddItem，成功后再 AdviseItemSink（顺序不能反）。
+                const HRESULT addHr = langBarMgr_->AddItem(
+                    static_cast<ITfLangBarItemButton*>(langBarButton_));
+                if (FAILED(addHr)) {
+                    log::WriteWarn("语言栏 AddItem 失败 hr=0x%08X",
+                                   static_cast<unsigned>(addHr));
                     langBarButton_->Release();
                     langBarButton_ = nullptr;
+                } else {
+                    // LangBarButton 构造时已持有 ITfLangBarItemSink 并自行
+                    // 通过 NotifyUpdate 通知语言栏，无需在此重复 AdviseItemSink。
+                    log::WriteInfo("语言栏 AddItem 成功，图标/中英状态已就绪");
                 }
             }
         }
 
         activated_ = true;
+        log::WriteInfo("Activate 完成（插件=%s 语言栏=%s）",
+                       pluginManager_ ? "已加载" : "无",
+                       langBarButton_ ? "已注册" : "不可用");
         return S_OK;
     } catch (...) {
         return E_FAIL;
@@ -428,11 +469,38 @@ STDMETHODIMP XimeTextService::Deactivate() {
         }
         if (keystrokeMgr_) {
             keystrokeMgr_->UnadviseKeyEventSink(clientId_);
+            // 撤销 Activate 里注册的保留键。不撤销的话 Shift/F4 会永久绑定在
+            // TSF 里（指向已失效的 clientId），重激活时 PreserveKey 返回
+            // TF_E_ALREADY_EXISTS 被忽略，同线程其它输入法也会被我们的残留
+            // 保留键吃掉这两个键。
+            TF_PRESERVEDKEY pkShift = {};
+            pkShift.uVKey = VK_SHIFT;
+            pkShift.uModifiers = 0;
+            keystrokeMgr_->UnpreserveKey(GUID_XimeToggleAsciiKey, &pkShift);
+            TF_PRESERVEDKEY pkCycle = {};
+            pkCycle.uVKey = VK_F4;
+            pkCycle.uModifiers = 0;
+            keystrokeMgr_->UnpreserveKey(GUID_XimeCycleSchemaKey, &pkCycle);
         }
         if (threadMgrSource_ && threadMgrSinkCookie_ != TF_INVALID_COOKIE) {
             threadMgrSource_->UnadviseSink(threadMgrSinkCookie_);
             threadMgrSinkCookie_ = TF_INVALID_COOKIE;
         }
+
+        // 结束残留组合（含清空组合范围文本）。直接 SafeRelease 会把预编辑串
+        // 永久留在用户文档里 —— 切换输入法时文档里冒出 "nihao"。
+        if (composition_ && context_) {
+            SyncEdit(context_, clientId_,
+                     [this](TfEditCookie ec) -> HRESULT {
+                         EndCompositionInSession(context_, ec);
+                         return S_OK;
+                     });
+        }
+        if (composition_) {
+            SafeRelease(composition_);
+            composition_ = nullptr;
+        }
+        lastCandidates_.clear();
 
         // 先清除引擎中的插件变换回调（它捕获 pluginManager_ 裸指针），
         // 否则随后 pluginManager_ 释放后回调成为悬垂指针，重激活时 UAF。
@@ -626,6 +694,7 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         }
 
         if (!core::IsRimeKey(vk)) {
+            log::WriteDebug("key 0x%02X 非引擎键 → 放行", vk);
             return S_OK;
         }
 
@@ -633,6 +702,12 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
             ProcessInputKey(pic, vk, shift, ctrl, alt, capslock);
         // 仅当引擎真正处理或产生提交/组合/候选时拦截；否则放行给应用。
         *pfEaten = core::KeyEatPolicy::ShouldEat(result) ? TRUE : FALSE;
+        log::WriteDebug("key 0x%02X processed=%d preedit='%s' commit='%s' cands=%zu eat=%d",
+                        vk, static_cast<int>(result.processed),
+                        result.preeditText.c_str(),
+                        result.committedText.c_str(),
+                        result.candidates.size(),
+                        static_cast<int>(*pfEaten));
         return S_OK;
     } catch (...) {
         return S_OK;
@@ -644,14 +719,29 @@ bool XimeTextService::EnsureSession() {
         return true;
     }
     // 兜底：仍未有编译产物时补一次部署（可能上次部署被销毁/中断）。
-    if (!core::RimeEngine::Instance().IsDeployed()) {
+    const bool deployed = core::RimeEngine::Instance().IsDeployed();
+    if (!deployed) {
         core::RimeEngine::Instance().StartMaintenance(true);
     }
-    // 首启部署可能仍在进行：等待其完成再建会话（有上限，避免永久阻塞）。
-    for (int i = 0; i < 900 && core::RimeEngine::Instance().IsMaintaining(); ++i) {
-        Sleep(100);
+    // 绝不能在按键回调里等待部署完成。本函数由 OnKeyDown/OnPreservedKey/
+    // 语言栏点击调用，全部跑在宿主 UI 线程上；原先 Sleep(100) 最多 900 次
+    // （=90 秒）会把 explorer/Word 冻成"未响应"，用户只能强杀进程。
+    // 部署期间直接放弃本次按键（不吞键、不建会话），由用户下次按键自然重试。
+    if (core::RimeEngine::Instance().IsMaintaining()) {
+        log::WriteDebug("EnsureSession: 部署进行中 → 放行本次按键");
+        return false;
+    }
+    // 无产物但也没在部署 → 触发过 StartMaintenance，本次仍让按键放行。
+    if (!core::RimeEngine::Instance().IsDeployed()) {
+        log::WriteWarn("EnsureSession: 仍无部署产物（data 目录缺方案？）→ 放行按键");
+        return false;
     }
     hasSession_ = core::RimeEngine::Instance().CreateSession();
+    if (!hasSession_) {
+        log::WriteError("EnsureSession: CreateSession 失败");
+    } else {
+        log::WriteInfo("EnsureSession: 会话已建立");
+    }
     return hasSession_;
 }
 
@@ -882,12 +972,15 @@ STDMETHODIMP XimeTextService::OnUpdate(DWORD dwFlags) {
 }
 
 void XimeTextService::SyncLangBarState() {
-    if (!langBarButton_ || !langBarSink_) {
+    if (!langBarButton_) {
         return;
     }
+    // 按引擎真实状态刷新（不要用本地取反，否则切换失败时图标与状态不一致）。
     langBarButton_->SetAsciiMode(core::RimeEngine::Instance().IsAsciiMode());
-    // 通知语言栏重取图标/文字/提示。
-    langBarSink_->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
+    // 由 LangBarButton 自己向语言栏发通知（它构造时已拿到 ITfLangBarItemSink）。
+    // 原先这里判 langBarSink_ 后调用 —— 而 langBarSink_ 从未赋值、恒为空，
+    // 导致切中英后图标永远不刷新。
+    langBarButton_->NotifyUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
 }
 
 void XimeTextService::OpenSettings() {
@@ -928,11 +1021,22 @@ void XimeTextService::EndComposition(ITfContext* context) {
 
 void XimeTextService::EndCompositionInSession(ITfContext* context,
                                               TfEditCookie ec) {
-    if (composition_) {
-        composition_->EndComposition(ec);
-        SafeRelease(composition_);
-        composition_ = nullptr;
+    if (!composition_) {
+        return;
     }
+    // 关键：ITfComposition::EndComposition 只是移除组合属性，**不会删除文本**。
+    // 直接 End 会把预编辑串（如 "nihao"）永久留在用户文档里，随后
+    // InsertTextAtSelection 再插入候选 → 文档变成 "nihao你好"。
+    // 所以必须先在同一 edit session 内把组合范围清空，再结束组合。
+    ITfRange* range = nullptr;
+    if (SUCCEEDED(composition_->GetRange(&range)) && range) {
+        range->SetText(ec, 0, L"", 0);
+        SafeRelease(range);
+    }
+    composition_->EndComposition(ec);
+    SafeRelease(composition_);
+    composition_ = nullptr;
+    (void)context;
 }
 
 ITfContext* XimeTextService::CurrentContext() const {

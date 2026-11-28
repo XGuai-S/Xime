@@ -28,6 +28,13 @@ public:
     void SetAsciiMode(bool ascii) { ascii_ = ascii; }
     bool AsciiMode() const { return ascii_; }
 
+    // 主动通知语言栏重取图标/文字/提示（sink 在构造时已持有）。
+    void NotifyUpdate(DWORD flags) {
+        if (sink_) {
+            sink_->OnUpdate(flags);
+        }
+    }
+
     // 设置单击切换（中/英）与双击（打开设置）的回调。
     using Action = void (*)(void* ctx);
     void SetHandlers(void* ctx, Action onToggle, Action onConfig) {
