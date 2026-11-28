@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(xime-desktop VERSION 3.4.70 LANGUAGES CXX)
+project(xime-desktop VERSION 3.4.70 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,24 @@ option(XIME_BUILD_RIME "从捆绑源码构建 librime（含 T9 定制）" ON)
 
 if(XIME_BUILD_RIME)
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RimeWindows.cmake")
+endif()
+
+# 插件宿主：内置 QuickJS（vendored 源码）。C 源，-O0 保证本机编译速度。
+add_library(xime-quickjs STATIC
+  third_party/quickjs/quickjs.c
+  third_party/quickjs/libregexp.c
+  third_party/quickjs/libunicode.c
+  third_party/quickjs/libbf.c
+  third_party/quickjs/cutils.c
+)
+target_include_directories(xime-quickjs PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs")
+target_compile_definitions(xime-quickjs PRIVATE CONFIG_VERSION="2024-01-13" CONFIG_BIGNUM)
+if(NOT MSVC)
+  target_compile_definitions(xime-quickjs PRIVATE _GNU_SOURCE __STDC_CONSTANT_MACROS)
+  target_compile_options(xime-quickjs PRIVATE -O0 -w)
+  target_link_libraries(xime-quickjs PUBLIC m)
+else()
+  target_compile_options(xime-quickjs PRIVATE /O1)
 endif()
 
 # TSF 前端 DLL。
@@ -33,6 +51,7 @@ add_library(xime-tsf SHARED
   src/ai/AiService.cpp
   src/clipboard/ClipboardStore.cpp
   src/clipboard/WinClipboard.cpp
+  src/plugins/PluginHost.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -60,7 +79,7 @@ else()
     -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
 endif()
 target_link_libraries(xime-tsf PRIVATE
-  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32)
+  ole32 uuid user32 gdi32 comctl32 shell32 shlwapi ws2_32 xime-quickjs)
 if(MSVC)
   # msctf 是 MSVC/Windows SDK 的导入库（TSF 接口 IID 与 msctf.dll）；
   # MinGW 无同名导入库，其 TSF IID 由 libuuid.a 提供，故仅 MSVC 追加。
@@ -250,4 +269,9 @@ if(XIME_BUILD_SMOKE)
     src/clipboard/WinClipboard.cpp)
   target_include_directories(xime-winclip-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-winclip-test PRIVATE user32)
+
+  # 插件宿主测试（QuickJS 加载 main.js 并调用 transform.candidates）。
+  add_executable(xime-plugin-test tests/PluginHostTest.cpp src/plugins/PluginHost.cpp)
+  target_include_directories(xime-plugin-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-plugin-test PRIVATE xime-quickjs)
 endif()
