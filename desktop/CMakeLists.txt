@@ -22,6 +22,7 @@ add_library(xime-tsf SHARED
   src/core/WordFreqStore.cpp
   src/core/AutoWordStore.cpp
   src/core/SchemeCodeIndex.cpp
+  src/core/SchemaListConfig.cpp
   src/backup/BackupArchive.cpp
   src/backup/BackupService.cpp
   src/core/KeyMap.cpp
@@ -76,7 +77,7 @@ add_dependencies(xime-register xime-tsf)
 # 引擎冒烟测试（仅在本机构建时启用；CI 亦可验证核心链路）。
 option(XIME_BUILD_SMOKE "构建引擎冒烟测试" ON)
 if(XIME_BUILD_SMOKE)
-  add_executable(xime-smoke tests/EngineSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp)
+  add_executable(xime-smoke tests/EngineSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
@@ -94,7 +95,7 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-smoke xime-tsf)
 
-  add_executable(xime-t9-smoke tests/T9Smoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp)
+  add_executable(xime-t9-smoke tests/T9Smoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-t9-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
@@ -112,7 +113,7 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-t9-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-t9-smoke xime-tsf)
 
-  add_executable(xime-page-smoke tests/PageSizeSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp)
+  add_executable(xime-page-smoke tests/PageSizeSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-page-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
@@ -130,7 +131,7 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-page-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-page-smoke xime-tsf)
 
-  add_executable(xime-word-smoke tests/WordFreqSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp)
+  add_executable(xime-word-smoke tests/WordFreqSmoke.cpp src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp)
   target_include_directories(xime-word-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${XIME_JNI_DIR}/librime/include"
@@ -184,4 +185,27 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-backup-test tests/BackupTest.cpp
     src/backup/BackupArchive.cpp src/backup/BackupService.cpp)
   target_include_directories(xime-backup-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 方案列表持久化单测。
+  add_executable(xime-schemalist-test tests/SchemaListTest.cpp src/core/SchemaListConfig.cpp)
+  target_include_directories(xime-schemalist-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 方案管理端到端：写 schema_list → 部署 → 选中。
+  add_executable(xime-schemadeploy-smoke tests/SchemaDeploySmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/SchemaListConfig.cpp)
+  target_include_directories(xime-schemadeploy-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src")
+  if(MSVC)
+    target_link_options(xime-schemadeploy-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-schemadeploy-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-schemadeploy-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-schemadeploy-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-schemadeploy-smoke xime-tsf)
 endif()
