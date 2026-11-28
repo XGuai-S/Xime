@@ -274,4 +274,24 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-plugin-test tests/PluginHostTest.cpp src/plugins/PluginHost.cpp)
   target_include_directories(xime-plugin-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-plugin-test PRIVATE xime-quickjs)
+
+  # 插件候选变换端到端：插件改候选 + 选词仍正确。
+  add_executable(xime-plugincand-smoke tests/PluginCandSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp
+    src/plugins/PluginHost.cpp)
+  target_include_directories(xime-plugincand-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src")
+  if(MSVC)
+    target_link_options(xime-plugincand-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-plugincand-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-plugincand-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-plugincand-smoke PRIVATE ole32 uuid xime-quickjs)
+  add_dependencies(xime-plugincand-smoke xime-tsf)
 endif()

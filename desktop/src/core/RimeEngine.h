@@ -4,12 +4,16 @@
 #include <rime_api.h>
 
 #include <map>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace xime {
+namespace plugins {
+class PluginHost;
+}
 namespace core {
 
 struct Candidate {
@@ -76,10 +80,14 @@ public:
     // 用当前方案单字码表给 word 合成可打出的编码（用于验证/记录）。
     std::vector<std::string> ComposeWordCodes(const std::string& word) const;
 
+    // 注入插件宿主；其 transform.candidates 会作用于候选文本（就位变换，保留引擎下标）。
+    void SetPluginHost(const std::shared_ptr<plugins::PluginHost>& host);
+
 private:
     RimeEngine() = default;
 
     void ReadCurrentState(ProcessResult& result) const;
+    void ApplyPluginTransform(ProcessResult& result);
     void FlushT9IfActive();
     void ReapplyPageSizeIfNeeded();
     void ApplyPageSizeOverrideLocked(const std::string& schemaId);
@@ -94,6 +102,8 @@ private:
     // 当前方案的单字码表（自动造词合成编码用）与临时造词词表。
     std::map<std::string, std::vector<std::string>> charCodes_;
     std::vector<std::string> autoTempWords_;
+    // 插件宿主（可为空）：提供 transform.candidates。
+    std::shared_ptr<plugins::PluginHost> pluginHost_;
 };
 
 } // namespace core

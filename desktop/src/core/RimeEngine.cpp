@@ -7,6 +7,7 @@
 #include "t9_processor.h"
 #include "WordFreqStore.h"
 #include "SchemeCodeIndex.h"
+#include "plugins/PluginHost.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -144,7 +145,34 @@ ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
         WordFreqStore::Instance().RecordCommit(preInput, result.committedText);
         WordFreqStore::Instance().Save();
     }
+    ApplyPluginTransform(result);
     return result;
+}
+
+void RimeEngine::SetPluginHost(
+    const std::shared_ptr<plugins::PluginHost>& host) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    pluginHost_ = host;
+}
+
+void RimeEngine::ApplyPluginTransform(ProcessResult& result) {
+    if (!pluginHost_ || !pluginHost_->transformAvailable() ||
+        result.isAsciiMode || result.candidates.empty()) {
+        return;
+    }
+    std::vector<std::string> texts;
+    texts.reserve(result.candidates.size());
+    for (const auto& c : result.candidates) {
+        texts.push_back(c.text);
+    }
+    const std::vector<std::string> out = pluginHost_->TransformCandidates(texts);
+    if (out.size() == result.candidates.size()) {
+        // 就位变换：保留每个候选原有的引擎下标，选词仍落回正确引擎词。
+        for (size_t i = 0; i < out.size(); ++i) {
+            result.candidates[i].text = out[i];
+        }
+    }
+    // 长度变化的变换不在此处理（会破坏引擎下标映射），保持原候选。
 }
 
 ProcessResult RimeEngine::SelectCandidateByEngineIndex(int engineIndex) {
@@ -179,6 +207,7 @@ ProcessResult RimeEngine::ReadResult(bool processed) {
         return result;
     }
     ReadCurrentState(result);
+    ApplyPluginTransform(result);
     return result;
 }
 
