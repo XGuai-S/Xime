@@ -453,6 +453,26 @@ if(XIME_BUILD_SMOKE)
   target_link_libraries(xime-ascii-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-ascii-smoke xime-tsf)
 
+  # 方案循环切换端到端：枚举已部署方案 → CycleSchema 依次切换回首个。
+  add_executable(xime-schemacycle-smoke tests/SchemaCycleSmoke.cpp
+    src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/CandidatePicker.cpp)
+  target_include_directories(xime-schemacycle-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  if(MSVC)
+    target_link_options(xime-schemacycle-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-schemacycle-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-schemacycle-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-schemacycle-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-schemacycle-smoke xime-tsf)
+
   # 设置生效端到端：写 settings.json → 加载应用 → 引擎 pageSize 生效。
   add_executable(xime-settingapply-smoke tests/SettingsApplySmoke.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp

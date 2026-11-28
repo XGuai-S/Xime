@@ -74,6 +74,11 @@ public:
     bool IsAsciiMode() const;
     // 切换中/英文（ascii_mode），返回切换后的状态。失败返回当前状态。
     bool ToggleAsciiMode();
+    // 已部署的方案 id 列表。
+    std::vector<std::string> SchemaList() const;
+    // 循环切到下一个方案（当前方案在列表中的下一个，末尾回到首个）。
+    // 返回切换后的方案 id；无可用方案返回空串。
+    std::string CycleSchema();
 
     // 每页候选数（对齐安卓设置 5..50）。写入当前方案 menu/page_size 并重建 Schema 生效。
     bool SetPageSize(int pageSize);
@@ -110,6 +115,7 @@ private:
     RimeEngine() = default;
 
     void ReadCurrentState(ProcessResult& result) const;
+    std::string CurrentSchemaLocked() const;
     void ApplyPluginTransform(ProcessResult& result);
     void FlushT9IfActive();
     void ReapplyPageSizeIfNeeded();

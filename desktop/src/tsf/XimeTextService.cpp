@@ -176,6 +176,12 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
         pk.uModifiers = 0;
         keystrokeMgr_->PreserveKey(clientId_, GUID_XimeToggleAsciiKey, &pk,
                                    nullptr, 0);
+        // 方案切换保留键（F4，循环切到下一个已部署方案）。
+        TF_PRESERVEDKEY pkCycle = {};
+        pkCycle.uVKey = VK_F4;
+        pkCycle.uModifiers = 0;
+        keystrokeMgr_->PreserveKey(clientId_, GUID_XimeCycleSchemaKey, &pkCycle,
+                                   nullptr, 0);
     }
 
     // 初始化 librime：用户目录 %LOCALAPPDATA%\Xime，共享数据目录取 DLL 同级 data。
@@ -397,12 +403,19 @@ STDMETHODIMP XimeTextService::OnPreservedKey(ITfContext* pic, REFGUID rguid,
                                              BOOL* pfEaten) {
     (void)pic;
     *pfEaten = FALSE;
-    if (!IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
+    if (IsEqualGUID(rguid, GUID_XimeToggleAsciiKey)) {
+        if (EnsureSession()) {
+            core::RimeEngine::Instance().ToggleAsciiMode();
+            *pfEaten = TRUE;
+        }
         return S_OK;
     }
-    if (EnsureSession()) {
-        core::RimeEngine::Instance().ToggleAsciiMode();
-        *pfEaten = TRUE;
+    if (IsEqualGUID(rguid, GUID_XimeCycleSchemaKey)) {
+        if (EnsureSession()) {
+            core::RimeEngine::Instance().CycleSchema();
+            *pfEaten = TRUE;
+        }
+        return S_OK;
     }
     return S_OK;
 }

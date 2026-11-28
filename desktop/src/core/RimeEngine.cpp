@@ -447,6 +447,68 @@ bool RimeEngine::SelectSchema(const std::string& schemaId) {
     return ok;
 }
 
+std::vector<std::string> RimeEngine::SchemaList() const {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    std::vector<std::string> ids;
+    if (!HasSession()) {
+        return ids;
+    }
+    RimeSchemaList list = {};
+    if (!rime_->get_schema_list(&list)) {
+        return ids;
+    }
+    for (size_t i = 0; i < list.size; ++i) {
+        if (list.list[i].schema_id) {
+            ids.push_back(list.list[i].schema_id);
+        }
+    }
+    rime_->free_schema_list(&list);
+    return ids;
+}
+
+std::string RimeEngine::CycleSchema() {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    if (!HasSession()) {
+        return "";
+    }
+    RimeSchemaList list = {};
+    if (!rime_->get_schema_list(&list)) {
+        return "";
+    }
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < list.size; ++i) {
+        if (list.list[i].schema_id) {
+            ids.push_back(list.list[i].schema_id);
+        }
+    }
+    rime_->free_schema_list(&list);
+    if (ids.empty()) {
+        return "";
+    }
+    const std::string current = CurrentSchemaLocked();
+    size_t idx = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] == current) {
+            idx = (i + 1) % ids.size();
+            break;
+        }
+    }
+    const std::string next = ids[idx];
+    if (rime_->select_schema(session_, next.c_str())) {
+        BuildAutoIndexLocked(next);
+        return next;
+    }
+    return "";
+}
+
+std::string RimeEngine::CurrentSchemaLocked() const {
+    char buffer[256] = {0};
+    if (rime_->get_current_schema(session_, buffer, sizeof(buffer))) {
+        return std::string(buffer);
+    }
+    return "";
+}
+
 void RimeEngine::BuildAutoIndex(const std::string& schemaId) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     BuildAutoIndexLocked(schemaId);
