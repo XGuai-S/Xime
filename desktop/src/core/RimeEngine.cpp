@@ -395,6 +395,18 @@ void RimeEngine::ClearComposition() {
     }
 }
 
+ProcessResult RimeEngine::ChangePage(bool backward) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    ProcessResult result;
+    if (!HasSession()) {
+        return result;
+    }
+    result.processed = rime_->change_page(session_, backward ? 1 : 0) != 0;
+    FlushT9IfActive();
+    ReadCurrentState(result);
+    return result;
+}
+
 std::string RimeEngine::CurrentSchema() const {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     if (!HasSession()) {

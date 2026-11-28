@@ -342,6 +342,25 @@ STDMETHODIMP XimeTextService::OnKeyDown(ITfContext* pic, WPARAM wParam,
         return S_OK;
     }
 
+    // 候选翻页：仅在候选窗可见时拦截，PageUp/PageDown 与 -/= 翻页。
+    if (candidateWindow_ && candidateWindow_->IsVisible()) {
+        bool backward = false;
+        bool paging = true;
+        if (vk == VK_PRIOR || vk == VK_OEM_MINUS) {
+            backward = true;
+        } else if (vk != VK_NEXT && vk != VK_OEM_PLUS) {
+            paging = false;
+        }
+        if (paging) {
+            const auto result = core::RimeEngine::Instance().ChangePage(backward);
+            if (result.processed) {
+                ApplyEngineResult(pic, result);
+            }
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+    }
+
     if (candidateWindow_ && candidateWindow_->IsVisible() &&
         HandleCandidateSelection(pic, vk)) {
         *pfEaten = TRUE;

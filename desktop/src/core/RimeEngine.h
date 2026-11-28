@@ -64,6 +64,9 @@ public:
     bool SetInput(const std::string& input);
     void ClearComposition();
 
+    // 候选翻页：backward=false 下一页。返回 false 表示无此页/无会话。
+    ProcessResult ChangePage(bool backward);
+
     std::string CurrentSchema() const;
     bool SelectSchema(const std::string& schemaId);
     bool IsAsciiMode() const;
