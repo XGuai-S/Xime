@@ -37,8 +37,36 @@ struct Parser {
     const std::string& s;
     size_t i = 0;
     bool ok = true;
+    // 递归深度：ParseObject/ParseArray 相互递归，深嵌套（如 "[[[[..."）会耗尽
+    // C++ 栈。输入来自 AI 响应、clipboard.json、settings.json 等不可信源，
+    // 必须设上限，否则一个畸形响应就能让 TSF 宿主进程栈溢出崩溃。
+    int depth = 0;
+    static constexpr int kMaxDepth = 64;
 
     explicit Parser(const std::string& text) : s(text) {}
+
+    // 进入容器解析时自增深度；超出上限则标记失败。
+    bool EnterContainer() {
+        if (++depth > kMaxDepth) {
+            ok = false;
+            return false;
+        }
+        return true;
+    }
+    void LeaveContainer() { --depth; }
+
+    // RAII 保证所有 return 路径都正确配对（ParseObject/ParseArray 多出口）。
+    struct DepthGuard {
+        Parser& p;
+        bool entered;
+        explicit DepthGuard(Parser& parser)
+            : p(parser), entered(parser.EnterContainer()) {}
+        ~DepthGuard() {
+            if (entered) {
+                p.LeaveContainer();
+            }
+        }
+    };
 
     void SkipWs() {
         while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) {
@@ -57,6 +85,9 @@ struct Parser {
 
     JsonValue ParseValue() {
         SkipWs();
+        if (!ok) {
+            return {};
+        }
         if (i >= s.size()) {
             ok = false;
             return {};
@@ -86,6 +117,10 @@ struct Parser {
     JsonValue ParseObject() {
         JsonValue v;
         v.type = JsonValue::Type::Object;
+        DepthGuard guard(*this);
+        if (!guard.entered) {
+            return v;
+        }
         if (!Consume('{')) {
             ok = false;
             return v;
@@ -126,6 +161,10 @@ struct Parser {
     JsonValue ParseArray() {
         JsonValue v;
         v.type = JsonValue::Type::Array;
+        DepthGuard guard(*this);
+        if (!guard.entered) {
+            return v;
+        }
         if (!Consume('[')) {
             ok = false;
             return v;

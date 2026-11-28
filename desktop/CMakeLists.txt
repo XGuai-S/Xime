@@ -633,6 +633,10 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-langbar-test tests/LangBarTest.cpp)
   target_include_directories(xime-langbar-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-langbar-test PRIVATE ole32 uuid)
+  # 恶意输入健壮性：深嵌套 JSON 不炸栈、畸形 ZIP 不越界读。
+  add_executable(xime-fuzz-test tests/MaliciousInputTest.cpp
+    src/ai/Json.cpp src/backup/BackupArchive.cpp)
+  target_include_directories(xime-fuzz-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
 # ---- 安装规则 ----
