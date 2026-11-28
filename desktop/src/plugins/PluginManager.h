@@ -1,0 +1,33 @@
+// 插件管理器：扫描插件目录（<dir>/<name>/main.js）加载全部插件，链式变换候选。
+#pragma once
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "PluginHost.h"
+
+namespace xime {
+namespace plugins {
+
+class PluginManager {
+public:
+    PluginManager() = default;
+    ~PluginManager();
+
+    // 扫描 dir 下的子目录（每个含 main.js），加载全部插件。返回成功加载数量。
+    size_t LoadDirectory(const std::string& dir, std::string* err);
+
+    // 依次对每个插件执行 transform.candidates；任一插件返回失败则跳过该插件。
+    std::vector<std::string> TransformCandidates(
+        const std::vector<std::string>& input);
+
+    size_t Count() const { return hosts_.size(); }
+    std::vector<std::string> Names() const;
+
+private:
+    std::vector<std::unique_ptr<PluginHost>> hosts_;
+};
+
+} // namespace plugins
+} // namespace xime

@@ -51,6 +51,9 @@ add_library(xime-tsf SHARED
   src/ai/AiService.cpp
   src/clipboard/ClipboardStore.cpp
   src/clipboard/WinClipboard.cpp
+  src/settings/SettingsStore.cpp
+  src/plugins/PluginHost.cpp
+  src/plugins/PluginManager.cpp
   src/plugins/PluginHost.cpp
   src/voice/Wav.cpp
   src/voice/VoiceService.cpp
@@ -309,4 +312,15 @@ if(XIME_BUILD_SMOKE)
     src/ai/AiHttp.cpp src/ai/AiProtocol.cpp src/ai/Json.cpp)
   target_include_directories(xime-aihttp-winhttp-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(xime-aihttp-winhttp-test PRIVATE ws2_32 winhttp)
+
+  # 设置存储往返测试。
+  add_executable(xime-settings-test tests/SettingsStoreTest.cpp
+    src/settings/SettingsStore.cpp src/ai/Json.cpp)
+  target_include_directories(xime-settings-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # 插件管理器测试（目录扫描 + 链式变换）。
+  add_executable(xime-pluginmgr-test tests/PluginManagerTest.cpp
+    src/plugins/PluginManager.cpp src/plugins/PluginHost.cpp)
+  target_include_directories(xime-pluginmgr-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(xime-pluginmgr-test PRIVATE xime-quickjs)
 endif()
