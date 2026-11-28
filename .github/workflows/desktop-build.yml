@@ -1,0 +1,58 @@
+name: Desktop Windows Build
+
+on:
+  push:
+    branches: [desktop]
+    tags: ['v*-desktop']
+  pull_request:
+    branches: [desktop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.31.x'
+
+      - name: Configure
+        run: cmake -S desktop -B desktop/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build desktop/build --config Release --parallel 2
+
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $dll = 'desktop/build/xime-tsf.dll'
+          $exe = 'desktop/build/xime-register.exe'
+          if (-not (Test-Path $dll)) { throw "缺少 $dll" }
+          if (-not (Test-Path $exe)) { throw "缺少 $exe" }
+          if (-not (Test-Path 'desktop/build/data/default.yaml')) { throw "缺少 data/default.yaml" }
+          Get-Item $dll,$exe | Select-Object Name,Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xime-desktop-windows-x64
+          path: |
+            desktop/build/xime-tsf.dll
+            desktop/build/xime-register.exe
+            desktop/build/data/
+          if-no-files-found: error

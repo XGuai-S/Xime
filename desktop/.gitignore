@@ -1,0 +1,6 @@
+build/
+build-log.txt
+smoke-user/
+*.obj
+*.pdb
+*.ilk
