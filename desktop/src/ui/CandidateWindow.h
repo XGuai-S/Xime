@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,10 @@ public:
     void Hide();
     bool IsVisible() const;
 
+    // 鼠标单击候选行回调（displayIndex 为显示位）。
+    using SelectCallback = std::function<void(int displayIndex)>;
+    void SetSelectCallback(SelectCallback cb) { selectCallback_ = std::move(cb); }
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                     LPARAM lParam);
@@ -35,6 +40,7 @@ private:
     HWND list_ = nullptr;
     bool visible_ = false;
     bool registered_ = false;
+    SelectCallback selectCallback_;
 };
 
 } // namespace ui

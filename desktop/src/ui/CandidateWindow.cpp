@@ -69,6 +69,21 @@ LRESULT CALLBACK CandidateWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
         SetWindowLongPtrW(hwnd, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(
                               reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams));
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    if (msg == WM_COMMAND) {
+        auto* self = reinterpret_cast<CandidateWindow*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        const WORD code = HIWORD(wParam);
+        // ListBox 单击选中(LBN_SELCHANGE)或双击(LBN_DBLCLK)都触发选词。
+        if (self && (code == LBN_SELCHANGE || code == LBN_DBLCLK) &&
+            self->selectCallback_) {
+            const LRESULT sel = SendMessageW(self->list_, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR && sel >= 0) {
+                self->selectCallback_(static_cast<int>(sel));
+            }
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }

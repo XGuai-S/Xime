@@ -2,6 +2,7 @@
 
 #include "../core/KeyMap.h"
 #include "../core/RimeEngine.h"
+#include "../core/CandidatePicker.h"
 #include "../plugins/PluginManager.h"
 #include "../clipboard/ClipboardStore.h"
 #include "../ui/CandidateWindow.h"
@@ -203,6 +204,22 @@ STDMETHODIMP XimeTextService::Activate(ITfThreadMgr* ptim, TfClientId tid) {
     hasSession_ = false;
     if (!candidateWindow_) {
         candidateWindow_ = new (std::nothrow) ui::CandidateWindow();
+        if (candidateWindow_) {
+            candidateWindow_->SetSelectCallback(
+                [this](int displayIndex) {
+                    // 鼠标点击与数字键走同一套选词映射（词频重排/造词/插件候选）。
+                    if (!context_) {
+                        return;
+                    }
+                    const core::PickAction action =
+                        core::CandidatePicker::Resolve(lastCandidates_,
+                                                       displayIndex);
+                    // 鼠标点击无数字键兜底，action 为空时不干预。
+                    if (!action.IsNone()) {
+                        ApplyPickAction(context_, action, 0);
+                    }
+                });
+        }
     }
 
     // 启动加载插件：DLL 同级 plugins/ 目录下的所有 <name>/main.js。
@@ -430,37 +447,38 @@ bool XimeTextService::EnsureSession() {
 }
 
 bool XimeTextService::HandleCandidateSelection(ITfContext* context,
-                                               unsigned int vk) {
-    int displayIndex = -1;
-    if (vk >= '1' && vk <= '9') {
-        displayIndex = static_cast<int>(vk - '1');
-    } else if (vk == '0') {
-        displayIndex = 9;
-    }
+                                                unsigned int vk) {
+    const int displayIndex = core::CandidatePicker::DisplayIndexFromDigit(vk);
     if (displayIndex < 0) {
         return false;
     }
-    // 候选可能被词频重排：数字键对应「显示位」，选词要回到它原本的引擎下标。
-    if (displayIndex < static_cast<int>(lastCandidates_.size())) {
-        const auto& cand = lastCandidates_[displayIndex];
-        if (cand.engineIndex >= 0) {
-            const auto result =
-                core::RimeEngine::Instance().SelectCandidateByEngineIndex(
-                    cand.engineIndex);
-            ApplyEngineResult(context, result);
-            return true;
-        }
-        // engineIndex < 0：自动造词候选，非引擎词，直接上屏其文本并清空引擎组合。
-        core::RimeEngine::Instance().ClearComposition();
-        CommitText(context, cand.text);
-        lastCandidates_.clear();
-        return true;
-    }
-    // 无候选映射时退回引擎页内选词。
-    const auto result =
-        core::RimeEngine::Instance().ProcessKeyAndGetResult(vk, 0);
-    ApplyEngineResult(context, result);
+    const core::PickAction action =
+        core::CandidatePicker::Resolve(lastCandidates_, displayIndex);
+    ApplyPickAction(context, action, vk);
     return true;
+}
+
+void XimeTextService::ApplyPickAction(ITfContext* context,
+                                      const core::PickAction& action,
+                                      unsigned int fallbackVk) {
+    if (action.IsNone()) {
+        // 无映射：退回引擎页内数字选词。
+        const auto result =
+            core::RimeEngine::Instance().ProcessKeyAndGetResult(fallbackVk, 0);
+        ApplyEngineResult(context, result);
+        return;
+    }
+    if (action.type == core::PickAction::Type::kEngine) {
+        const auto result =
+            core::RimeEngine::Instance().SelectCandidateByEngineIndex(
+                action.engineIndex);
+        ApplyEngineResult(context, result);
+        return;
+    }
+    // kCommitText：自动造词/插件新增候选，直接上屏其文本并清空引擎组合。
+    core::RimeEngine::Instance().ClearComposition();
+    CommitText(context, action.text);
+    lastCandidates_.clear();
 }
 
 void XimeTextService::ProcessInputKey(ITfContext* context, unsigned int vk,

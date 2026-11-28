@@ -4,6 +4,7 @@
 #include "Guids.h"
 
 #include "../core/RimeEngine.h"
+#include "../core/CandidatePicker.h"
 
 #include <windows.h>
 #include <msctf.h>
@@ -73,6 +74,8 @@ public:
 private:
     bool EnsureSession();
     bool HandleCandidateSelection(ITfContext* context, unsigned int vk);
+    void ApplyPickAction(ITfContext* context, const core::PickAction& action,
+                         unsigned int fallbackVk);
     void ProcessInputKey(ITfContext* context, unsigned int vk,
                          bool shift, bool ctrl, bool alt, bool capslock);
     void ApplyEngineResult(ITfContext* context,

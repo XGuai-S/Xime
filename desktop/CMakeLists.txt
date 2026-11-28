@@ -37,6 +37,7 @@ endif()
 # TSF 前端 DLL。
 add_library(xime-tsf SHARED
   src/core/RimeEngine.cpp
+  src/core/CandidatePicker.cpp
   src/core/WordFreqStore.cpp
   src/core/AutoWordStore.cpp
   src/core/SchemeCodeIndex.cpp
@@ -409,4 +410,14 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-pageflip-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-pageflip-smoke xime-tsf)
+
+  # 候选选取解析单测（纯逻辑，数字键与鼠标点击共用）。
+  add_executable(xime-picker-test tests/CandidatePickerTest.cpp
+    src/core/CandidatePicker.cpp)
+  target_include_directories(xime-picker-test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
 endif()
