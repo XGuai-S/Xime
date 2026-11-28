@@ -63,6 +63,7 @@ private:
     RimeEngine() = default;
 
     void ReadCurrentState(ProcessResult& result) const;
+    void FlushT9IfActive();
     void ReapplyPageSizeIfNeeded();
 
     RimeApi* rime_ = nullptr;

@@ -112,7 +112,9 @@ bool RimeEngine::ProcessKey(int keycode, int mask) {
     if (!HasSession()) {
         return false;
     }
-    return rime_->process_key(session_, keycode, mask) != 0;
+    const bool processed = rime_->process_key(session_, keycode, mask) != 0;
+    FlushT9IfActive();
+    return processed;
 }
 
 ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
@@ -122,8 +124,18 @@ ProcessResult RimeEngine::ProcessKeyAndGetResult(int keycode, int mask) {
         return result;
     }
     result.processed = rime_->process_key(session_, keycode, mask) != 0;
+    FlushT9IfActive();
     ReadCurrentState(result);
     return result;
+}
+
+void RimeEngine::FlushT9IfActive() {
+    // T9 处理器采用异步 flush 模型：processKey 内只标记待发送内容
+    // （SendToRime），需在读取状态前显式执行，才能让引擎真正 compose。
+    // 与 Android JNI 的 nativeT9FlushRimeInput 保持一致。
+    if (rime::T9Processor* t9 = rime::T9ProcessorRequire()) {
+        t9->FlushRimeInput();
+    }
 }
 
 ProcessResult RimeEngine::ReadResult(bool processed) {

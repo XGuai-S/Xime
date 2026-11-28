@@ -88,4 +88,22 @@ if(XIME_BUILD_SMOKE)
   endif()
   target_link_libraries(xime-smoke PRIVATE ole32 uuid)
   add_dependencies(xime-smoke xime-tsf)
+
+  add_executable(xime-t9-smoke tests/T9Smoke.cpp src/core/RimeEngine.cpp)
+  target_include_directories(xime-t9-smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${XIME_JNI_DIR}/librime/include"
+    "${XIME_JNI_DIR}/librime/src"
+    "${XIME_JNI_DIR}/librime-t9/src"
+    "${CMAKE_BINARY_DIR}/librime/src"
+  )
+  if(MSVC)
+    target_link_options(xime-t9-smoke PRIVATE "/WHOLEARCHIVE:rime-static.lib")
+    target_link_libraries(xime-t9-smoke PRIVATE rime-static)
+  else()
+    target_link_libraries(xime-t9-smoke PRIVATE
+      -Wl,--whole-archive rime-static -Wl,--no-whole-archive)
+  endif()
+  target_link_libraries(xime-t9-smoke PRIVATE ole32 uuid)
+  add_dependencies(xime-t9-smoke xime-tsf)
 endif()
