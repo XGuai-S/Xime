@@ -30,6 +30,7 @@ add_library(xime-tsf SHARED
   src/ai/AiProtocol.cpp
   src/ai/AiHttp.cpp
   src/ai/AiProviderConfig.cpp
+  src/ai/AiService.cpp
   src/tsf/XimeTextService.cpp
   src/tsf/Dll.cpp
   src/ui/CandidateWindow.cpp
@@ -198,6 +199,12 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-aiprotocol-test tests/AiProtocolTest.cpp
     src/ai/Json.cpp src/ai/AiProtocol.cpp)
   target_include_directories(xime-aiprotocol-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+  # AI 服务门面测试（润色开关 + LLM 请求/回退，http 桩）。
+  add_executable(xime-aiservice-test tests/AiServiceTest.cpp
+    src/ai/AiService.cpp src/ai/AiProviderConfig.cpp
+    src/ai/AiProtocol.cpp src/ai/Json.cpp)
+  target_include_directories(xime-aiservice-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
   # AI 传输层回环测试（Winsock 本机收发）。
   find_package(Threads REQUIRED)
