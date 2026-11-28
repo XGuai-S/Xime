@@ -7,7 +7,7 @@
 
 **一键安装**：`powershell -ExecutionPolicy Bypass -File desktop\tools\install.ps1`
 
-**踩过的两个致命坑（已修，勿回退）**：
+**踩过的三个致命坑（已修，勿回退）**：
 
 1. **COM 回调异常逃逸** → 宿主进程崩溃。15 个 TSF 回调原先都没有 `try/catch`，
    librime / 文件 IO / QuickJS 任一抛异常就跨越 COM 边界直接终止宿主，
@@ -15,6 +15,14 @@
    和资源管理器打崩。现在每个回调都有异常边界，`xime-exsafe-test` 锁定回归。
 2. **`pfEaten` 空指针** → 访问违例 `0xC0000005`（try/catch 兜不住）。
    `OnTestKeyDown/OnKeyUp/OnKeyDown/OnPreservedKey` 入口统一判空。
+3. **共享数据目录算错** → "只能打英文"。TSF 把 DLL 载入宿主进程，
+   `GetModuleFileNameW(nullptr, ...)` 返回宿主 EXE（explorer.exe）的路径，
+   data 被算成 `C:\Windows\data` → 引擎零方案 → 按键全部直通。
+   必须用本 DLL 的 HMODULE（`GetModuleHandleExW` + 本模块内锚点函数）。
+   `xime-pathresolve-test` / `xime-hostsim-test` 锁定回归。
+
+⚠️ **替换已注册的 DLL 后必须重启宿主进程**（explorer 等），否则进程仍映射旧映像，
+修复不生效。最稳的是重启系统。
 
 **部署误判**：`IsDeployed()` 原只看 `build/` 目录是否存在，而 rime 会提前创建
 空目录 → 误判"已部署"后永不重试 → 永远没有候选。现改为必须存在 `*.bin` 产物，
