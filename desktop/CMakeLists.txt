@@ -190,6 +190,11 @@ if(XIME_BUILD_SMOKE)
   add_executable(xime-schemalist-test tests/SchemaListTest.cpp src/core/SchemaListConfig.cpp)
   target_include_directories(xime-schemalist-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+  # AI 协议层单测（JSON + OpenAI 兼容请求/响应，纯逻辑）。
+  add_executable(xime-aiprotocol-test tests/AiProtocolTest.cpp
+    src/ai/Json.cpp src/ai/AiProtocol.cpp)
+  target_include_directories(xime-aiprotocol-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
   # 方案管理端到端：写 schema_list → 部署 → 选中。
   add_executable(xime-schemadeploy-smoke tests/SchemaDeploySmoke.cpp
     src/core/RimeEngine.cpp src/core/WordFreqStore.cpp src/core/SchemeCodeIndex.cpp src/core/SchemaListConfig.cpp)
