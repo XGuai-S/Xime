@@ -1,5 +1,5 @@
 build/
-build-log.txt
+build-log*.txt
 smoke-user/
 *.obj
 *.pdb
